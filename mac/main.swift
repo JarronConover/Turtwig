@@ -86,10 +86,9 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1500, height: 940),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered, defer: false)
         window.title = "Agent Box"
-        window.titlebarAppearsTransparent = true
         window.contentView = main
         window.setFrameAutosaveName("AgentBoxWindow")
         if window.frame.width < 600 { window.center() }
