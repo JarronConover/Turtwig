@@ -4,5 +4,8 @@
 # Prints nothing: SessionStart output would land in the session's context.
 set -u
 . "$(dirname "$0")/env.sh"
-[ -f /tmp/agent-box-booted ] || detach "$AGENT_BOX_DIR/bin/boot"
+if [ ! -f /tmp/agent-box-booted ]; then
+  log "boot triggered by ${AGENT_BOX_TRIGGER:-SessionStart}"
+  detach "$AGENT_BOX_DIR/bin/boot"
+fi
 exit 0

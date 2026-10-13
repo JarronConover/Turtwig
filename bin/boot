@@ -42,12 +42,14 @@ jq --arg sync "$AGENT_BOX_DIR/bin/turn-sync" --arg start "$AGENT_BOX_DIR/bin/ses
       | map(select(any(.hooks[]?; .command == cmd) | not))
       + [{hooks: [{type: "command", command: cmd}]}]);
   ensure("Stop"; $sync) | ensure("SubagentStop"; $sync) | ensure("SessionStart"; $start)
-' "$settings" > "$tmp" && cat "$tmp" > "$settings"
+  | if $box then .enableAllProjectMcpServers = true else . end
+' --argjson box "$([ "$AGENT_HOST" = box ] && echo true || echo false)" "$settings" > "$tmp" && cat "$tmp" > "$settings"
 rm -f "$tmp"
 
 if [ "$AGENT_HOST" = box ]; then
   # The template's startup claude otherwise sits on the first-run theme
-  # picker, and SessionStart (which runs this script) never fires.
+  # picker (and, without enableAllProjectMcpServers above, on the project
+  # MCP approval), and SessionStart, which runs this script, never fires.
   cfg="$HOME/.claude.json"
   [ -s "$cfg" ] || echo '{}' > "$cfg"
   tmp=$(mktemp)
@@ -55,7 +57,7 @@ if [ "$AGENT_HOST" = box ]; then
   rm -f "$tmp"
 
   # Second trigger: any ssh into the box runs boot if it hasn't run.
-  line='[ -f /tmp/agent-box-booted ] || "$HOME/agent-box/bin/session-start" < /dev/null'
+  line='[ -f /tmp/agent-box-booted ] || AGENT_BOX_TRIGGER=ssh "$HOME/agent-box/bin/session-start" < /dev/null'
   grep -qxF "$line" "$HOME/.bashrc" 2> /dev/null || printf '\n%s\n' "$line" >> "$HOME/.bashrc"
 fi
 
