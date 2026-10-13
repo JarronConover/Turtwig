@@ -362,20 +362,29 @@ def cmd_move(args):
     chat = find(args.chat)
     if chat["host"] == args.to:
         sys.exit(f"{chat['name']} is already on {args.to}")
-    if args.to == "mac":
-        box_dir = json.loads(on_box("_release", chat["id"]))["dir"]
-        git_state("pull", "-q", "--rebase", "origin", "state", check=False)
-        chat = find(chat["id"])
-        local = prepare_here(chat, "box")
-        copy_transcript("box", box_dir, "mac", local, chat["id"])
-        take_over(chat, local)
-        print(f"moved {chat['name']} to the Mac: {local}")
-    else:
-        release_here(chat)
-        box_dir = json.loads(on_box("_prepare", chat["id"], "mac"))["dir"]
-        copy_transcript("mac", chat["dir"], "box", box_dir, chat["id"])
-        on_box("_take", chat["id"], box_dir)
-        print(f"moved {chat['name']} to the box: {box_dir}")
+    try:
+        if args.to == "mac":
+            box_dir = json.loads(on_box("_release", chat["id"]))["dir"]
+            git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+            chat = find(chat["id"])
+            local = prepare_here(chat, "box")
+            copy_transcript("box", box_dir, "mac", local, chat["id"])
+            take_over(chat, local)
+            print(f"moved {chat['name']} to the Mac: {local}")
+        else:
+            release_here(chat)
+            box_dir = json.loads(on_box("_prepare", chat["id"], "mac"))["dir"]
+            copy_transcript("mac", chat["dir"], "box", box_dir, chat["id"])
+            on_box("_take", chat["id"], box_dir)
+            print(f"moved {chat['name']} to the box: {box_dir}")
+    except (SystemExit, subprocess.CalledProcessError) as err:
+        # Put the chat back where it was, running, so a failed move loses nothing.
+        if args.to == "mac":
+            on_box("start", chat["id"])
+        else:
+            git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+            cmd_start(argparse.Namespace(chat=chat["id"]))
+        sys.exit(f"move failed, chat left on {chat['host']}: {err}")
 
 
 def cmd__release(args):
