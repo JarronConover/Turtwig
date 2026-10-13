@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# wip-restore <worktree> [host]: put another host's latest WIP for this
+# branch into a clean worktree: its unpushed commits, plus its uncommitted
+# changes left uncommitted. host defaults to the other machine.
+set -euo pipefail
+. "$(dirname "$0")/env.sh"
+
+[ $# -ge 1 ] || { echo "usage: wip-restore <worktree> [box|mac]" >&2; exit 2; }
+top=$(git -C "$1" rev-parse --show-toplevel)
+from=${2:-$([ "$AGENT_HOST" = box ] && echo mac || echo box)}
+key=$(wip_key "$top") || { echo "not on a branch with an origin: $top" >&2; exit 1; }
+
+if [ -n "$(git -C "$top" status --porcelain)" ]; then
+  echo "worktree has local changes; commit or stash them first: $top" >&2
+  exit 1
+fi
+
+ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"
+git -C "$AGENT_SESSIONS_DIR" fetch -q origin "sessions/$from"
+if ! meta=$(git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.json" 2> /dev/null); then
+  echo "no WIP from $from for $key" >&2
+  exit 1
+fi
+bundle=$(mktemp)
+trap 'rm -f "$bundle"' EXIT
+git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.bundle" > "$bundle"
+
+head=$(jq -r .head <<< "$meta")
+snap=$(jq -r .snap <<< "$meta")
+git -C "$top" fetch -q origin
+git -C "$top" fetch -q "$bundle" refs/agent-box/wip
+
+if [ "$(git -C "$top" rev-parse HEAD)" != "$head" ]; then
+  if ! git -C "$top" merge-base --is-ancestor HEAD "$head"; then
+    echo "this branch has commits the $from WIP doesn't; not overwriting them" >&2
+    exit 1
+  fi
+  git -C "$top" reset -q --keep "$head"
+fi
+git -C "$top" restore --source="$snap" --worktree -- .
+
+echo "restored $key from $from (saved $(jq -r .at <<< "$meta"))"
+git -C "$top" status --short | head -20

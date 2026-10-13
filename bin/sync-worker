@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Make every queued worktree's WIP and all session transcripts durable on
+# the remote. Workers serialize on a lock; each drains the whole queue.
+set -u
+. "$(dirname "$0")/env.sh"
+
+mkdir -p "$AGENT_HOME" "$AGENT_QUEUE_DIR"
+exec 9> "$AGENT_HOME/sync.lock"
+flock -w 600 9 || { log "lock timeout"; exit 1; }
+
+# Snapshot the worktree (tracked changes, untracked non-ignored files, and
+# unpushed commits) as a bundle. Never touches HEAD, the index, or a branch.
+snapshot_worktree() {
+  local top key head tree snap out tmpidx size
+  top=$(git -C "$1" rev-parse --show-toplevel 2> /dev/null) || return 0
+  key=$(wip_key "$top") || return 0
+  head=$(git -C "$top" rev-parse HEAD 2> /dev/null) || return 0
+
+  tmpidx=$(mktemp)
+  cp "$(git -C "$top" rev-parse --absolute-git-dir)/index" "$tmpidx" 2> /dev/null || : > "$tmpidx"
+  GIT_INDEX_FILE=$tmpidx git -C "$top" add -A 2> /dev/null
+  tree=$(GIT_INDEX_FILE=$tmpidx git -C "$top" write-tree)
+  rm -f "$tmpidx"
+
+  out="$AGENT_SESSIONS_DIR/wip/$key"
+  if [ -f "$out.json" ] && [ "$(jq -r '.head + " " + .tree' "$out.json")" = "$head $tree" ]; then
+    return 0
+  fi
+
+  snap=$(git -C "$top" commit-tree "$tree" -p "$head" -m "agent-box wip")
+  git -C "$top" update-ref refs/agent-box/wip "$snap"
+  mkdir -p "$(dirname "$out")"
+  if ! git -C "$top" bundle create "$out.bundle.tmp" refs/agent-box/wip --not --remotes=origin > /dev/null 2>&1; then
+    rm -f "$out.bundle.tmp"
+    log "bundle failed: $top"
+    return 0
+  fi
+  mv "$out.bundle.tmp" "$out.bundle"
+  jq -n --arg path "$top" --arg branch "$(git -C "$top" symbolic-ref --short HEAD)" \
+    --arg head "$head" --arg tree "$tree" --arg snap "$snap" --arg host "$AGENT_HOST" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{path: $path, branch: $branch, head: $head, tree: $tree, snap: $snap, host: $host, at: $at}' > "$out.json"
+  size=$(wc -c < "$out.bundle")
+  [ "$size" -gt 52428800 ] && log "large wip bundle ($size bytes): $top"
+  return 0
+}
+
+sync_sessions() {
+  local s=$AGENT_SESSIONS_DIR
+  if [ -d "$CLAUDE_PROJECTS_DIR" ]; then
+    mkdir -p "$s/hosts/$AGENT_HOST/projects"
+    rsync -a "$CLAUDE_PROJECTS_DIR/" "$s/hosts/$AGENT_HOST/projects/"
+  fi
+  git -C "$s" add -A
+  if git -C "$s" rev-parse -q --verify HEAD > /dev/null; then
+    git -C "$s" diff --cached --quiet && [ ! -f "$AGENT_HOME/push-pending" ] && return 0
+    # One amended commit: the branch holds only the latest snapshot, and the
+    # push stays a small delta against the commit the remote already has.
+    git -C "$s" commit -q --amend --allow-empty -m "sessions snapshot ($AGENT_HOST)"
+  else
+    git -C "$s" commit -q --allow-empty -m "sessions snapshot ($AGENT_HOST)"
+  fi
+  if git -C "$s" push -q --force origin "HEAD:refs/heads/$SESSIONS_BRANCH" 2>> "$AGENT_LOG"; then
+    rm -f "$AGENT_HOME/push-pending"
+  else
+    touch "$AGENT_HOME/push-pending"
+    log "push failed; retrying on the next turn"
+  fi
+}
+
+ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"
+
+while :; do
+  shopt -s nullglob
+  entries=("$AGENT_QUEUE_DIR"/*)
+  shopt -u nullglob
+  for entry in "${entries[@]}"; do
+    snapshot_worktree "$(cat "$entry")"
+    rm -f "$entry"
+  done
+  sync_sessions
+  shopt -s nullglob
+  remaining=("$AGENT_QUEUE_DIR"/*)
+  shopt -u nullglob
+  [ ${#remaining[@]} -eq 0 ] && break
+done

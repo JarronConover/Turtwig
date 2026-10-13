@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Claude Code Stop / SubagentStop hook: queue this session's worktree, then
+# sync in the background. Prints nothing, so it adds nothing to the context.
+set -u
+. "$(dirname "$0")/env.sh"
+
+cwd=$(jq -r '.cwd // empty' 2> /dev/null)
+if [ -n "$cwd" ]; then
+  mkdir -p "$AGENT_QUEUE_DIR"
+  printf '%s\n' "$cwd" > "$AGENT_QUEUE_DIR/$(printf '%s' "$cwd" | git hash-object --stdin)"
+fi
+detach "$AGENT_BOX_DIR/bin/sync-worker"
+exit 0

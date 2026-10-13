@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Claude Code SessionStart hook. The box's template starts a claude process
+# at every workspace start, so this is what runs boot after a restart.
+# Prints nothing: SessionStart output would land in the session's context.
+set -u
+. "$(dirname "$0")/env.sh"
+[ -f /tmp/agent-box-booted ] || detach "$AGENT_BOX_DIR/bin/boot"
+exit 0

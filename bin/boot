@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Idempotent box setup, safe to run at any time: packages, state clones,
+# Claude Code hooks, and restoring transcripts missing from this machine.
+# /tmp is wiped on every workspace start, so its marker means "booted
+# since the last restart". --force runs again anyway.
+set -u
+. "$(dirname "$0")/env.sh"
+
+marker=/tmp/agent-box-booted
+[ "${1:-}" != "--force" ] && [ -f "$marker" ] && exit 0
+exec 8> /tmp/agent-box-boot.lock
+flock -n 8 || exit 0
+log "boot start"
+
+if [ "$AGENT_HOST" = box ]; then
+  missing=()
+  for pkg in tmux rsync jq; do command -v "$pkg" > /dev/null || missing+=("$pkg"); done
+  if [ ${#missing[@]} -gt 0 ]; then
+    sudo apt-get update -qq > /dev/null 2>&1
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" > /dev/null 2>&1 \
+      || log "apt install failed: ${missing[*]}"
+  fi
+fi
+
+ensure_branch_clone "$AGENT_STATE_DIR" state
+ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"
+git -C "$AGENT_STATE_DIR" pull -q --ff-only 2>> "$AGENT_LOG" || log "state pull failed"
+
+backup="$AGENT_SESSIONS_DIR/hosts/$AGENT_HOST/projects"
+if [ -d "$backup" ]; then
+  mkdir -p "$CLAUDE_PROJECTS_DIR"
+  rsync -a --ignore-existing "$backup/" "$CLAUDE_PROJECTS_DIR/"
+fi
+
+settings="$HOME/.claude/settings.json"
+mkdir -p "$(dirname "$settings")"
+[ -s "$settings" ] || echo '{}' > "$settings"
+tmp=$(mktemp)
+jq --arg sync "$AGENT_BOX_DIR/bin/turn-sync" --arg start "$AGENT_BOX_DIR/bin/session-start" '
+  def ensure(event; cmd):
+    .hooks[event] = ((.hooks[event] // [])
+      | map(select(any(.hooks[]?; .command == cmd) | not))
+      + [{hooks: [{type: "command", command: cmd}]}]);
+  ensure("Stop"; $sync) | ensure("SubagentStop"; $sync) | ensure("SessionStart"; $start)
+' "$settings" > "$tmp" && cat "$tmp" > "$settings"
+rm -f "$tmp"
+
+touch "$marker"
+log "boot done"
