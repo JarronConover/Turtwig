@@ -349,8 +349,8 @@ def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id):
     """Copy a chat's transcript (and its subagent folder) between machines."""
     src = f".claude/projects/{project_slug(src_dir)}/"
     dst = f".claude/projects/{project_slug(dst_dir)}/"
-    remote_src = f"{BOX_SSH}:{src}" if src_host == "box" else str(HOME / src)
-    remote_dst = f"{BOX_SSH}:{dst}" if dst_host == "box" else str(HOME / dst)
+    remote_src = f"{BOX_SSH}:{src}" if src_host == "box" else f"{HOME}/{src}"
+    remote_dst = f"{BOX_SSH}:{dst}" if dst_host == "box" else f"{HOME}/{dst}"
     if dst_host == "box":
         run(["ssh", "-n", BOX_SSH, f"mkdir -p {shlex.quote(dst)}"], check=False, capture_output=True)
     else:
