@@ -71,7 +71,7 @@ if [ "$AGENT_HOST" = box ]; then
   # The template's AgentAPI claude runs `--continue` in ~/project, which would
   # resume (and double-run) the newest primary chat. It has done its job of
   # firing SessionStart by now.
-  pkill -f "agentapi server" 2> /dev/null || true
+  pkill -f "^agentapi server" 2> /dev/null || true
   tmux has-session -t agent-box 2> /dev/null \
     || tmux new-session -d -s agent-box "$AGENT_BOX_DIR/bin/chat supervise 2>&1 | tee -a $AGENT_HOME/log/supervisor.log"
 fi
