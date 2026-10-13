@@ -35,8 +35,10 @@ for key, value in (("GIT_AUTHOR_NAME", f"agent-box ({HOST})"), ("GIT_AUTHOR_EMAI
     os.environ.setdefault(key.replace("AUTHOR", "COMMITTER"), value)
 
 if ON_BOX:
-    PRIMARY = {"redo": HOME / "project"}
-    WORKTREES = HOME / "worktrees"
+    # Same layout as the Mac (~/dev/redo is a link to the template's ~/project),
+    # so the factory skills' paths work unchanged.
+    PRIMARY = {"redo": HOME / "dev" / "redo"}
+    WORKTREES = HOME / "dev" / "redo-worktrees"
     WT = HOME / "redo-monorepo-worktrees" / "bin" / "wt"
 else:
     PRIMARY = {"redo": HOME / "dev" / "redo"}
@@ -199,6 +201,8 @@ def launch(chat, resume, restore_from=None):
         cmd += ["--model", chat["model"]]
     if not resume and chat.get("prompt"):
         cmd.append(chat["prompt"])
+    if ON_BOX:
+        cmd = [str(Path(__file__).parent / "agent-env")] + cmd
     run(["tmux", "new-session", "-d", "-s", name, "-x", "220", "-y", "60", "-c", str(directory),
          shlex.join(cmd)])
     chat["dir"] = str(directory)

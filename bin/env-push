@@ -17,8 +17,13 @@ rsync -au --exclude .git --exclude __pycache__ "$HOME/.agents/skills/" "$host:.a
 rsync -au "$HOME/.claude/CLAUDE.md" "$host:.claude/CLAUDE.md"
 rsync -au "$mac_memory" "$host:$box_memory"
 rsync -au "$host:$box_memory" "$mac_memory"
-# Dispatcher state, until the dispatcher itself runs on the box.
-ssh -n "$host" 'mkdir -p ~/.local/state/redo' 2> /dev/null
+# The Mac's dispatcher state, read-only for the dashboard. Kept apart from
+# the box's own ~/.local/state/redo, where box dispatchers write.
+ssh -n "$host" 'mkdir -p ~/.agent-box/mac-state' 2> /dev/null
 rsync -a --delete "$HOME/.local/state/redo/ship-feature" "$HOME/.local/state/redo/handoffs" \
-  "$HOME/.local/state/redo/designs" "$host:.local/state/redo/"
+  "$HOME/.local/state/redo/designs" "$host:.agent-box/mac-state/"
+# Config the factory scripts read (Cursor environments, type-check agents).
+ssh -n "$host" 'mkdir -p ~/.config/redo' 2> /dev/null
+rsync -au "$HOME/.config/redo/cursor-environments.json" "$HOME/.config/redo/cursor-typecheck-agents.json" \
+  "$host:.config/redo/"
 echo "env pushed to $host"

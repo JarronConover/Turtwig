@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""`sc` for the agent box: the subset of super.engineering's CLI the factory
+skills use (worktrees, sidebar sections and labels, discussion tabs), backed
+by git worktrees, `wt`, and the agent-box state repo instead of the Mac app.
+
+Sections and labels live in ~/.agent-box/state/sc.json; the dashboard shows
+them. A discussion tab becomes a Remote Control chat (bin/chat).
+"""
+
+import fcntl
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+HOME = Path.home()
+STATE_DIR = HOME / ".agent-box" / "state"
+STORE = STATE_DIR / "sc.json"
+CHAT = HOME / "agent-box" / "bin" / "chat"
+WT = HOME / "redo-monorepo-worktrees" / "bin" / "wt"
+REPOS = {
+    "redo": HOME / "dev" / "redo",
+    "internal-tools": HOME / "dev" / "redotech-internal-tools",
+    "redo-data": HOME / "dev" / "redo-data",
+}
+WORKTREE_BASE = {
+    "redo": HOME / "dev" / "redo-worktrees",
+    "internal-tools": HOME / "dev" / "redotech-internal-tools-worktrees",
+    "redo-data": HOME / "dev" / "redo-data-worktrees",
+}
+WORKSPACE = "box"
+BUILT_IN = [
+    {"section_id": "pinned", "name": "Pinned", "kind": "manual", "rules": [], "priority": None,
+     "collapsed": False, "built_in": True},
+    {"section_id": "__projects__", "name": "Projects", "kind": "projects", "rules": [], "priority": None,
+     "collapsed": False, "built_in": True},
+]
+
+
+def die(msg, code=1):
+    print(json.dumps({"kind": "error", "error": msg}) if "--json" in sys.argv else msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def git(*args, cwd=None, check=False):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if check and r.returncode:
+        die(r.stderr.strip() or f"git {' '.join(args)} failed")
+    return r
+
+
+def real(p):
+    return os.path.realpath(str(p))
+
+
+class Store:
+    """sc.json under an exclusive lock; committed to the state branch on save."""
+
+    def __enter__(self):
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self.lock = open(HOME / ".agent-box" / "sc.lock", "w")
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        self.data = json.loads(STORE.read_text()) if STORE.exists() else {}
+        self.data.setdefault("sections", [])
+        self.data.setdefault("worktrees", {})
+        self.dirty = False
+        return self
+
+    def wt(self, path):
+        return self.data["worktrees"].setdefault(real(path), {})
+
+    def save(self, message):
+        self.dirty = True
+        self.message = message
+
+    def __exit__(self, *exc):
+        if self.dirty and not exc[0]:
+            STORE.write_text(json.dumps(self.data, indent=2) + "\n")
+            git("add", "sc.json", cwd=STATE_DIR)
+            git("commit", "-q", "-m", f"sc: {self.message}", cwd=STATE_DIR)
+            git("pull", "-q", "--rebase", "origin", "state", cwd=STATE_DIR)
+            git("push", "-q", "origin", "HEAD:state", cwd=STATE_DIR)
+        fcntl.flock(self.lock, fcntl.LOCK_UN)
+
+
+def item_id(path, primary):
+    return f"primary:{real(path)}" if primary else "wt:" + hashlib.sha1(real(path).encode()).hexdigest()[:12]
+
+
+def worktrees(repo):
+    """[(path, branch, is_primary)] from `git worktree list` of the repo's checkout."""
+    checkout = REPOS[repo]
+    if not checkout.exists():
+        return []
+    out = git("worktree", "list", "--porcelain", cwd=checkout).stdout
+    result, path, branch = [], None, None
+    for line in out.splitlines() + [""]:
+        if line.startswith("worktree "):
+            path = line[9:]
+        elif line.startswith("branch "):
+            branch = line[7:].removeprefix("refs/heads/")
+        elif not line and path:
+            result.append((path, branch, real(path) == real(checkout)))
+            path, branch = None, None
+    return result
+
+
+def items(store):
+    out = []
+    for repo in REPOS:
+        for path, branch, primary in worktrees(repo):
+            meta = store.data["worktrees"].get(real(path), {})
+            out.append({
+                "id": item_id(path, primary), "project_id": repo, "project_name": repo,
+                "worktree": "main" if primary else Path(path).name,
+                "title": meta.get("label") or branch or Path(path).name,
+                "path": path, "branch": branch, "is_primary": primary, "selected": False, "visible": True,
+                "agent_status": "idle", "attention": None, "pr": None, "local": {},
+                "section": meta.get("section"),
+            })
+    return out
+
+
+def find_item(store, ident):
+    for it in items(store):
+        if ident in (it["id"], it["path"], real(it["path"])):
+            return it
+    die(f"no worktree {ident!r}")
+
+
+def caller_worktree():
+    path = os.environ.get("SUPER_ENGINEERING_WORKTREE_PATH") or os.getcwd()
+    top = git("rev-parse", "--show-toplevel", cwd=path).stdout.strip()
+    if not top:
+        die(f"not inside a worktree: {path}")
+    return top
+
+
+def out(kind, response):
+    print(json.dumps({"kind": kind, "response": response}))
+
+
+def flag(args, name, default=None):
+    if name in args:
+        i = args.index(name)
+        return args[i + 1] if i + 1 < len(args) else default
+    return default
+
+
+def workspace_list(args):
+    with Store() as s:
+        its = items(s)
+        secs = [{"id": "__projects__", "kind": "projects", "name": None,
+                 "items": [i for i in its if not i["section"]]}]
+        for sec in s.data["sections"]:
+            secs.append({"id": sec["section_id"], "kind": "worktrees", "name": sec["name"],
+                         "items": [i for i in its if i["section"] == sec["section_id"]]})
+    out("workspaces", {"workspaces": [{"id": WORKSPACE, "title": "Agent box", "selected": True, "sections": secs}]})
+
+
+def section_cmd(args):
+    sub = args[0] if args else ""
+    with Store() as s:
+        secs = s.data["sections"]
+        by = lambda key: next((x for x in secs if key in (x["section_id"], x["name"])), None)  # noqa: E731
+        if sub == "list":
+            print(json.dumps({"kind": "sections", "sections": BUILT_IN + secs}))
+        elif sub == "create":
+            name = args[1]
+            if by(name):
+                die(f"section {name!r} exists")
+            sec = {"section_id": str(uuid.uuid4()), "name": name, "kind": "manual", "rules": [],
+                   "priority": None, "collapsed": False, "built_in": False}
+            secs.append(sec)
+            s.save(f"section create {name}")
+            out("section", sec)
+        elif sub == "edit":
+            sec = by(args[1]) or die(f"no section {args[1]!r}")
+            if "--manual" in args:
+                sec["kind"] = "manual"
+            if flag(args, "--name"):
+                sec["name"] = flag(args, "--name")
+            s.save(f"section edit {sec['name']}")
+            out("section", sec)
+        elif sub == "delete":
+            sec = by(args[1]) or die(f"no section {args[1]!r}")
+            secs.remove(sec)
+            for meta in s.data["worktrees"].values():
+                if meta.get("section") == sec["section_id"]:
+                    meta.pop("section")
+            s.save(f"section delete {sec['name']}")
+            out("section_deleted", {"section_id": sec["section_id"]})
+        elif sub in ("assign", "unassign"):
+            path = caller_worktree()
+            if sub == "assign":
+                sec = by(args[1]) or die(f"no section {args[1]!r}")
+                s.wt(path)["section"] = sec["section_id"]
+            else:
+                s.wt(path).pop("section", None)
+            s.save(f"section {sub} {Path(path).name}")
+            out("section_assignment", {"path": path, "section": s.wt(path).get("section")})
+        else:
+            die(f"sc section {sub}: not supported on the agent box")
+
+
+def worktree_cmd(args):
+    sub = args[0] if args else ""
+    if sub == "create":
+        return worktree_create(args[1:])
+    with Store() as s:
+        if sub == "status":
+            path = caller_worktree()
+            branch = git("branch", "--show-current", cwd=path).stdout.strip()
+            stat = git("diff", "--shortstat", "HEAD", cwd=path).stdout
+            changed = int(stat.split()[0]) if stat.strip() else 0
+            out("worktree_status", {"branch": branch, "target_branch": s.wt(path).get("target_branch", "main"),
+                                    "files_changed": changed, "insertions": 0, "deletions": 0})
+        elif sub == "rename-branch":
+            path = caller_worktree()
+            git("branch", "-m", args[1], cwd=path, check=True)
+            out("worktree_branch", {"branch": args[1]})
+        elif sub == "set-target-branch":
+            path = caller_worktree()
+            s.wt(path)["target_branch"] = args[1]
+            s.save(f"target {Path(path).name} -> {args[1]}")
+            out("worktree_target_branch", {"target_branch": args[1]})
+        elif sub == "set-label":
+            it = find_item(s, args[1])
+            s.wt(it["path"])["label"] = args[2]
+            s.save(f"label {it['worktree']}: {args[2]}")
+            out("worktree_label", {"id": it["id"], "label": args[2]})
+        elif sub == "delete":
+            it = find_item(s, args[1])
+            if it["is_primary"]:
+                die("refusing to delete a primary checkout")
+            if git("status", "--porcelain", cwd=it["path"]).stdout.strip() and "--force" not in args:
+                die(f"{it['path']} has uncommitted changes")
+            if it["project_id"] == "redo" and it["branch"]:
+                r = subprocess.run([str(WT), "remove", it["branch"]] + (["--force"] if "--force" in args else []),
+                                   capture_output=True, text=True,
+                                   env=dict(os.environ, WT_PRIMARY=str(REPOS["redo"]),
+                                            WT_BASE=str(WORKTREE_BASE["redo"])))
+            else:
+                r = subprocess.run(["git", "worktree", "remove", it["path"]] + (["--force"] if "--force" in args else []),
+                                   cwd=REPOS[it["project_id"]], capture_output=True, text=True)
+            if r.returncode:
+                die(r.stderr.strip() or "delete failed")
+            s.data["worktrees"].pop(real(it["path"]), None)
+            s.save(f"delete {it['worktree']}")
+            out("worktree_deleted", {"id": it["id"], "path": it["path"]})
+        else:
+            die(f"sc worktree {sub}: not supported on the agent box")
+
+
+def worktree_create(args):
+    repo = flag(args, "--project") or "redo"
+    if repo not in REPOS:
+        die(f"unknown project {repo!r} (box projects: {', '.join(REPOS)})")
+    if "--prompt" in args or "--stdin" in args or "--from-file" in args:
+        die("sc worktree create --prompt isn't supported on the agent box; use `chat new --branch`")
+    name = flag(args, "--worktree-name") or f"sc-{uuid.uuid4().hex[:6]}"
+    branch = flag(args, "--existing-branch") or flag(args, "--branch") or name
+    checkout = REPOS[repo]
+    git("fetch", "-q", "origin", cwd=checkout)
+    if repo == "redo":
+        env = dict(os.environ, WT_PRIMARY=str(checkout), WT_BASE=str(WORKTREE_BASE["redo"]))
+        r = subprocess.run([str(WT), branch, "--no-start"], capture_output=True, text=True, env=env)
+        path = WORKTREE_BASE["redo"] / branch.replace("/", "-")
+        if not path.exists():
+            die(r.stderr.strip() or "wt failed")
+    else:
+        path = WORKTREE_BASE[repo] / name
+        exists = git("rev-parse", "-q", "--verify", f"refs/heads/{branch}", cwd=checkout).returncode == 0
+        on_origin = git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}", cwd=checkout).returncode == 0
+        cmd = ["worktree", "add", str(path)]
+        cmd += [branch] if exists or on_origin else ["-b", branch, "origin/main"]
+        git(*cmd, cwd=checkout, check=True)
+    resp = {"id": item_id(path, False), "path": str(path), "branch": branch, "worktree": path.name,
+            "project_id": repo, "workspace_id": WORKSPACE}
+    print(json.dumps({"kind": "worktree_created", "response": resp, **resp}))
+
+
+def layout_cmd(args):
+    sub = args[0] if args else ""
+    if sub == "capabilities":
+        out("layout_capabilities", {"kind": "layout_capabilities", "team_runs": False,
+                                    "layout_orchestration": {"run": ["tabs"]},
+                                    "providers": [{"key": "claude", "available": True}]})
+    elif sub == "run" and len(args) > 1 and args[1] == "tabs":
+        label = flag(args, "--label") or "discussion"
+        prompt = flag(args, "--prompt") or flag(args, "--initial-message")
+        if flag(args, "--from-file"):
+            prompt = Path(flag(args, "--from-file")).read_text()
+        cmd = [str(CHAT), "new", label, "--kind", "primary", "--dir", flag(args, "--worktree") or caller_worktree()]
+        if prompt:
+            cmd += ["--prompt", prompt]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode:
+            die(r.stderr.strip() or "chat new failed")
+        out("layout_run", {"ok": True, "label": label, "chat": r.stdout.split()[0] if r.stdout else None})
+    else:
+        die(f"sc layout {sub}: not supported on the agent box (only `run tabs` and `capabilities`)")
+
+
+INSTRUCTIONS = """On the agent box, `sc` is a compatibility shim over git worktrees, `wt`, and
+the agent-box registry; there is no super.engineering app here. Supported:
+  sc workspace list --json
+  sc section list|create NAME --manual|edit SECTION --manual|assign SECTION|unassign|delete SECTION [--json]
+  sc worktree create --workspace box --project redo|internal-tools|redo-data [--worktree-name N]
+                     [--branch B | --existing-branch B] [--background] --json
+  sc worktree status|rename-branch NEW|set-target-branch B [--json]   (act on the caller's worktree;
+                     SUPER_ENGINEERING_WORKTREE_PATH overrides, as in the app)
+  sc worktree set-label ITEM_ID LABEL|delete ITEM_ID [--force] [--json]
+  sc layout run tabs --label L [--prompt TEXT] [--worktree PATH]   (starts a Remote Control chat TJ
+                     sees on his dashboard and phone)
+  sc layout capabilities --output json
+Everything else (`sc chat`, `sc agent`, other layout commands, reviews, browser) is unavailable.
+Redo worktrees are created with `wt --no-start`; services never run on the box."""
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        die(INSTRUCTIONS, 2)
+    cmd, rest = args[0], args[1:]
+    if cmd == "instructions":
+        print(INSTRUCTIONS)
+    elif cmd == "workspace" and rest[:1] == ["list"]:
+        workspace_list(rest)
+    elif cmd == "section":
+        section_cmd(rest)
+    elif cmd == "worktree":
+        worktree_cmd(rest)
+    elif cmd == "layout":
+        layout_cmd(rest)
+    else:
+        die(f"sc {cmd}: not supported on the agent box. {INSTRUCTIONS}")
+
+
+if __name__ == "__main__":
+    main()

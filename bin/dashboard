@@ -19,9 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HOME = Path.home()
 REGISTRY = HOME / ".agent-box" / "state" / "registry" / "chats"
-REDO_STATE = HOME / ".local" / "state" / "redo"
-SHIP = REDO_STATE / "ship-feature"
-HANDOFFS = REDO_STATE / "handoffs"
+# The box's own dispatcher state, then the Mac's (synced read-only by env-push).
+STATE_ROOTS = [HOME / ".local" / "state" / "redo", HOME / ".agent-box" / "mac-state"]
 PROJECTS = HOME / ".claude" / "projects"
 CHAT = ROOT / "bin" / "chat"
 
@@ -80,46 +79,56 @@ def parse_digest(digest):
 
 
 def features(chat_by_branch):
-    result = []
-    for fpath in sorted(SHIP.glob("*.feature.json")) if SHIP.exists() else []:
-        parent = fpath.name.removesuffix(".feature.json")
-        feature = read_json(fpath) or {}
-        events = (read_json(SHIP / f"{parent}.json") or {}).get("events", {})
-        printed = events.get("printed") or {}
-        stages, needs = parse_digest(printed.get("digest"))
-        short = feature.get("short", {})
-        legs = []
-        for ticket, raw in stages.items():
-            stage, _, detail = raw.partition(":")
-            base, _, leg_repo = ticket.partition("@")
-            handoff = read_json(HANDOFFS / ticket / "handoff.json") or {}
-            branch = handoff.get("branch")
-            legs.append({
-                "ticket": ticket,
-                "label": (short.get(ticket) or short.get(base) or base) + (f" · {leg_repo}" if leg_repo else ""),
-                "stage": stage,
-                "detail": detail,
-                "emoji": STAGE_EMOJI.get(stage, "•"),
-                "needs_you": ticket in needs or stage == "error",
-                "mr": handoff.get("mr"),
-                "branch": branch,
-                "repo": handoff.get("repo"),
-                "chat": chat_by_branch.get(branch),
-                "url": f"https://linear.app/redo/issue/{base}",
-            })
-        active = [x for x in legs if x["stage"] not in DONE_STAGES]
-        result.append({
-            "parent": parent,
-            "name": feature.get("name") or parent,
-            "url": f"https://linear.app/redo/issue/{parent}",
-            "updated_at": iso(printed["at"]) if printed.get("at") else None,
-            "done": bool(legs) and not active,
-            "legs": legs,
-            "needs_you": [x["label"] for x in legs if x["needs_you"]],
-        })
+    result, seen = [], set()
+    for root in STATE_ROOTS:
+        ship, handoffs = root / "ship-feature", root / "handoffs"
+        for fpath in sorted(ship.glob("*.feature.json")) if ship.exists() else []:
+            parent = fpath.name.removesuffix(".feature.json")
+            if parent in seen:
+                continue
+            seen.add(parent)
+            result.append(feature_row(parent, fpath, ship, handoffs, chat_by_branch, root))
     result.sort(key=lambda f: (f["done"], -(datetime.datetime.fromisoformat(f["updated_at"].replace("Z", "+00:00")).timestamp()
                                              if f["updated_at"] else 0)))
     return result
+
+
+def feature_row(parent, fpath, ship, handoffs, chat_by_branch, root):
+    feature = read_json(fpath) or {}
+    events = (read_json(ship / f"{parent}.json") or {}).get("events", {})
+    printed = events.get("printed") or {}
+    stages, needs = parse_digest(printed.get("digest"))
+    short = feature.get("short", {})
+    legs = []
+    for ticket, raw in stages.items():
+        stage, _, detail = raw.partition(":")
+        base, _, leg_repo = ticket.partition("@")
+        handoff = read_json(handoffs / ticket / "handoff.json") or {}
+        branch = handoff.get("branch")
+        legs.append({
+            "ticket": ticket,
+            "label": (short.get(ticket) or short.get(base) or base) + (f" · {leg_repo}" if leg_repo else ""),
+            "stage": stage,
+            "detail": detail,
+            "emoji": STAGE_EMOJI.get(stage, "•"),
+            "needs_you": ticket in needs or stage == "error",
+            "mr": handoff.get("mr"),
+            "branch": branch,
+            "repo": handoff.get("repo"),
+            "chat": chat_by_branch.get(branch),
+            "url": f"https://linear.app/redo/issue/{base}",
+        })
+    active = [x for x in legs if x["stage"] not in DONE_STAGES]
+    return {
+        "host": "mac" if root.name == "mac-state" else "box",
+        "parent": parent,
+        "name": feature.get("name") or parent,
+        "url": f"https://linear.app/redo/issue/{parent}",
+        "updated_at": iso(printed["at"]) if printed.get("at") else None,
+        "done": bool(legs) and not active,
+        "legs": legs,
+        "needs_you": [x["label"] for x in legs if x["needs_you"]],
+    }
 
 
 def state():
