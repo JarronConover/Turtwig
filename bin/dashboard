@@ -91,11 +91,12 @@ def features(chat_by_branch):
         legs = []
         for ticket, raw in stages.items():
             stage, _, detail = raw.partition(":")
+            base, _, leg_repo = ticket.partition("@")
             handoff = read_json(HANDOFFS / ticket / "handoff.json") or {}
             branch = handoff.get("branch")
             legs.append({
                 "ticket": ticket,
-                "label": short.get(ticket) or ticket,
+                "label": (short.get(ticket) or short.get(base) or base) + (f" · {leg_repo}" if leg_repo else ""),
                 "stage": stage,
                 "detail": detail,
                 "emoji": STAGE_EMOJI.get(stage, "•"),
@@ -104,7 +105,7 @@ def features(chat_by_branch):
                 "branch": branch,
                 "repo": handoff.get("repo"),
                 "chat": chat_by_branch.get(branch),
-                "url": f"https://linear.app/redo/issue/{ticket}",
+                "url": f"https://linear.app/redo/issue/{base}",
             })
         active = [x for x in legs if x["stage"] not in DONE_STAGES]
         result.append({
