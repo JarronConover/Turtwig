@@ -109,7 +109,7 @@ def tmux_name(chat):
 
 
 def tmux_alive(name):
-    return run(["tmux", "has-session", "-t", name], check=False, capture_output=True).returncode == 0
+    return run(["tmux", "has-session", "-t", "=" + name], check=False, capture_output=True).returncode == 0
 
 
 def project_slug(path):
