@@ -112,6 +112,20 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
         setupHotKey()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
         NSApp.activate(ignoringOtherApps: true)
+        if let dir = ProcessInfo.processInfo.environment["AGENTBOX_SNAPSHOT_DIR"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { self.snapshot(to: dir) }
+        }
+    }
+
+    // Debugging aid: AGENTBOX_SNAPSHOT_DIR=<dir> writes each pane as a PNG.
+    func snapshot(to dir: String) {
+        for (name, view) in [("dash", dash!), ("chat", chat!), ("term", term!)] {
+            view.takeSnapshot(with: nil) { image, _ in
+                guard let image, let tiff = image.tiffRepresentation,
+                      let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+                try? png.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

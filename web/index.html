@@ -51,6 +51,7 @@
   .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--line); margin-right: 4px; }
   .dot.up { background: var(--up); }
   .needs .row .title { font-weight: 600; }
+  .row.ship { grid-template-columns: 22px 1fr auto; opacity: .8; }
   .warn-text { color: var(--warn); }
   a { color: inherit; }
   .empty { padding: 10px 12px; color: var(--muted); }
@@ -116,6 +117,7 @@ const store = {
 let data = null;
 let selected = store.get("selected", null);
 const collapsed = new Set(store.get("collapsed", []));
+const expanded = new Set(store.get("expanded", []));
 const hidden = new Set(store.get("hidden", []));
 let showHidden = false;
 const $ = (s) => document.querySelector(s);
@@ -206,10 +208,20 @@ function render() {
   }
 
   const feats = data.features.filter((f) => (showDone || !f.done) && (showHidden || !hidden.has(f.parent)));
+  const SHIPPED = new Set(["merged", "deploying", "deployed", "after-merge", "done"]);
+  const rank = (l) => (l.needs_you ? 0 : SHIPPED.has(l.stage) ? 2 : 1);
+  feats.sort((a, b) => (b.needs_you.length > 0) - (a.needs_you.length > 0));
   for (const f of feats) {
-    const legs = f.legs.filter((l) => showDone || l.stage !== "done");
+    const all = f.legs.filter((l) => showDone || l.stage !== "done").sort((a, b) => rank(a) - rank(b));
+    const legs = all.filter((l) => !SHIPPED.has(l.stage));
+    const shipped = all.filter((l) => SHIPPED.has(l.stage));
+    const shipKey = f.parent + ":shipped";
     const counts = {};
-    for (const l of legs) counts[l.emoji] = (counts[l.emoji] || 0) + 1;
+    for (const l of all) counts[l.emoji] = (counts[l.emoji] || 0) + 1;
+    const shipOpen = expanded.has(shipKey);
+    const shipRows = shipped.length ? `<div class="row ship" data-expand="${esc(shipKey)}"><span>🚀</span>
+      <div class="sub">${shipOpen ? "Hide" : "Show"} ${shipped.length} merged</div><div></div></div>
+      ${shipOpen ? shipped.map((l) => legRow(f, l)).join("") : ""}` : "";
     const isCol = collapsed.has(f.parent);
     parts.push(`<section class="${isCol ? "collapsed" : ""}" data-feature="${esc(f.parent)}">
       <div class="sec-head" data-toggle="${esc(f.parent)}"><span class="caret">▾</span><h2>${esc(f.name)}</h2>
@@ -217,7 +229,7 @@ function render() {
         ${f.needs_you.length ? `<span class="chip warn">✋ ${f.needs_you.length}</span>` : ""}</div>
         <span class="grow"></span><span class="meta">${ago(f.updated_at)}</span>
         <button data-hide="${esc(f.parent)}" title="${hidden.has(f.parent) ? "Unhide" : "Hide"}">${hidden.has(f.parent) ? "Unhide" : "Hide"}</button></div>
-      <div class="rows">${legs.map((l) => legRow(f, l)).join("") || `<div class="empty">No open legs</div>`}</div></section>`);
+      <div class="rows">${legs.map((l) => legRow(f, l)).join("")}${shipRows}${!legs.length && !shipped.length ? `<div class="empty">No open legs</div>` : ""}</div></section>`);
   }
 
   if (data.chats.length) {
@@ -253,7 +265,7 @@ async function post(path, body) {
 }
 
 $("#main").addEventListener("click", (e) => {
-  const t = e.target.closest("[data-hide],[data-toggle],[data-act],[data-run],.row");
+  const t = e.target.closest("[data-hide],[data-toggle],[data-act],[data-run],[data-expand],.row");
   if (!t) return;
   if (t.dataset.hide) {
     e.stopPropagation();
@@ -270,6 +282,11 @@ $("#main").addEventListener("click", (e) => {
     toast("Working…", 0);
     native.postMessage({ type: "run", args: JSON.parse(t.dataset.run), reqId });
     return;
+  }
+  if (t.dataset.expand) {
+    expanded.has(t.dataset.expand) ? expanded.delete(t.dataset.expand) : expanded.add(t.dataset.expand);
+    store.set("expanded", [...expanded]);
+    return render();
   }
   if (t.dataset.toggle) {
     collapsed.has(t.dataset.toggle) ? collapsed.delete(t.dataset.toggle) : collapsed.add(t.dataset.toggle);
