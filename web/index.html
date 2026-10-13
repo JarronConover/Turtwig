@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Box</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e4e3df;
+    --accent: #c4562d; --accent-ink: #ffffff; --hover: #f0efeb; --sel: #fbeee8; --warn: #b3261e;
+    --up: #2e7d4f; --chip: #efeeea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161614; --panel: #1f1f1d; --ink: #ecebe6; --muted: #9a9993; --line: #2f2f2c;
+      --accent: #e0774c; --accent-ink: #161614; --hover: #272724; --sel: #3a2a22; --warn: #f2726a;
+      --up: #5fc48a; --chip: #2a2a27;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px;
+           padding: 10px 14px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 14px; margin: 0; font-weight: 650; }
+  .grow { flex: 1; }
+  .meta { color: var(--muted); font-size: 12px; }
+  button, .btn { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+           border-radius: 6px; padding: 3px 9px; cursor: pointer; text-decoration: none; white-space: nowrap; }
+  button:hover, .btn:hover { background: var(--hover); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  main { padding: 12px 14px 40px; display: flex; flex-direction: column; gap: 12px; max-width: 980px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .sec-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; user-select: none; }
+  .sec-head h2 { font-size: 13px; margin: 0; font-weight: 600; }
+  .caret { width: 12px; color: var(--muted); transition: transform .12s; }
+  .collapsed .caret { transform: rotate(-90deg); }
+  .collapsed .rows { display: none; }
+  .chips { display: flex; gap: 4px; flex-wrap: wrap; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 0 7px; font-size: 11.5px; color: var(--muted); }
+  .chip.warn { color: var(--warn); }
+  .rows { border-top: 1px solid var(--line); }
+  .row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 8px; align-items: center;
+         padding: 6px 12px; border-top: 1px solid var(--line); cursor: pointer; }
+  .row:first-child { border-top: 0; }
+  .row:hover { background: var(--hover); }
+  .row.sel { background: var(--sel); }
+  .row .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .acts { display: flex; gap: 4px; align-items: center; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--line); margin-right: 4px; }
+  .dot.up { background: var(--up); }
+  .needs .row .title { font-weight: 600; }
+  .warn-text { color: var(--warn); }
+  a { color: inherit; }
+  .empty { padding: 10px 12px; color: var(--muted); }
+  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink);
+           padding: 16px; width: min(440px, calc(100vw - 32px)); }
+  dialog label { display: block; margin: 8px 0 3px; color: var(--muted); font-size: 12px; }
+  dialog input, dialog textarea, dialog select { width: 100%; font: inherit; padding: 6px 8px; color: var(--ink);
+           background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+  dialog .bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  @media (max-width: 640px) {
+    header { padding: 10px 16px; flex-wrap: wrap; }
+    main { padding: 10px 16px 40px; }
+    .row { grid-template-columns: 22px minmax(0, 1fr); }
+    .row .acts { grid-column: 2; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Box</h1>
+  <span id="needs-count" class="chip warn" hidden></span>
+  <span class="grow"></span>
+  <span id="updated" class="meta"></span>
+  <label class="meta"><input type="checkbox" id="show-done"> done</label>
+  <button id="show-hidden" hidden></button>
+  <button id="settings-btn" title="Settings">⚙︎</button>
+  <button class="primary" id="new-btn">New chat</button>
+</header>
+<main id="main"><div class="empty">Loading…</div></main>
+
+<dialog id="new-dlg">
+  <form method="dialog" id="new-form">
+    <strong>New chat on the box</strong>
+    <label>Name</label><input name="name" required placeholder="what this chat is for">
+    <label>Branch (empty = primary checkout)</label><input name="branch" placeholder="tj/feature-slug">
+    <label>Stack on (base branch)</label><input name="base" placeholder="main">
+    <label>Kind</label>
+    <select name="kind"><option>feature</option><option>orchestrator</option><option>primary</option></select>
+    <label>First message</label><textarea name="prompt" rows="3"></textarea>
+    <div class="bar"><button value="cancel">Cancel</button><button class="primary" value="ok">Start</button></div>
+  </form>
+</dialog>
+
+<dialog id="settings-dlg">
+  <form method="dialog" id="settings-form">
+    <strong>Settings</strong>
+    <label>IDE</label>
+    <select name="ide"><option value="cursor">Cursor</option><option value="vscode">VS Code</option><option value="custom">Custom</option></select>
+    <label>Custom IDE URL ({host}, {dir})</label><input name="ide_custom" placeholder="zed://ssh/{host}{dir}">
+    <div class="bar"><button value="cancel">Cancel</button><button class="primary" value="ok">Save</button></div>
+  </form>
+</dialog>
+
+<script>
+const native = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.agentbox;
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+let data = null;
+let selected = store.get("selected", null);
+const collapsed = new Set(store.get("collapsed", []));
+const hidden = new Set(store.get("hidden", []));
+let showHidden = false;
+const $ = (s) => document.querySelector(s);
+
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function ago(iso) {
+  if (!iso) return "";
+  const s = (Date.now() - Date.parse(iso)) / 1000;
+  if (s < 60) return "now";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+function ideUrl(dir) {
+  const host = data.ssh_host, ide = store.get("ide", "cursor");
+  if (ide === "custom") return store.get("ide_custom", "").replace("{host}", host).replace("{dir}", dir);
+  return `${ide}://vscode-remote/ssh-remote+${host}${dir}`;
+}
+
+function select(item) {
+  selected = item.key;
+  store.set("selected", selected);
+  render();
+  const chat = item.chat;
+  if (native) native.postMessage({ type: "select", key: item.key, chat, mr: item.mr || null });
+  else if (chat && chat.rc_url) window.open(chat.rc_url, "agentbox-chat");
+  else if (item.mr) window.open(item.mr, "_blank");
+}
+
+function chatBits(c) {
+  if (!c) return `<span class="sub">no chat</span>`;
+  const where = c.host === "box" ? "box" : "Mac";
+  return `<span class="sub"><span class="dot ${c.alive ? "up" : ""}"></span>${where}${c.last_activity ? " · " + ago(c.last_activity) : ""}</span>`;
+}
+function acts(c, mr) {
+  const out = [];
+  if (mr) out.push(`<a class="btn" href="${esc(mr)}" target="_blank" onclick="event.stopPropagation()">MR !${esc(mr.split("/").pop())}</a>`);
+  if (c && c.dir) out.push(`<a class="btn" href="${esc(ideUrl(c.dir))}" onclick="event.stopPropagation()">IDE</a>`);
+  if (c && !c.alive && c.host === "box") out.push(`<button data-act="start" data-id="${c.id}">Start</button>`);
+  return out.join("");
+}
+
+function legRow(f, leg) {
+  const key = `${f.parent}/${leg.ticket}`;
+  const item = { key, chat: leg.chat, mr: leg.mr };
+  itemsByKey[key] = item;
+  return `<div class="row ${selected === key ? "sel" : ""}" data-key="${esc(key)}">
+    <span>${leg.emoji}</span>
+    <div><div class="title">${esc(leg.label)}</div>
+      <div class="sub">${esc(leg.stage)}${leg.detail ? " · " + esc(leg.detail) : ""} · ${chatBits(leg.chat)}</div></div>
+    <div class="acts">${acts(leg.chat, leg.mr)}</div></div>`;
+}
+function chatRow(c) {
+  const key = `chat/${c.id}`;
+  itemsByKey[key] = { key, chat: c };
+  const icon = c.kind === "orchestrator" ? "🧠" : c.kind === "primary" ? "💬" : "🛠️";
+  return `<div class="row ${selected === key ? "sel" : ""}" data-key="${esc(key)}">
+    <span>${icon}</span>
+    <div><div class="title">${esc(c.name)}</div>
+      <div class="sub">${esc(c.branch || "primary checkout")} · ${chatBits(c)}</div></div>
+    <div class="acts">${acts(c, null)}</div></div>`;
+}
+
+let itemsByKey = {};
+function render() {
+  if (!data) return;
+  itemsByKey = {};
+  const showDone = $("#show-done").checked;
+  const parts = [];
+
+  const needs = [];
+  for (const f of data.features) for (const leg of f.legs) if (leg.needs_you) needs.push([f, leg]);
+  $("#needs-count").hidden = !needs.length;
+  $("#needs-count").textContent = `✋ ${needs.length} need you`;
+  if (needs.length) {
+    parts.push(`<section class="needs"><div class="sec-head"><h2>Needs you</h2></div><div class="rows">
+      ${needs.map(([f, leg]) => legRow(f, leg).replace('<div class="title">', `<div class="title">${esc(f.name)} · `)).join("")}</div></section>`);
+  }
+
+  const feats = data.features.filter((f) => (showDone || !f.done) && (showHidden || !hidden.has(f.parent)));
+  for (const f of feats) {
+    const legs = f.legs.filter((l) => showDone || l.stage !== "done");
+    const counts = {};
+    for (const l of legs) counts[l.emoji] = (counts[l.emoji] || 0) + 1;
+    const isCol = collapsed.has(f.parent);
+    parts.push(`<section class="${isCol ? "collapsed" : ""}" data-feature="${esc(f.parent)}">
+      <div class="sec-head" data-toggle="${esc(f.parent)}"><span class="caret">▾</span><h2>${esc(f.name)}</h2>
+        <div class="chips">${Object.entries(counts).map(([e, n]) => `<span class="chip">${e} ${n}</span>`).join("")}
+        ${f.needs_you.length ? `<span class="chip warn">✋ ${f.needs_you.length}</span>` : ""}</div>
+        <span class="grow"></span><span class="meta">${ago(f.updated_at)}</span>
+        <button data-hide="${esc(f.parent)}" title="${hidden.has(f.parent) ? "Unhide" : "Hide"}">${hidden.has(f.parent) ? "Unhide" : "Hide"}</button></div>
+      <div class="rows">${legs.map((l) => legRow(f, l)).join("") || `<div class="empty">No open legs</div>`}</div></section>`);
+  }
+
+  if (data.chats.length) {
+    const isCol = collapsed.has("_chats");
+    parts.push(`<section class="${isCol ? "collapsed" : ""}"><div class="sec-head" data-toggle="_chats"><span class="caret">▾</span><h2>Chats</h2>
+      <span class="chip">${data.chats.length}</span></div><div class="rows">${data.chats.map(chatRow).join("")}</div></section>`);
+  }
+  if (!parts.length) parts.push(`<div class="empty">Nothing in flight.</div>`);
+  $("#main").innerHTML = parts.join("");
+  const nHidden = data.features.filter((f) => hidden.has(f.parent)).length;
+  $("#show-hidden").hidden = !nHidden;
+  $("#show-hidden").textContent = showHidden ? "Hide hidden" : `Hidden (${nHidden})`;
+  $("#updated").textContent = "updated " + new Date(data.generated_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (native) native.postMessage({ type: "status", needs: needs.length });
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    data = await r.json();
+    render();
+  } catch (e) {
+    $("#updated").innerHTML = `<span class="warn-text">box unreachable</span>`;
+  }
+}
+
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const out = await r.json();
+  if (!r.ok) alert((out.stderr || out.stdout || "failed").trim());
+  refresh();
+  return out;
+}
+
+$("#main").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-hide],[data-toggle],[data-act],.row");
+  if (!t) return;
+  if (t.dataset.hide) {
+    e.stopPropagation();
+    hidden.has(t.dataset.hide) ? hidden.delete(t.dataset.hide) : hidden.add(t.dataset.hide);
+    store.set("hidden", [...hidden]);
+    return render();
+  }
+  if (t.dataset.act) { e.stopPropagation(); return post(`/api/chats/${t.dataset.act}`, { id: t.dataset.id }); }
+  if (t.dataset.toggle) {
+    collapsed.has(t.dataset.toggle) ? collapsed.delete(t.dataset.toggle) : collapsed.add(t.dataset.toggle);
+    store.set("collapsed", [...collapsed]);
+    return render();
+  }
+  if (t.dataset.key && itemsByKey[t.dataset.key]) select(itemsByKey[t.dataset.key]);
+});
+$("#show-done").addEventListener("change", render);
+$("#show-hidden").addEventListener("click", () => { showHidden = !showHidden; render(); });
+$("#new-btn").addEventListener("click", () => $("#new-dlg").showModal());
+$("#new-dlg").addEventListener("close", () => {
+  if ($("#new-dlg").returnValue !== "ok") return;
+  const body = Object.fromEntries(new FormData($("#new-form")));
+  $("#new-form").reset();
+  post("/api/chats", body);
+});
+$("#settings-btn").addEventListener("click", () => {
+  const f = $("#settings-form");
+  f.ide.value = store.get("ide", "cursor");
+  f.ide_custom.value = store.get("ide_custom", "");
+  $("#settings-dlg").showModal();
+});
+$("#settings-dlg").addEventListener("close", () => {
+  if ($("#settings-dlg").returnValue !== "ok") return;
+  const f = $("#settings-form");
+  store.set("ide", f.ide.value);
+  store.set("ide_custom", f.ide_custom.value);
+  render();
+});
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

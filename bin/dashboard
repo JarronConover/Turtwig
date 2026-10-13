@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Dashboard server: the orchestrator tree as JSON plus the web UI.
+
+Reads the chat registry (agent-box `state` branch) and the ship-feature
+dispatcher's durable files (~/.local/state/redo). Listens on localhost only;
+the Mac app reaches it through an ssh tunnel.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+HOME = Path.home()
+REGISTRY = HOME / ".agent-box" / "state" / "registry" / "chats"
+REDO_STATE = HOME / ".local" / "state" / "redo"
+SHIP = REDO_STATE / "ship-feature"
+HANDOFFS = REDO_STATE / "handoffs"
+PROJECTS = HOME / ".claude" / "projects"
+CHAT = ROOT / "bin" / "chat"
+
+# ship.py DIGEST_EMOJI: a digest stage (before `:`) -> the stage chip.
+STAGE_EMOJI = {
+    **dict.fromkeys(("blocked", "todo", "waiting", "queued"), "⏳"),
+    **dict.fromkeys(("implementing", "fixing", "ci-fixing"), "🛠️"),
+    **dict.fromkeys(("handed-off", "verifying", "reviewed", "readying"), "🔍"),
+    "reviewing": "👀", "error": "✋", "ci-running": "🧪", "ready": "🧪", "final-look": "🧐",
+    "awaiting-approval": "🙋", "approved": "🟢",
+    **dict.fromkeys(("merged", "deploying", "deployed", "after-merge"), "🚀"),
+    "done": "🏁",
+}
+DONE_STAGES = {"done"}
+
+
+def iso(ts):
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_json(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def tmux_sessions():
+    try:
+        out = subprocess.run(["tmux", "ls", "-F", "#S"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return set()
+    return set(out.stdout.split()) if out.returncode == 0 else set()
+
+
+def chats():
+    alive = tmux_sessions()
+    host = "box" if os.environ.get("CODER_AGENT_URL") else "mac"
+    result = []
+    for path in sorted(REGISTRY.glob("*.json")) if REGISTRY.exists() else []:
+        c = read_json(path)
+        if not c or c.get("status") == "archived":
+            continue
+        c["alive"] = c.get("host") == host and f"chat-{c['id'][:8]}" in alive
+        t = PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", c.get("dir") or "") / f"{c['id']}.jsonl"
+        c["last_activity"] = iso(t.stat().st_mtime) if t.exists() else None
+        result.append(c)
+    return result
+
+
+def parse_digest(digest):
+    head, _, tail = (digest or "").partition("|")
+    stages = dict(x.split("=", 1) for x in head.split() if "=" in x)
+    needs = [x.strip() for x in tail.split(",") if x.strip()]
+    return stages, needs
+
+
+def features(chat_by_branch):
+    result = []
+    for fpath in sorted(SHIP.glob("*.feature.json")) if SHIP.exists() else []:
+        parent = fpath.name.removesuffix(".feature.json")
+        feature = read_json(fpath) or {}
+        events = (read_json(SHIP / f"{parent}.json") or {}).get("events", {})
+        printed = events.get("printed") or {}
+        stages, needs = parse_digest(printed.get("digest"))
+        short = feature.get("short", {})
+        legs = []
+        for ticket, raw in stages.items():
+            stage, _, detail = raw.partition(":")
+            handoff = read_json(HANDOFFS / ticket / "handoff.json") or {}
+            branch = handoff.get("branch")
+            legs.append({
+                "ticket": ticket,
+                "label": short.get(ticket) or ticket,
+                "stage": stage,
+                "detail": detail,
+                "emoji": STAGE_EMOJI.get(stage, "•"),
+                "needs_you": ticket in needs or stage == "error",
+                "mr": handoff.get("mr"),
+                "branch": branch,
+                "repo": handoff.get("repo"),
+                "chat": chat_by_branch.get(branch),
+                "url": f"https://linear.app/redo/issue/{ticket}",
+            })
+        active = [x for x in legs if x["stage"] not in DONE_STAGES]
+        result.append({
+            "parent": parent,
+            "name": feature.get("name") or parent,
+            "url": f"https://linear.app/redo/issue/{parent}",
+            "updated_at": iso(printed["at"]) if printed.get("at") else None,
+            "done": bool(legs) and not active,
+            "legs": legs,
+            "needs_you": [x["label"] for x in legs if x["needs_you"]],
+        })
+    result.sort(key=lambda f: (f["done"], -(datetime.datetime.fromisoformat(f["updated_at"].replace("Z", "+00:00")).timestamp()
+                                             if f["updated_at"] else 0)))
+    return result
+
+
+def state():
+    cs = chats()
+    by_branch = {c["branch"]: c for c in cs if c.get("branch")}
+    fs = features(by_branch)
+    attached = {leg["chat"]["id"] for f in fs for leg in f["legs"] if leg["chat"]}
+    return {
+        "generated_at": iso(datetime.datetime.now().timestamp()),
+        "features": fs,
+        "chats": [c for c in cs if c["id"] not in attached],
+        "ssh_host": os.environ.get("AGENT_BOX_SSH_HOST", "coder.tj-agents"),
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def send(self, code, body, ctype="application/json"):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/api/state":
+            return self.send(200, state())
+        if self.path in ("/", "/index.html"):
+            return self.send(200, (ROOT / "web" / "index.html").read_bytes(), "text/html; charset=utf-8")
+        self.send(404, {"error": "not found"})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        if self.path == "/api/chats":
+            args = [sys.executable, str(CHAT), "new", body["name"]]
+            for key in ("branch", "base", "feature", "parent", "kind", "model", "prompt"):
+                if body.get(key):
+                    args += [f"--{key}", body[key]]
+        elif self.path in ("/api/chats/stop", "/api/chats/start", "/api/chats/archive"):
+            args = [sys.executable, str(CHAT), self.path.rsplit("/", 1)[1], body["id"]]
+        elif self.path == "/api/chats/send":
+            args = [sys.executable, str(CHAT), "send", body["id"], body["text"]]
+        else:
+            return self.send(404, {"error": "not found"})
+        out = subprocess.run(args, capture_output=True, text=True, timeout=600)
+        self.send(200 if out.returncode == 0 else 500, {"stdout": out.stdout, "stderr": out.stderr})
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--port", type=int, default=8790)
+    a = p.parse_args()
+    ThreadingHTTPServer(("127.0.0.1", a.port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -17,4 +17,8 @@ rsync -au --exclude .git --exclude __pycache__ "$HOME/.agents/skills/" "$host:.a
 rsync -au "$HOME/.claude/CLAUDE.md" "$host:.claude/CLAUDE.md"
 rsync -au "$mac_memory" "$host:$box_memory"
 rsync -au "$host:$box_memory" "$mac_memory"
+# Dispatcher state, until the dispatcher itself runs on the box.
+ssh -n "$host" 'mkdir -p ~/.local/state/redo' 2> /dev/null
+rsync -a --delete "$HOME/.local/state/redo/ship-feature" "$HOME/.local/state/redo/handoffs" \
+  "$HOME/.local/state/redo/designs" "$host:.local/state/redo/"
 echo "env pushed to $host"

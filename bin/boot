@@ -14,7 +14,7 @@ log "boot start"
 
 if [ "$AGENT_HOST" = box ]; then
   missing=()
-  for pkg in tmux rsync jq; do command -v "$pkg" > /dev/null || missing+=("$pkg"); done
+  for pkg in tmux rsync jq ttyd; do command -v "$pkg" > /dev/null || missing+=("$pkg"); done
   if [ ${#missing[@]} -gt 0 ]; then
     sudo apt-get update -qq > /dev/null 2>&1
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" > /dev/null 2>&1 \
@@ -74,5 +74,10 @@ if [ "$AGENT_HOST" = box ]; then
   pkill -f "^agentapi server" 2> /dev/null || true
   tmux has-session -t agent-box 2> /dev/null \
     || tmux new-session -d -s agent-box "$AGENT_BOX_DIR/bin/chat supervise 2>&1 | tee -a $AGENT_HOME/log/supervisor.log"
+  tmux has-session -t agent-box-web 2> /dev/null \
+    || tmux new-session -d -s agent-box-web "$AGENT_BOX_DIR/bin/dashboard --port 8790 2>&1 | tee -a $AGENT_HOME/log/dashboard.log"
+  # Terminals: /?arg=<tmux session> attaches to that chat's tmux session.
+  tmux has-session -t agent-box-tty 2> /dev/null \
+    || tmux new-session -d -s agent-box-tty "ttyd -i 127.0.0.1 -p 8791 -W -a -t fontSize=13 tmux attach -t 2>&1 | tee -a $AGENT_HOME/log/ttyd.log"
 fi
 log "boot done"
