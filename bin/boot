@@ -67,6 +67,9 @@ fi
 
 touch "$marker"
 
+# tmux's server outlives this script; keep it from inheriting the lock fd.
+exec 8>&-
+
 if [ "$AGENT_HOST" = box ]; then
   # The template's AgentAPI claude runs `--continue` in ~/project, which would
   # resume (and double-run) the newest primary chat. It has done its job of
