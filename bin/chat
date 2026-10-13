@@ -129,16 +129,23 @@ def trust_folder(path):
         tmp.replace(CLAUDE_JSON)
 
 
-def ensure_worktree(chat):
-    """Create the chat's worktree if it's missing; returns its directory."""
+def worktree_dir(chat):
+    return WORKTREES / chat["branch"].replace("/", "-")
+
+
+def ensure_worktree(chat, restore_from=None):
+    """Create the chat's worktree if it's missing; returns its directory.
+    restore_from: also apply that host's latest WIP (the worktree must be clean)."""
     if not chat.get("branch"):
         return Path(chat["dir"])
     repo = chat.get("repo", "redo")
     if repo != "redo":
         sys.exit(f"only the redo repo is supported so far, not {repo!r}")
     primary = PRIMARY[repo]
-    wt_dir = WORKTREES / chat["branch"].replace("/", "-")
+    wt_dir = worktree_dir(chat)
     if wt_dir.exists():
+        if restore_from:
+            wip_restore(wt_dir, restore_from)
         return wt_dir
     run(["git", "-C", str(primary), "fetch", "-q", "origin"], check=False)
     base = chat.get("base")
@@ -152,14 +159,22 @@ def ensure_worktree(chat):
     run([str(WT), chat["branch"], "--no-start"], env=env, capture_output=True)
     if not wt_dir.exists():
         sys.exit(f"wt didn't create {wt_dir}")
-    restore = run([str(Path(__file__).parent / "wip-restore"), str(wt_dir)], check=False, capture_output=True)
-    if restore.returncode == 0:
-        print(restore.stdout.strip())
+    if restore_from:
+        wip_restore(wt_dir, restore_from)
     return wt_dir
 
 
-def launch(chat, resume):
-    directory = ensure_worktree(chat)
+def wip_restore(directory, host):
+    out = run([str(Path(__file__).parent / "wip-restore"), str(directory), host], check=False, capture_output=True)
+    text = (out.stdout + out.stderr).strip()
+    if out.returncode != 0 and "no WIP from" not in text:
+        sys.exit(f"WIP restore failed: {text}")
+    if text:
+        print(text, file=sys.stderr)
+
+
+def launch(chat, resume, restore_from=None):
+    directory = ensure_worktree(chat, restore_from)
     trust_folder(directory)
     name = tmux_name(chat)
     if tmux_alive(name):
@@ -280,6 +295,130 @@ def cmd_send(args):
     run(["tmux", "send-keys", "-t", name, "C-m"])
 
 
+
+BOX_SSH = os.environ.get("AGENT_BOX_SSH", "coder.tj-agents")
+
+
+def on_box(*args):
+    """Run this script on the box; returns its stdout."""
+    remote = "$HOME/agent-box/bin/chat " + shlex.join(args)
+    out = run(["ssh", "-n", BOX_SSH, remote], check=False, capture_output=True)
+    if out.returncode != 0:
+        sys.exit(f"box: {out.stderr.strip() or out.stdout.strip()}")
+    return out.stdout
+
+
+def release_here(chat):
+    """Stop the chat here and make its latest WIP and transcript durable."""
+    chat["status"] = "moving"
+    save(chat, f"chat moving: {chat['name']}")
+    if tmux_alive(tmux_name(chat)):
+        run(["tmux", "kill-session", "-t", tmux_name(chat)], check=False)
+    if chat.get("branch") and chat.get("dir"):
+        queue = AGENT_HOME / "queue"
+        queue.mkdir(parents=True, exist_ok=True)
+        (queue / f"move-{chat['id']}").write_text(chat["dir"] + "\n")
+    run([str(Path(__file__).parent / "sync-worker")], check=False)
+
+
+def take_over(chat, directory):
+    chat["host"] = HOST
+    chat["dir"] = str(directory)
+    chat["status"] = "running"
+    launch(chat, resume=True)
+    save(chat, f"chat moved to {HOST}: {chat['name']}")
+
+
+def prepare_here(chat, frm):
+    if chat.get("branch"):
+        return ensure_worktree(chat, restore_from=frm)
+    return PRIMARY[chat.get("repo", "redo")]
+
+
+def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id):
+    """Copy a chat's transcript (and its subagent folder) between machines."""
+    src = f".claude/projects/{project_slug(src_dir)}/"
+    dst = f".claude/projects/{project_slug(dst_dir)}/"
+    remote_src = f"{BOX_SSH}:{src}" if src_host == "box" else str(HOME / src)
+    remote_dst = f"{BOX_SSH}:{dst}" if dst_host == "box" else str(HOME / dst)
+    if dst_host == "box":
+        run(["ssh", "-n", BOX_SSH, f"mkdir -p {shlex.quote(dst)}"], check=False, capture_output=True)
+    else:
+        (HOME / dst).mkdir(parents=True, exist_ok=True)
+    run(["rsync", "-a", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
+         remote_src, remote_dst], capture_output=True)
+
+
+def cmd_move(args):
+    if HOST != "mac":
+        sys.exit("run moves from the Mac (it can reach the box; the box can't reach it)")
+    git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+    chat = find(args.chat)
+    if chat["host"] == args.to:
+        sys.exit(f"{chat['name']} is already on {args.to}")
+    if args.to == "mac":
+        box_dir = json.loads(on_box("_release", chat["id"]))["dir"]
+        git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+        chat = find(chat["id"])
+        local = prepare_here(chat, "box")
+        copy_transcript("box", box_dir, "mac", local, chat["id"])
+        take_over(chat, local)
+        print(f"moved {chat['name']} to the Mac: {local}")
+    else:
+        release_here(chat)
+        box_dir = json.loads(on_box("_prepare", chat["id"], "mac"))["dir"]
+        copy_transcript("mac", chat["dir"], "box", box_dir, chat["id"])
+        on_box("_take", chat["id"], box_dir)
+        print(f"moved {chat['name']} to the box: {box_dir}")
+
+
+def cmd__release(args):
+    git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+    chat = find(args.chat)
+    release_here(chat)
+    print(json.dumps({"dir": chat["dir"]}))
+
+
+def cmd__prepare(args):
+    git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+    print(json.dumps({"dir": str(prepare_here(find(args.chat), args.frm))}))
+
+
+def cmd__take(args):
+    git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+    take_over(find(args.chat), Path(args.dir))
+
+
+def cmd_test_local(args):
+    """Check the chat's branch out on the Mac with the box's latest WIP, for
+    manual testing; the chat itself stays on the box."""
+    if HOST != "mac":
+        sys.exit("run this on the Mac")
+    git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+    chat = find(args.chat)
+    if not chat.get("branch"):
+        sys.exit("this chat has no branch to check out")
+    if chat["host"] == "box":
+        on_box("_snapshot", chat["id"])
+    directory = ensure_worktree(chat, restore_from=chat["host"])
+    print(f"{directory}\nStart its stack with: wt start {chat['branch']} -d")
+
+
+def cmd__snapshot(args):
+    chat = find(args.chat)
+    if chat.get("dir"):
+        queue = AGENT_HOME / "queue"
+        queue.mkdir(parents=True, exist_ok=True)
+        (queue / f"snap-{chat['id']}").write_text(chat["dir"] + "\n")
+    run([str(Path(__file__).parent / "sync-worker")], check=False)
+
+
+def cmd_stack_start(args):
+    chat = find(args.chat)
+    if HOST != "mac" or not chat.get("branch"):
+        sys.exit("stacks start on the Mac, for a chat with a branch")
+    os.execvp(str(WT), [str(WT), "start", chat["branch"], "-d"])
+
 def cmd_supervise(args):
     """Keep every running chat on this host alive; runs forever."""
     while True:
@@ -290,7 +429,8 @@ def cmd_supervise(args):
             if tmux_alive(tmux_name(chat)):
                 continue
             try:
-                launch(chat, resume=transcript(chat).exists())
+                fresh = chat.get("branch") and not worktree_dir(chat).exists()
+                launch(chat, resume=transcript(chat).exists(), restore_from=HOST if fresh else None)
                 save(chat, f"chat relaunch: {chat['name']}")
                 print(f"{now()} relaunched {chat['name']}", flush=True)
             except (subprocess.CalledProcessError, SystemExit) as err:
@@ -329,6 +469,32 @@ def main():
     se.add_argument("chat")
     se.add_argument("text")
     se.set_defaults(fn=cmd_send)
+
+    mv = sub.add_parser("move", help="move a chat between the box and the Mac (run on the Mac)")
+    mv.add_argument("chat")
+    mv.add_argument("--to", required=True, choices=["box", "mac"])
+    mv.set_defaults(fn=cmd_move)
+
+    tl = sub.add_parser("test-local", help="check the chat's branch out on the Mac with its WIP")
+    tl.add_argument("chat")
+    tl.set_defaults(fn=cmd_test_local)
+
+    ss = sub.add_parser("stack-start", help="start the chat branch's local stack (wt start -d)")
+    ss.add_argument("chat")
+    ss.set_defaults(fn=cmd_stack_start)
+
+    for name, fn in [("_release", cmd__release), ("_snapshot", cmd__snapshot)]:
+        h = sub.add_parser(name)
+        h.add_argument("chat")
+        h.set_defaults(fn=fn)
+    h = sub.add_parser("_prepare")
+    h.add_argument("chat")
+    h.add_argument("frm")
+    h.set_defaults(fn=cmd__prepare)
+    h = sub.add_parser("_take")
+    h.add_argument("chat")
+    h.add_argument("dir")
+    h.set_defaults(fn=cmd__take)
 
     sv = sub.add_parser("supervise")
     sv.add_argument("--interval", type=int, default=30)

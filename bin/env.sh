@@ -57,3 +57,9 @@ wip_key() {
   origin=$(git -C "$top" remote get-url origin 2> /dev/null) || return 1
   printf '%s/%s' "$(basename "${origin%.git}")" "$(printf '%s' "$branch" | tr '/' '~')"
 }
+
+# Is this session id a registry chat that lives on the Mac?
+mac_chat() {
+  local f="$AGENT_STATE_DIR/registry/chats/$1.json"
+  [ -n "$1" ] && [ -f "$f" ] && [ "$(jq -r .host "$f")" = mac ]
+}

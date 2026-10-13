@@ -47,9 +47,21 @@ snapshot_worktree() {
 
 sync_sessions() {
   local s=$AGENT_SESSIONS_DIR
-  if [ -d "$CLAUDE_PROJECTS_DIR" ]; then
+  if [ "$AGENT_HOST" = box ] && [ -d "$CLAUDE_PROJECTS_DIR" ]; then
     mkdir -p "$s/hosts/$AGENT_HOST/projects"
     rsync -a "$CLAUDE_PROJECTS_DIR/" "$s/hosts/$AGENT_HOST/projects/"
+  elif [ "$AGENT_HOST" = mac ]; then
+    # Only the chats that live on the Mac, not every local session.
+    local f id slug
+    for f in "$AGENT_STATE_DIR"/registry/chats/*.json; do
+      [ -f "$f" ] && [ "$(jq -r .host "$f")" = mac ] || continue
+      id=$(jq -r .id "$f")
+      slug=$(jq -r .dir "$f" | sed 's#[^A-Za-z0-9]#-#g')
+      [ -f "$CLAUDE_PROJECTS_DIR/$slug/$id.jsonl" ] || continue
+      mkdir -p "$s/hosts/mac/projects/$slug"
+      rsync -a "$CLAUDE_PROJECTS_DIR/$slug/$id.jsonl" "$s/hosts/mac/projects/$slug/"
+      [ -d "$CLAUDE_PROJECTS_DIR/$slug/$id" ] && rsync -a "$CLAUDE_PROJECTS_DIR/$slug/$id" "$s/hosts/mac/projects/$slug/"
+    done
   fi
   git -C "$s" add -A
   if git -C "$s" rev-parse -q --verify HEAD > /dev/null; then
