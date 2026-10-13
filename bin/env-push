@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Run on the Mac: give the box TJ's personal Claude setup (skills, global
+# CLAUDE.md, the redo project's auto memory), and bring back memory the box
+# wrote. Files only flow toward the newer copy, so neither side loses edits.
+set -euo pipefail
+host=${AGENT_BOX_SSH:-coder.tj-agents}
+mac_memory="$HOME/.claude/projects/-Users-tj-dev-redo/memory/"
+box_memory=".claude/projects/-home-coder-project/memory/"
+
+ssh -n "$host" 'mkdir -p ~/.agents/skills ~/.claude/projects/-home-coder-project/memory
+  if [ -d ~/.claude/skills ] && [ ! -L ~/.claude/skills ]; then
+    cp -a ~/.claude/skills/. ~/.agents/skills/ && rm -rf ~/.claude/skills
+  fi
+  [ -L ~/.claude/skills ] || ln -s ../.agents/skills ~/.claude/skills' 2> /dev/null
+
+rsync -au --exclude .git --exclude __pycache__ "$HOME/.agents/skills/" "$host:.agents/skills/"
+rsync -au "$HOME/.claude/CLAUDE.md" "$host:.claude/CLAUDE.md"
+rsync -au "$mac_memory" "$host:$box_memory"
+rsync -au "$host:$box_memory" "$mac_memory"
+echo "env pushed to $host"

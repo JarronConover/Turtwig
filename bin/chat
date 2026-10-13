@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Launch and track Claude Code chats that run under Remote Control.
+
+Every chat is one interactive `claude --remote-control` process in its own
+tmux session, recorded in the registry on the agent-box `state` branch
+(registry/chats/<session id>.json). `supervise` keeps every running chat on
+this host alive, so chats survive crashes and workspace restarts.
+"""
+
+import argparse
+import datetime
+import fcntl
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+HOME = Path.home()
+ON_BOX = bool(os.environ.get("CODER_AGENT_URL"))
+HOST = "box" if ON_BOX else "mac"
+AGENT_HOME = HOME / ".agent-box"
+STATE_DIR = AGENT_HOME / "state"
+REGISTRY = STATE_DIR / "registry" / "chats"
+CLAUDE_JSON = HOME / ".claude.json"
+PROJECTS = HOME / ".claude" / "projects"
+
+if ON_BOX:
+    PRIMARY = {"redo": HOME / "project"}
+    WORKTREES = HOME / "worktrees"
+    WT = HOME / "redo-monorepo-worktrees" / "bin" / "wt"
+else:
+    PRIMARY = {"redo": HOME / "dev" / "redo"}
+    WORKTREES = HOME / "dev" / "redo-worktrees"
+    WT = Path("wt")
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run(cmd, **kw):
+    kw.setdefault("check", True)
+    kw.setdefault("text", True)
+    return subprocess.run(cmd, **kw)
+
+
+def git_state(*args, check=True):
+    return run(["git", "-C", str(STATE_DIR), *args], capture_output=True, check=check)
+
+
+class StateLock:
+    def __enter__(self):
+        AGENT_HOME.mkdir(parents=True, exist_ok=True)
+        self.f = open(AGENT_HOME / "state.lock", "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+def commit_state(message):
+    """Commit and push the state branch; a failed push retries next write."""
+    git_state("add", "-A")
+    if git_state("diff", "--cached", "--quiet", check=False).returncode != 0:
+        git_state("commit", "-q", "-m", message)
+    for _ in range(3):
+        git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+        if git_state("push", "-q", "origin", "HEAD:state", check=False).returncode == 0:
+            return
+        time.sleep(2)
+    print("warning: state push failed; it will go out with the next write", file=sys.stderr)
+
+
+def load(chat_id):
+    path = REGISTRY / f"{chat_id}.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def save(chat, message):
+    with StateLock():
+        REGISTRY.mkdir(parents=True, exist_ok=True)
+        chat["updated_at"] = now()
+        (REGISTRY / f"{chat['id']}.json").write_text(json.dumps(chat, indent=2) + "\n")
+        commit_state(message)
+
+
+def all_chats():
+    if not REGISTRY.exists():
+        return []
+    return [json.loads(p.read_text()) for p in sorted(REGISTRY.glob("*.json"))]
+
+
+def find(prefix):
+    matches = [c for c in all_chats() if c["id"].startswith(prefix) or c["name"] == prefix]
+    if len(matches) != 1:
+        sys.exit(f"{'no' if not matches else 'ambiguous'} chat matching {prefix!r}")
+    return matches[0]
+
+
+def tmux_name(chat):
+    return "chat-" + chat["id"][:8]
+
+
+def tmux_alive(name):
+    return run(["tmux", "has-session", "-t", name], check=False, capture_output=True).returncode == 0
+
+
+def project_slug(path):
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def trust_folder(path):
+    """Pre-accept the folder trust dialog so a headless start never blocks on it."""
+    with StateLock():
+        cfg = json.loads(CLAUDE_JSON.read_text()) if CLAUDE_JSON.exists() else {}
+        proj = cfg.setdefault("projects", {}).setdefault(str(path), {})
+        if proj.get("hasTrustDialogAccepted"):
+            return
+        proj["hasTrustDialogAccepted"] = True
+        tmp = CLAUDE_JSON.with_suffix(".json.agent-box")
+        tmp.write_text(json.dumps(cfg, indent=2))
+        tmp.replace(CLAUDE_JSON)
+
+
+def ensure_worktree(chat):
+    """Create the chat's worktree if it's missing; returns its directory."""
+    if not chat.get("branch"):
+        return Path(chat["dir"])
+    repo = chat.get("repo", "redo")
+    if repo != "redo":
+        sys.exit(f"only the redo repo is supported so far, not {repo!r}")
+    primary = PRIMARY[repo]
+    wt_dir = WORKTREES / chat["branch"].replace("/", "-")
+    if wt_dir.exists():
+        return wt_dir
+    run(["git", "-C", str(primary), "fetch", "-q", "origin"], check=False)
+    base = chat.get("base")
+    local = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/heads/{chat['branch']}"],
+                check=False, capture_output=True).returncode == 0
+    remote = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/remotes/origin/{chat['branch']}"],
+                 check=False, capture_output=True).returncode == 0
+    if base and not local and not remote:
+        run(["git", "-C", str(primary), "branch", "-q", "--no-track", chat["branch"], f"origin/{base}"])
+    env = dict(os.environ, WT_PRIMARY=str(primary), WT_BASE=str(WORKTREES))
+    run([str(WT), chat["branch"], "--no-start"], env=env, capture_output=True)
+    if not wt_dir.exists():
+        sys.exit(f"wt didn't create {wt_dir}")
+    restore = run([str(Path(__file__).parent / "wip-restore"), str(wt_dir)], check=False, capture_output=True)
+    if restore.returncode == 0:
+        print(restore.stdout.strip())
+    return wt_dir
+
+
+def launch(chat, resume):
+    directory = ensure_worktree(chat)
+    trust_folder(directory)
+    name = tmux_name(chat)
+    if tmux_alive(name):
+        return
+    cmd = [shutil.which("claude") or str(HOME / ".local" / "bin" / "claude")]
+    if resume:
+        cmd += ["--resume", chat["id"]]
+    else:
+        cmd += ["--session-id", chat["id"]]
+    cmd += ["--remote-control", chat["name"]]
+    if chat.get("model"):
+        cmd += ["--model", chat["model"]]
+    if not resume and chat.get("prompt"):
+        cmd.append(chat["prompt"])
+    run(["tmux", "new-session", "-d", "-s", name, "-x", "220", "-y", "60", "-c", str(directory),
+         shlex.join(cmd)])
+    chat["dir"] = str(directory)
+
+
+def transcript(chat):
+    return PROJECTS / project_slug(chat["dir"]) / f"{chat['id']}.jsonl"
+
+
+def cmd_new(args):
+    chat_id = str(uuid.uuid4())
+    if args.branch:
+        directory = None
+    else:
+        directory = Path(args.dir).expanduser().resolve() if args.dir else PRIMARY["redo"]
+    chat = {
+        "id": chat_id,
+        "name": args.name,
+        "kind": args.kind,
+        "parent": args.parent,
+        "feature": args.feature,
+        "repo": args.repo,
+        "branch": args.branch,
+        "base": args.base,
+        "dir": str(directory) if directory else None,
+        "model": args.model,
+        "prompt": args.prompt,
+        "host": HOST,
+        "status": "running",
+        "created_at": now(),
+    }
+    launch(chat, resume=False)
+    chat.pop("prompt", None)
+    save(chat, f"chat new: {args.name}")
+    print(f"{chat_id}  {args.name}  {chat['dir']}  (tmux: {tmux_name(chat)})")
+
+
+def cmd_list(args):
+    chats = all_chats()
+    if args.json:
+        for c in chats:
+            c["alive"] = c["host"] == HOST and tmux_alive(tmux_name(c))
+            t = transcript(c) if c.get("dir") else None
+            c["last_activity"] = (datetime.datetime.fromtimestamp(t.stat().st_mtime, datetime.timezone.utc)
+                                  .strftime("%Y-%m-%dT%H:%M:%SZ") if t and t.exists() else None)
+        print(json.dumps(chats, indent=2))
+        return
+    for c in chats:
+        if c["status"] == "archived" and not args.all:
+            continue
+        alive = "up" if c["host"] == HOST and tmux_alive(tmux_name(c)) else "--"
+        print(f"{c['id'][:8]}  {alive}  {c['host']:3}  {c['status']:8}  {c['kind']:12}  {c['name']}  [{c.get('branch') or c.get('dir')}]")
+
+
+def set_status(chat, status):
+    if status != "running" and tmux_alive(tmux_name(chat)):
+        run(["tmux", "kill-session", "-t", tmux_name(chat)], check=False)
+    chat["status"] = status
+    save(chat, f"chat {status}: {chat['name']}")
+
+
+def cmd_stop(args):
+    set_status(find(args.chat), "stopped")
+
+
+def cmd_archive(args):
+    set_status(find(args.chat), "archived")
+
+
+def cmd_start(args):
+    chat = find(args.chat)
+    if chat["host"] != HOST:
+        sys.exit(f"{chat['name']} lives on {chat['host']}; move it here first")
+    launch(chat, resume=True)
+    if chat["status"] != "running":
+        chat["status"] = "running"
+        save(chat, f"chat start: {chat['name']}")
+
+
+def cmd_attach(args):
+    os.execvp("tmux", ["tmux", "attach", "-t", tmux_name(find(args.chat))])
+
+
+def cmd_supervise(args):
+    """Keep every running chat on this host alive; runs forever."""
+    while True:
+        git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+        for chat in all_chats():
+            if chat["host"] != HOST or chat["status"] != "running":
+                continue
+            if tmux_alive(tmux_name(chat)):
+                continue
+            try:
+                launch(chat, resume=transcript(chat).exists())
+                print(f"{now()} relaunched {chat['name']}", flush=True)
+            except (subprocess.CalledProcessError, SystemExit) as err:
+                print(f"{now()} relaunch failed for {chat['name']}: {err}", flush=True)
+        time.sleep(args.interval)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="chat")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    n = sub.add_parser("new", help="start a chat")
+    n.add_argument("name")
+    n.add_argument("--kind", default="feature", choices=["orchestrator", "feature", "primary"])
+    n.add_argument("--branch", help="run in this branch's worktree (created with wt)")
+    n.add_argument("--base", help="new branch starts from origin/<base> instead of main")
+    n.add_argument("--repo", default="redo")
+    n.add_argument("--dir", help="no branch: run here (default: the primary checkout)")
+    n.add_argument("--parent", help="orchestrator chat id")
+    n.add_argument("--feature", help="feature slug for grouping")
+    n.add_argument("--model")
+    n.add_argument("--prompt", help="first message")
+    n.set_defaults(fn=cmd_new)
+
+    ls = sub.add_parser("list")
+    ls.add_argument("--json", action="store_true")
+    ls.add_argument("--all", action="store_true")
+    ls.set_defaults(fn=cmd_list)
+
+    for name, fn in [("stop", cmd_stop), ("archive", cmd_archive), ("start", cmd_start), ("attach", cmd_attach)]:
+        s = sub.add_parser(name)
+        s.add_argument("chat", help="id prefix or name")
+        s.set_defaults(fn=fn)
+
+    sv = sub.add_parser("supervise")
+    sv.add_argument("--interval", type=int, default=30)
+    sv.set_defaults(fn=cmd_supervise)
+
+    args = p.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()
