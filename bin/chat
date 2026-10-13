@@ -413,18 +413,39 @@ def cmd__take(args):
 
 
 def cmd_test_local(args):
-    """Check the chat's branch out on the Mac with the box's latest WIP, for
-    manual testing; the chat itself stays on the box."""
+    """Check a branch out on the Mac with the box's latest WIP, for manual
+    testing; the chat (or dispatcher leg) working on it stays on the box.
+    Takes a chat, or --branch for a leg that has no chat of its own."""
     if HOST != "mac":
         sys.exit("run this on the Mac")
-    git_state("pull", "-q", "--rebase", "origin", "state", check=False)
-    chat = find(args.chat)
-    if not chat.get("branch"):
-        sys.exit("this chat has no branch to check out")
-    if chat["host"] == "box":
-        on_box("_snapshot", chat["id"])
+    if args.branch:
+        chat = {"branch": args.branch, "repo": "redo", "host": "box"}
+        on_box("_snapshot_branch", args.branch)
+    else:
+        git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+        chat = find(args.chat)
+        if not chat.get("branch"):
+            sys.exit("this chat has no branch to check out")
+        if chat["host"] == "box":
+            on_box("_snapshot", chat["id"])
     directory = ensure_worktree(chat, restore_from=chat["host"])
     print(f"{directory}\nStart its stack with: wt start {chat['branch']} -d")
+
+
+def cmd__snapshot_branch(args):
+    """Snapshot whichever box worktree has this branch checked out."""
+    out = run(["git", "-C", str(PRIMARY["redo"]), "worktree", "list", "--porcelain"], capture_output=True).stdout
+    path = None
+    for block in out.split("\n\n"):
+        lines = dict(line.split(" ", 1) for line in block.splitlines() if " " in line)
+        if lines.get("branch") == f"refs/heads/{args.branch}":
+            path = lines.get("worktree")
+    if not path:
+        return
+    queue = AGENT_HOME / "queue"
+    queue.mkdir(parents=True, exist_ok=True)
+    (queue / "snap-branch").write_text(path + "\n")
+    run([str(Path(__file__).parent / "sync-worker")], check=False)
 
 
 def cmd__snapshot(args):
@@ -499,7 +520,8 @@ def main():
     mv.set_defaults(fn=cmd_move)
 
     tl = sub.add_parser("test-local", help="check the chat's branch out on the Mac with its WIP")
-    tl.add_argument("chat")
+    tl.add_argument("chat", nargs="?")
+    tl.add_argument("--branch", help="a dispatcher leg's branch instead of a chat")
     tl.set_defaults(fn=cmd_test_local)
 
     ss = sub.add_parser("stack-start", help="start the chat branch's local stack (wt start -d)")
@@ -510,6 +532,9 @@ def main():
         h = sub.add_parser(name)
         h.add_argument("chat")
         h.set_defaults(fn=fn)
+    h = sub.add_parser("_snapshot_branch")
+    h.add_argument("branch")
+    h.set_defaults(fn=cmd__snapshot_branch)
     h = sub.add_parser("_prepare")
     h.add_argument("chat")
     h.add_argument("frm")

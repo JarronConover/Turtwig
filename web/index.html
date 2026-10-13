@@ -170,6 +170,14 @@ function acts(c, mr) {
   return out.join("");
 }
 
+function legActs(f, leg) {
+  if (leg.chat) return acts(leg.chat, leg.mr);
+  let out = acts(null, leg.mr);
+  if (native && f.host === "box" && leg.branch && leg.repo === "redo" && !["merged", "deployed", "after-merge", "done"].includes(leg.stage))
+    out += `<button data-run='${esc(JSON.stringify(["chat", "test-local", "--branch", leg.branch]))}' title="Check this leg's branch out on the Mac with the box's latest work">Test on Mac</button>`;
+  return out;
+}
+
 function legRow(f, leg) {
   const key = `${f.parent}/${leg.ticket}`;
   const item = { key, chat: leg.chat, mr: leg.mr };
@@ -178,7 +186,7 @@ function legRow(f, leg) {
     <span>${leg.emoji}</span>
     <div><div class="title">${esc(leg.label)}</div>
       <div class="sub">${esc(leg.stage)}${leg.detail ? " · " + esc(leg.detail) : ""} · ${chatBits(leg.chat)}</div></div>
-    <div class="acts">${acts(leg.chat, leg.mr)}</div></div>`;
+    <div class="acts">${legActs(f, leg)}</div></div>`;
 }
 function chatRow(c) {
   const key = `chat/${c.id}`;
