@@ -60,11 +60,12 @@ sync_sessions() {
   else
     git -C "$s" commit -q --allow-empty -m "sessions snapshot ($AGENT_HOST)"
   fi
-  if git -C "$s" push -q --force origin "HEAD:refs/heads/$SESSIONS_BRANCH" 2>> "$AGENT_LOG"; then
+  local err
+  if err=$(git -C "$s" push -q --force origin "HEAD:refs/heads/$SESSIONS_BRANCH" 2>&1); then
     rm -f "$AGENT_HOME/push-pending"
   else
     touch "$AGENT_HOME/push-pending"
-    log "push failed; retrying on the next turn"
+    log "push failed, retrying on the next turn: $err"
   fi
 }
 
