@@ -31,7 +31,12 @@ git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.bundle" > "$bundle"
 
 head=$(jq -r .head <<< "$meta")
 snap=$(jq -r .snap <<< "$meta")
-git -C "$top" fetch -q origin
+# Other sessions fetch in the same repo and hold ref locks; retry, then go on
+# (the bundle fetch below fails clearly if a needed commit is still missing).
+for i in 1 2 3; do
+  git -C "$top" fetch -q origin 2> /dev/null && break
+  sleep $((i * 3))
+done
 git -C "$top" fetch -q "$bundle" refs/agent-box/wip
 
 if [ "$(git -C "$top" rev-parse HEAD)" != "$head" ]; then
