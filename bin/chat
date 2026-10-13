@@ -269,6 +269,17 @@ def cmd_attach(args):
     os.execvp("tmux", ["tmux", "attach", "-t", tmux_name(find(args.chat))])
 
 
+def cmd_send(args):
+    """Type a message into a chat and submit it (a separate Enter, or the TUI
+    treats the burst as a paste and doesn't submit)."""
+    name = tmux_name(find(args.chat))
+    if not tmux_alive(name):
+        sys.exit("chat isn't running here")
+    run(["tmux", "send-keys", "-t", name, "-l", args.text])
+    time.sleep(0.5)
+    run(["tmux", "send-keys", "-t", name, "C-m"])
+
+
 def cmd_supervise(args):
     """Keep every running chat on this host alive; runs forever."""
     while True:
@@ -313,6 +324,11 @@ def main():
         s = sub.add_parser(name)
         s.add_argument("chat", help="id prefix or name")
         s.set_defaults(fn=fn)
+
+    se = sub.add_parser("send", help="type a message into a running chat")
+    se.add_argument("chat")
+    se.add_argument("text")
+    se.set_defaults(fn=cmd_send)
 
     sv = sub.add_parser("supervise")
     sv.add_argument("--interval", type=int, default=30)
