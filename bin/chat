@@ -30,6 +30,10 @@ REGISTRY = STATE_DIR / "registry" / "chats"
 CLAUDE_JSON = HOME / ".claude.json"
 PROJECTS = HOME / ".claude" / "projects"
 
+for key, value in (("GIT_AUTHOR_NAME", f"agent-box ({HOST})"), ("GIT_AUTHOR_EMAIL", "tj@getredo.com")):
+    os.environ.setdefault(key, value)
+    os.environ.setdefault(key.replace("AUTHOR", "COMMITTER"), value)
+
 if ON_BOX:
     PRIMARY = {"redo": HOME / "project"}
     WORKTREES = HOME / "worktrees"
