@@ -160,12 +160,13 @@ def ensure_worktree(chat, restore_from=None):
     if not wt_dir.exists():
         sys.exit(f"wt didn't create {wt_dir}")
     if restore_from:
-        wip_restore(wt_dir, restore_from)
+        wip_restore(wt_dir, restore_from, fresh=True)
     return wt_dir
 
 
-def wip_restore(directory, host):
-    out = run([str(Path(__file__).parent / "wip-restore"), str(directory), host], check=False, capture_output=True)
+def wip_restore(directory, host, fresh=False):
+    args = [str(Path(__file__).parent / "wip-restore")] + (["--fresh"] if fresh else []) + [str(directory), host]
+    out = run(args, check=False, capture_output=True)
     text = (out.stdout + out.stderr).strip()
     if out.returncode != 0 and "no WIP from" not in text:
         sys.exit(f"WIP restore failed: {text}")

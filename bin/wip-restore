@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# wip-restore <worktree> [host]: put another host's latest WIP for this
-# branch into a clean worktree: its unpushed commits, plus its uncommitted
-# changes left uncommitted. host defaults to the other machine.
+# wip-restore [--fresh] <worktree> [host]: put another host's latest WIP for
+# this branch into a clean worktree: its unpushed commits, plus its
+# uncommitted changes left uncommitted. host defaults to the other machine.
+# --fresh: the worktree was just created, so move its branch to the WIP's
+# head even when that isn't a fast-forward.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 
-[ $# -ge 1 ] || { echo "usage: wip-restore <worktree> [box|mac]" >&2; exit 2; }
+fresh=0
+[ "${1:-}" = --fresh ] && { fresh=1; shift; }
+[ $# -ge 1 ] || { echo "usage: wip-restore [--fresh] <worktree> [box|mac]" >&2; exit 2; }
 top=$(git -C "$1" rev-parse --show-toplevel)
 from=${2:-$([ "$AGENT_HOST" = box ] && echo mac || echo box)}
 key=$(wip_key "$top") || { echo "not on a branch with an origin: $top" >&2; exit 1; }
@@ -31,7 +35,7 @@ git -C "$top" fetch -q origin
 git -C "$top" fetch -q "$bundle" refs/agent-box/wip
 
 if [ "$(git -C "$top" rev-parse HEAD)" != "$head" ]; then
-  if ! git -C "$top" merge-base --is-ancestor HEAD "$head"; then
+  if [ "$fresh" = 0 ] && ! git -C "$top" merge-base --is-ancestor HEAD "$head"; then
     echo "this branch has commits the $from WIP doesn't; not overwriting them" >&2
     exit 1
   fi
