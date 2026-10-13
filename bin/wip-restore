@@ -40,8 +40,10 @@ done
 git -C "$top" fetch -q "$bundle" refs/agent-box/wip
 
 if [ "$(git -C "$top" rev-parse HEAD)" != "$head" ]; then
-  if [ "$fresh" = 0 ] && ! git -C "$top" merge-base --is-ancestor HEAD "$head"; then
-    echo "this branch has commits the $from WIP doesn't; not overwriting them" >&2
+  # Only refuse when this branch has commits that exist nowhere else: not on
+  # origin and not in the WIP. Anything else is safe to move.
+  if [ "$fresh" = 0 ] && [ -n "$(git -C "$top" rev-list HEAD --not --remotes=origin "$head" | head -1)" ]; then
+    echo "this branch has local commits the $from WIP doesn't; not overwriting them" >&2
     exit 1
   fi
   git -C "$top" reset -q --keep "$head"
