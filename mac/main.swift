@@ -106,6 +106,11 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
         term.loadHTMLString(placeholder("Select a chat to attach its terminal."), baseURL: nil)
         loadDashboard()
 
+        // Keep the box's copy of the Mac's dispatcher state, skills, and memory
+        // fresh while the app is open.
+        Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in self?.pushEnv() }
+        pushEnv()
+
         setupMenu()
         setupStatusItem()
         setupHotKey()
@@ -251,6 +256,17 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
         do { try p.run() } catch {
             dash.evaluateJavaScript("window.agentboxResult && window.agentboxResult({reqId: '\(reqId)', code: 127, output: 'could not start \(tool)'})")
         }
+    }
+
+    func pushEnv() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: (agentBoxDir as NSString).appendingPathComponent("bin/env-push"))
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        p.environment = env
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
     }
 
     func updateStatus(_ needs: Int) {
