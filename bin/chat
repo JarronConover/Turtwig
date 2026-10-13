@@ -177,6 +177,19 @@ def launch(chat, resume):
     run(["tmux", "new-session", "-d", "-s", name, "-x", "220", "-y", "60", "-c", str(directory),
          shlex.join(cmd)])
     chat["dir"] = str(directory)
+    chat["rc_url"] = wait_for_rc_url(name) or chat.get("rc_url")
+
+
+def wait_for_rc_url(name, timeout=45):
+    """The claude.ai link Remote Control prints once the session connects."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pane = run(["tmux", "capture-pane", "-pt", name, "-S", "-200"], check=False, capture_output=True).stdout
+        m = re.findall(r"https://claude\.ai/code/session_[A-Za-z0-9]+", pane or "")
+        if m:
+            return m[-1]
+        time.sleep(1)
+    return None
 
 
 def transcript(chat):
@@ -208,7 +221,7 @@ def cmd_new(args):
     launch(chat, resume=False)
     chat.pop("prompt", None)
     save(chat, f"chat new: {args.name}")
-    print(f"{chat_id}  {args.name}  {chat['dir']}  (tmux: {tmux_name(chat)})")
+    print(f"{chat_id}  {args.name}  {chat['dir']}  {chat.get('rc_url') or ''}")
 
 
 def cmd_list(args):
@@ -248,9 +261,8 @@ def cmd_start(args):
     if chat["host"] != HOST:
         sys.exit(f"{chat['name']} lives on {chat['host']}; move it here first")
     launch(chat, resume=True)
-    if chat["status"] != "running":
-        chat["status"] = "running"
-        save(chat, f"chat start: {chat['name']}")
+    chat["status"] = "running"
+    save(chat, f"chat start: {chat['name']}")
 
 
 def cmd_attach(args):
@@ -268,6 +280,7 @@ def cmd_supervise(args):
                 continue
             try:
                 launch(chat, resume=transcript(chat).exists())
+                save(chat, f"chat relaunch: {chat['name']}")
                 print(f"{now()} relaunched {chat['name']}", flush=True)
             except (subprocess.CalledProcessError, SystemExit) as err:
                 print(f"{now()} relaunch failed for {chat['name']}: {err}", flush=True)
