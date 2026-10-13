@@ -156,9 +156,14 @@ def ensure_worktree(chat, restore_from=None):
     if base and not local and not remote:
         run(["git", "-C", str(primary), "branch", "-q", "--no-track", chat["branch"], f"origin/{base}"])
     env = dict(os.environ, WT_PRIMARY=str(primary), WT_BASE=str(WORKTREES))
-    run([str(WT), chat["branch"], "--no-start"], env=env, capture_output=True)
+    made = run([str(WT), chat["branch"], "--no-start"], env=env, capture_output=True, check=False)
     if not wt_dir.exists():
-        sys.exit(f"wt didn't create {wt_dir}")
+        sys.exit(f"wt didn't create {wt_dir}: {made.stderr.strip()}")
+    if made.returncode != 0:
+        # e.g. "no free slots": the worktree exists but has no stack config;
+        # a chat doesn't need one, and `wt adopt` provisions it later.
+        print(f"warning: wt: {made.stderr.strip().splitlines()[-1]} (run `wt adopt {wt_dir}` before starting its stack)",
+              file=sys.stderr)
     if restore_from:
         wip_restore(wt_dir, restore_from, fresh=True)
     return wt_dir
