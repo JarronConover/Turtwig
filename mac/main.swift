@@ -286,7 +286,8 @@ final class Shell: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMe
     // MARK: messages from the pages
 
     func js(_ obj: Any) -> String {
-        (try? JSONSerialization.data(withJSONObject: obj)).flatMap { String(data: $0, encoding: .utf8) } ?? "null"
+        (try? JSONSerialization.data(withJSONObject: obj, options: [.fragmentsAllowed]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "null"
     }
 
     func rect(_ v: Any?) -> CGRect {
