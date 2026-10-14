@@ -193,7 +193,12 @@ function render() {
   let needs = 0;
   for (const h of data.hosts) for (const s of h.sections) for (const it of s.items) if (it.attention) needs++;
   if (native) native.postMessage({ type: "status", needs });
-  if (selected && items[selected] && !render.restored) { render.restored = true; select(selected, true); }
+  if (!render.restored) {
+    render.restored = true;
+    const first = Object.keys(items)[0];
+    if (selected && items[selected]) select(selected, true);
+    else if (first) select(first);
+  }
 }
 
 async function select(key, quiet) {
