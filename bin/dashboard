@@ -23,6 +23,10 @@ REGISTRY = HOME / ".agent-box" / "state" / "registry" / "chats"
 STATE_ROOTS = [HOME / ".local" / "state" / "redo", HOME / ".agent-box" / "mac-state"]
 PROJECTS = HOME / ".claude" / "projects"
 CHAT = ROOT / "bin" / "chat"
+SC = ROOT / "shim" / "sc"
+MAC_SIDEBAR = HOME / ".agent-box" / "mac-state" / "sidebar.json"
+sys.path.insert(0, str(ROOT / "lib"))
+import sidebar as sidebar_lib  # noqa: E402
 
 # ship.py DIGEST_EMOJI: a digest stage (before `:`) -> the stage chip.
 STAGE_EMOJI = {
@@ -144,6 +148,69 @@ def state():
     }
 
 
+_dirty_cache = {}
+
+
+def uncommitted(path):
+    """Changed-file count for a worktree, cached for 30 s (git status is slow on the monorepo)."""
+    now = datetime.datetime.now().timestamp()
+    hit = _dirty_cache.get(path)
+    if hit and now - hit[0] < 30:
+        return hit[1]
+    r = subprocess.run(["git", "-C", path, "status", "--porcelain"], capture_output=True, text=True)
+    n = len(r.stdout.splitlines()) if r.returncode == 0 else None
+    _dirty_cache[path] = (now, n)
+    return n
+
+
+def box_sidebar():
+    def sc(*args):
+        r = subprocess.run([sys.executable, str(SC), *args], capture_output=True, text=True, timeout=60)
+        return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+    return sidebar_lib.build(sc("workspace", "list", "--json"), sc("section", "list", "--json"), "box")
+
+
+def sidebar():
+    """Both hosts' sidebars, with each box worktree's chats attached."""
+    cs = chats()
+    by_dir = {}
+    for c in cs:
+        if c.get("dir"):
+            by_dir.setdefault(os.path.realpath(c["dir"]), []).append(c)
+    hosts = []
+    if os.environ.get("CODER_AGENT_URL"):
+        box = box_sidebar()
+        for group in box["projects"] + box["sections"]:
+            for it in group["items"]:
+                it["chats"] = by_dir.get(os.path.realpath(it["path"]), [])
+                it["local"] = {"uncommitted": uncommitted(it["path"])}
+                if any(c["alive"] and c["last_activity"] and
+                       datetime.datetime.now(datetime.timezone.utc).timestamp()
+                       - datetime.datetime.fromisoformat(c["last_activity"].replace("Z", "+00:00")).timestamp() < 90
+                       for c in it["chats"]):
+                    it["agent_status"] = "working"
+        hosts.append(box)
+    mac = read_json(MAC_SIDEBAR)
+    if mac:
+        for group in mac["projects"] + mac["sections"]:
+            for it in group["items"]:
+                it["chats"] = [c for c in cs if c.get("host") == "mac"
+                               and os.path.realpath(c.get("dir") or "") == it["path"]]
+        hosts.append(mac)
+    return {"generated_at": iso(datetime.datetime.now().timestamp()), "hosts": hosts,
+            "ssh_host": os.environ.get("AGENT_BOX_SSH_HOST", "coder.tj-agents")}
+
+
+def shell_session(path):
+    """A tmux shell in this worktree for the terminal pane; created on first use."""
+    import hashlib
+    name = "sh-" + hashlib.sha1(os.path.realpath(path).encode()).hexdigest()[:10]
+    if subprocess.run(["tmux", "has-session", "-t", "=" + name], capture_output=True).returncode != 0:
+        subprocess.run(["tmux", "new-session", "-d", "-s", name, "-c", path,
+                        str(ROOT / "bin" / "agent-env"), os.environ.get("SHELL", "bash"), "-l"], check=False)
+    return name
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -160,8 +227,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/state":
             return self.send(200, state())
+        if self.path == "/api/sidebar":
+            return self.send(200, sidebar())
         if self.path in ("/", "/index.html"):
             return self.send(200, (ROOT / "web" / "index.html").read_bytes(), "text/html; charset=utf-8")
+        if self.path.startswith("/chrome"):
+            return self.send(200, (ROOT / "web" / "chrome.html").read_bytes(), "text/html; charset=utf-8")
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -169,11 +240,13 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length) or b"{}")
         if self.path == "/api/chats":
             args = [sys.executable, str(CHAT), "new", body["name"]]
-            for key in ("branch", "base", "feature", "parent", "kind", "model", "prompt"):
+            for key in ("branch", "base", "feature", "parent", "kind", "model", "prompt", "dir"):
                 if body.get(key):
                     args += [f"--{key}", body[key]]
         elif self.path in ("/api/chats/stop", "/api/chats/start", "/api/chats/archive"):
             args = [sys.executable, str(CHAT), self.path.rsplit("/", 1)[1], body["id"]]
+        elif self.path == "/api/shell":
+            return self.send(200, {"session": shell_session(body["path"])})
         elif self.path == "/api/chats/send":
             args = [sys.executable, str(CHAT), "send", body["id"], body["text"]]
         else:

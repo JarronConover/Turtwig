@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Box</title>
+<style>
+  :root {
+    --bg: #1a1a1a; --panel: #202020; --ink: #e8e8e6; --muted: #8d8d89; --faint: #5d5d5a; --line: #2c2c2c;
+    --hover: #242424; --sel: #232733; --sel-line: #3a4252; --accent: #4f8cff; --warn: #e5534b; --merge: #a371f7;
+    --ok: #3fb950; --orange: #e3a03b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f5f5f4; --panel: #ffffff; --ink: #1c1c1b; --muted: #6b6b67; --faint: #a3a39f; --line: #e3e3e0;
+      --hover: #ececea; --sel: #e6ecf8; --sel-line: #b9c7e3;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); overflow: hidden; display: flex; flex-direction: column;
+         font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-user-select: none; user-select: none; }
+  #list { flex: 1; overflow-y: auto; padding: 8px 6px 12px; }
+  .ws { font-weight: 650; font-size: 13.5px; padding: 8px 8px 6px; display: flex; align-items: center; gap: 6px; }
+  .ws .host { font-weight: 500; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+  .label { color: var(--muted); font-size: 12px; padding: 12px 8px 4px; display: flex; align-items: center; gap: 4px; cursor: default; }
+  .label.toggle { cursor: pointer; }
+  .label .chev { font-size: 11px; color: var(--faint); }
+  .row { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: 6px;
+         border: 1px solid transparent; cursor: default; }
+  .row:hover { background: var(--hover); }
+  .row.sel { background: var(--sel); border-color: var(--sel-line); }
+  .row.proj { height: 32px; font-weight: 500; }
+  .row.child { padding-left: 28px; }
+  .badge { flex: none; width: 18px; height: 18px; border-radius: 4px; display: grid; place-items: center;
+           font-size: 10.5px; font-weight: 650; color: #fff; }
+  .row.proj .badge { width: 20px; height: 20px; font-size: 11px; }
+  .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .star { color: var(--faint); font-size: 11px; margin-left: 4px; }
+  .meta { flex: none; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+  .age { min-width: 22px; text-align: right; }
+  .add { flex: none; color: var(--muted); width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; font-size: 15px; }
+  .add:hover { background: var(--line); color: var(--ink); }
+  svg.ic { width: 12px; height: 12px; display: block; }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  footer { flex: none; display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-top: 1px solid var(--line); }
+  footer button { background: none; border: 0; color: var(--muted); width: 26px; height: 26px; border-radius: 5px; font-size: 14px; cursor: pointer; }
+  footer button:hover { background: var(--hover); color: var(--ink); }
+  footer .grow { flex: 1; }
+  #updated { color: var(--faint); font-size: 11px; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink);
+           padding: 16px; width: min(420px, calc(100vw - 32px)); -webkit-user-select: text; user-select: text; }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  dialog label { display: block; margin: 8px 0 3px; color: var(--muted); font-size: 12px; }
+  dialog input, dialog textarea, dialog select { width: 100%; font: inherit; padding: 6px 8px; color: var(--ink);
+           background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+  dialog .bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  dialog button { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; }
+  dialog button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .empty { color: var(--faint); padding: 6px 8px 6px 28px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="list"></div>
+<footer>
+  <button id="settings-btn" title="Settings">⚙︎</button>
+  <span class="grow"></span>
+  <span id="updated"></span>
+  <button id="new-btn" title="New chat on the box">+</button>
+</footer>
+
+<dialog id="new-dlg">
+  <form method="dialog" id="new-form">
+    <strong>New chat on the box</strong>
+    <label>Name</label><input name="name" required placeholder="what this chat is for">
+    <label>Branch (empty = this folder / primary checkout)</label><input name="branch" placeholder="tj/feature-slug">
+    <label>Stack on (base branch)</label><input name="base" placeholder="main">
+    <label>Kind</label>
+    <select name="kind"><option>primary</option><option>feature</option><option>orchestrator</option></select>
+    <label>First message</label><textarea name="prompt" rows="3" placeholder="/ship-feature AIOPSUP-…"></textarea>
+    <input type="hidden" name="dir">
+    <div class="bar"><button value="cancel">Cancel</button><button class="primary" value="ok">Start</button></div>
+  </form>
+</dialog>
+
+<dialog id="settings-dlg">
+  <form method="dialog" id="settings-form">
+    <strong>Settings</strong>
+    <label>IDE</label>
+    <select name="ide"><option value="cursor">Cursor</option><option value="vscode">VS Code</option><option value="custom">Custom</option></select>
+    <label>Custom IDE URL ({host}, {dir})</label><input name="ide_custom" placeholder="zed://ssh/{host}{dir}">
+    <div class="bar"><button value="cancel">Cancel</button><button class="primary" value="ok">Save</button></div>
+  </form>
+</dialog>
+
+<script>
+const native = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.agentbox;
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+const $ = (s) => document.querySelector(s);
+let data = null;
+let selected = store.get("selected", null);
+const collapsed = new Set(store.get("collapsed2", []));
+const touched = new Set(store.get("touched", []));
+let items = {};
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function age(ts) {
+  if (!ts) return "";
+  const s = Date.now() / 1000 - ts;
+  if (s < 60) return "now";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  if (s < 86400 * 7) return Math.floor(s / 86400) + "d";
+  return Math.floor(s / (86400 * 7)) + "w";
+}
+const badge = (it) => `<span class="badge" style="background:hsl(${it.hue ?? 210} 32% 38%)">${esc(it.letter || "R")}</span>`;
+
+const IC = {
+  spin: `<svg class="ic spin" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="1.6"/><path d="M6 1.5a4.5 4.5 0 0 1 4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
+  dot: `<svg class="ic" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="currentColor" fill-opacity=".22"/><circle cx="6" cy="6" r="2.6" fill="currentColor"/></svg>`,
+  fail: `<svg class="ic" viewBox="0 0 12 12" style="color:var(--warn)"><circle cx="6" cy="6" r="5.5" fill="currentColor"/><path d="M4 4l4 4M8 4l-4 4" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg>`,
+  merged: `<svg class="ic" viewBox="0 0 12 12" style="color:var(--merge)"><circle cx="3" cy="2.5" r="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="3" cy="9.5" r="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="9" cy="6" r="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M3 3.9v4.2M3 4c0 2 2 2 4.6 2" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`,
+  pending: `<svg class="ic" viewBox="0 0 12 12" style="color:var(--orange)"><path d="M6 1.2l5 9.3H1z" fill="currentColor"/></svg>`,
+  chat: `<svg class="ic" viewBox="0 0 12 12"><path d="M2 2.5h8v5.5H5l-3 2z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>`,
+};
+function status(it) {
+  if (it.agent_status === "working" || it.agent_status === "running") return IC.spin;
+  const pr = it.pr || {};
+  if (pr.state === "merged") return IC.merged;
+  if (pr.checks && pr.checks.status === "failing") return IC.fail;
+  if (it.attention === "input" || it.agent_status === "waiting") return IC.chat;
+  if (it.attention || it.agent_status === "review") return IC.dot;
+  if (pr.checks && pr.checks.status === "pending") return IC.pending;
+  return "";
+}
+
+function row(it, host, cls) {
+  const key = `${host}:${it.path}`;
+  items[key] = { ...it, host };
+  return `<div class="row ${cls} ${selected === key ? "sel" : ""}" data-key="${esc(key)}">
+    ${cls === "child" ? "" : badge(it)}
+    <span class="title">${esc(it.title || it.branch || it.worktree)}${it.is_primary ? '<span class="star">★</span>' : ""}</span>
+    <span class="meta">${status(it)}<span class="age">${age(it.age)}</span></span></div>`;
+}
+
+function render() {
+  if (!data) return;
+  items = {};
+  const out = [];
+  for (const h of data.hosts) {
+    out.push(`<div class="ws">${h.host === "box" ? "Agent box" : "Mac"}<span class="host">${h.host === "box" ? "remote" : "super.engineering"}</span></div>`);
+    out.push(`<div class="label">Projects</div>`);
+    for (const p of h.projects) {
+      out.push(`<div class="row proj">${badge({ hue: p.hue, letter: p.name[0].toUpperCase() })}<span class="title">${esc(p.name)}</span>
+        ${h.host === "box" ? `<span class="add" data-new="${esc(p.items.find((i) => i.is_primary)?.path || "")}" title="New chat in ${esc(p.name)}">+</span>` : ""}</div>`);
+      for (const it of p.items) out.push(row({ ...it, letter: p.name[0].toUpperCase(), hue: p.hue }, h.host, "child"));
+    }
+    for (const s of h.sections) {
+      const key = `${h.host}:${s.id}`;
+      const isCol = touched.has(key) ? collapsed.has(key) : s.collapsed;
+      out.push(`<div class="label toggle" data-toggle="${esc(key)}" data-default="${s.collapsed}">${esc(s.name)}${isCol ? ' <span class="chev">›</span>' : ""}</div>`);
+      if (!isCol) {
+        for (const it of s.items) out.push(row(it, h.host, "item"));
+        if (!s.items.length) out.push(`<div class="empty">No worktrees</div>`);
+      }
+    }
+  }
+  $("#list").innerHTML = out.join("");
+  $("#updated").textContent = new Date(data.generated_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  let needs = 0;
+  for (const h of data.hosts) for (const s of h.sections) for (const it of s.items) if (it.attention) needs++;
+  if (native) native.postMessage({ type: "status", needs });
+  if (selected && items[selected] && !render.restored) { render.restored = true; select(selected, true); }
+}
+
+async function select(key, quiet) {
+  const it = items[key];
+  if (!it) return;
+  selected = key;
+  store.set("selected", key);
+  if (!quiet) render();
+  let term = null;
+  if (it.host === "box") {
+    try {
+      const r = await fetch("/api/shell", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: it.path }) });
+      term = (await r.json()).session;
+    } catch {}
+  }
+  const sel = { ...it, term, ssh_host: data.ssh_host, ide: ideUrl(it) };
+  if (native) native.postMessage({ type: "select", sel });
+  else if (it.chats && it.chats[0] && it.chats[0].rc_url) window.open(it.chats[0].rc_url, "agentbox-chat");
+}
+
+function ideUrl(it) {
+  const ide = store.get("ide", "cursor");
+  if (it.host === "mac") return `${ide === "vscode" ? "vscode" : "cursor"}://file${it.path}`;
+  if (ide === "custom") return store.get("ide_custom", "").replace("{host}", data.ssh_host).replace("{dir}", it.path);
+  return `${ide}://vscode-remote/ssh-remote+${data.ssh_host}${it.path}`;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/sidebar", { cache: "no-store" });
+    data = await r.json();
+    render();
+  } catch {
+    $("#updated").textContent = "box unreachable";
+  }
+}
+
+window.openNewChat = (dir) => {
+  const f = $("#new-form");
+  f.reset();
+  f.dir.value = dir || "";
+  $("#new-dlg").showModal();
+};
+window.refreshSidebar = refresh;
+
+$("#list").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-new],[data-toggle],.row[data-key]");
+  if (!t) return;
+  if (t.dataset.new !== undefined) return window.openNewChat(t.dataset.new);
+  if (t.dataset.toggle) {
+    const k = t.dataset.toggle;
+    const was = touched.has(k) ? collapsed.has(k) : t.dataset.default === "true";
+    touched.add(k);
+    was ? collapsed.delete(k) : collapsed.add(k);
+    store.set("collapsed2", [...collapsed]);
+    store.set("touched", [...touched]);
+    return render();
+  }
+  select(t.dataset.key);
+});
+$("#new-btn").addEventListener("click", () => window.openNewChat(""));
+$("#new-dlg").addEventListener("close", async () => {
+  if ($("#new-dlg").returnValue !== "ok") return;
+  const body = Object.fromEntries(new FormData($("#new-form")));
+  for (const k of Object.keys(body)) if (!body[k]) delete body[k];
+  if (body.branch) delete body.dir;
+  const r = await fetch("/api/chats", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const out = await r.json();
+  if (!r.ok) alert((out.stderr || out.stdout || "failed").trim());
+  refresh();
+});
+$("#settings-btn").addEventListener("click", () => {
+  const f = $("#settings-form");
+  f.ide.value = store.get("ide", "cursor");
+  f.ide_custom.value = store.get("ide_custom", "");
+  $("#settings-dlg").showModal();
+});
+$("#settings-dlg").addEventListener("close", () => {
+  if ($("#settings-dlg").returnValue !== "ok") return;
+  const f = $("#settings-form");
+  store.set("ide", f.ide.value);
+  store.set("ide_custom", f.ide_custom.value);
+});
+
+refresh();
+setInterval(refresh, 8000);
+</script>
+</body>
+</html>
