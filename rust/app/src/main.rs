@@ -1,5 +1,6 @@
 mod designer;
 mod diff;
+mod jsc;
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
 mod macos;

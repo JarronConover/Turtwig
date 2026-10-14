@@ -26,5 +26,6 @@ cat > "$app/Contents/Info.plist" << 'PLIST'
 PLIST
 # A real (even self-signed) signature lets macOS show its notifications and Dock badge; ad-hoc can't.
 identity=$(security find-identity -p codesigning 2> /dev/null | awk -F'"' '/Agent Box Local Signing/ {print $2; exit}')
-codesign --force --sign "${identity:--}" "$app" > /dev/null 2>&1
+# allow-jit lets JavaScriptCore compile scripts to machine code (about 6-17x faster than without).
+codesign --force --sign "${identity:--}" --entitlements app/entitlements.plist "$app" > /dev/null 2>&1
 echo "installed $app"

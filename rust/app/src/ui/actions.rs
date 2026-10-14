@@ -433,6 +433,7 @@ impl Workspace {
             other => self.exprs.note(format!("unknown action `{other}`")),
         }
         self.pending_motion = true;
+        self.ctx_rev += 1;
         cx.notify();
     }
 }

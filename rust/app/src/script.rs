@@ -1,8 +1,7 @@
-/*! Live abilities: JavaScript (QuickJS) loaded from settings and `scripts/NAME.js`, reloaded on every change.
+/*! Live abilities: JavaScript (JavaScriptCore, macOS's JIT engine) loaded from settings and `scripts/NAME.js`, reloaded on every change.
 Scripts add actions and event handlers and reach the app, the box, the shell, and files through `ab`. */
 
 use crate::settings;
-use rquickjs::{Context, Function, Runtime};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -52,10 +51,9 @@ const PRELUDE: &str = r#"
 "#;
 
 pub struct Scripts {
-    _rt: Runtime,
-    ctx: Context,
+    engine: crate::jsc::Engine,
     outbox: Rc<RefCell<Vec<Value>>>,
-    context_json: Rc<RefCell<String>>,
+    context_json: Rc<RefCell<Rc<str>>>,
     pub actions: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -67,11 +65,9 @@ pub fn scripts_dir() -> std::path::PathBuf {
 impl Scripts {
     /** Loads `settings.scripts` (name -> source) and every `scripts/NAME.js`, in name order. */
     pub fn load(inline: &serde_json::Map<String, Value>) -> Option<Scripts> {
-        let rt = Runtime::new().ok()?;
-        rt.set_memory_limit(64 << 20);
-        let ctx = Context::full(&rt).ok()?;
+        let mut engine = crate::jsc::Engine::new();
         let outbox = Rc::new(RefCell::new(vec![]));
-        let context_json = Rc::new(RefCell::new("{}".to_string()));
+        let context_json: Rc<RefCell<Rc<str>>> = Rc::new(RefCell::new(Rc::from("{}")));
         let mut sources: Vec<(String, String)> = inline.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect();
         let mut files: Vec<_> = std::fs::read_dir(scripts_dir()).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "js")).collect();
         files.sort();
@@ -80,28 +76,26 @@ impl Scripts {
                 sources.push((f.file_name().unwrap_or_default().to_string_lossy().into_owned(), src));
             }
         }
+        let out = outbox.clone();
+        engine.define("__send", Box::new(move |args| {
+            if let Some(v) = args.first().and_then(|s| serde_json::from_str::<Value>(s).ok()) {
+                out.borrow_mut().push(v);
+            }
+            None
+        }));
+        let cj = context_json.clone();
+        engine.define("__context", Box::new(move |_| Some(cj.borrow().to_string())));
+        engine.define("__read", Box::new(|args| Some(args.first().map(|p| std::fs::read_to_string(expand(p)).unwrap_or_default()).unwrap_or_default())));
         let mut errors = vec![];
-        ctx.with(|c| {
-            let g = c.globals();
-            let out = outbox.clone();
-            let _ = g.set("__send", Function::new(c.clone(), move |s: String| {
-                if let Ok(v) = serde_json::from_str::<Value>(&s) {
-                    out.borrow_mut().push(v);
-                }
-            }));
-            let cj = context_json.clone();
-            let _ = g.set("__context", Function::new(c.clone(), move || cj.borrow().clone()));
-            let _ = g.set("__read", Function::new(c.clone(), |p: String| std::fs::read_to_string(expand(&p)).unwrap_or_default()));
-            if let Err(e) = c.eval::<(), _>(PRELUDE) {
-                errors.push(format!("script prelude: {e}"));
+        if let Err(e) = engine.eval(PRELUDE, "prelude.js") {
+            errors.push(format!("script prelude: {e}"));
+        }
+        for (name, src) in &sources {
+            if let Err(e) = engine.eval(src, name) {
+                errors.push(format!("script {name}: {e}"));
             }
-            for (name, src) in &sources {
-                if c.eval::<(), _>(src.as_str()).is_err() {
-                    errors.push(format!("script {name}: {}", describe(&c.catch())));
-                }
-            }
-        });
-        let mut s = Scripts { _rt: rt, ctx, outbox, context_json, actions: vec![], errors };
+        }
+        let mut s = Scripts { engine, outbox, context_json, actions: vec![], errors };
         s.collect_registrations();
         Some(s)
     }
@@ -121,19 +115,9 @@ impl Scripts {
     }
 
     /** Hands a message to the scripts with `context` visible to `ab.context()`; returns what they sent back. */
-    pub fn deliver(&mut self, message: Value, context: String) -> Vec<Value> {
+    pub fn deliver(&mut self, message: Value, context: Rc<str>) -> Vec<Value> {
         *self.context_json.borrow_mut() = context;
-        let raw = message.to_string();
-        let mut err = None;
-        self.ctx.with(|c| {
-            let f: rquickjs::Result<Function> = c.globals().get("__deliver");
-            if let Ok(f) = f {
-                if f.call::<_, ()>((raw,)).is_err() {
-                    err = Some(describe(&c.catch()));
-                }
-            }
-        });
-        if let Some(e) = err {
+        if let Err(e) = self.engine.call("__deliver", &message.to_string()) {
             self.errors.push(e);
         }
         self.collect_registrations();
@@ -143,13 +127,6 @@ impl Scripts {
     pub fn has_action(&self, name: &str) -> bool {
         self.actions.iter().any(|a| a == name)
     }
-}
-
-fn describe(v: &rquickjs::Value) -> String {
-    if let Some(e) = v.as_exception() {
-        return format!("{}{}", e.message().unwrap_or_default(), e.stack().map(|s| format!("\n{s}")).unwrap_or_default());
-    }
-    v.as_string().and_then(|s| s.to_string().ok()).unwrap_or_else(|| format!("{v:?}"))
 }
 
 pub fn expand(p: &str) -> String {

@@ -78,6 +78,8 @@ pub struct Workspace {
     pub(crate) scripts: Option<crate::script::Scripts>,
     pub(crate) script_data: Map<String, Value>,
     script_timers: HashMap<u64, Task<()>>,
+    pub(crate) ctx_rev: u64,
+    ctx_cache: Option<(u64, std::time::Instant, std::rc::Rc<str>)>,
     pub(crate) focused: bool,
     pending_events: Vec<String>,
     pub(crate) pending_script: Vec<Value>,
@@ -193,6 +195,8 @@ impl Workspace {
             scripts: None,
             script_data: Map::new(),
             script_timers: HashMap::new(),
+            ctx_rev: 0,
+            ctx_cache: None,
             focused: true,
             pending_events: vec![],
             pending_script: vec![],
@@ -240,8 +244,20 @@ impl Workspace {
         self.write_inspect(&ctx, window, cx);
     }
 
+    /** The context as JSON for scripts, reused until something changes it (`ctx_rev`) or 250ms pass. */
+    fn script_context(&mut self) -> std::rc::Rc<str> {
+        if let Some((rev, at, text)) = &self.ctx_cache {
+            if *rev == self.ctx_rev && at.elapsed() < Duration::from_millis(250) {
+                return text.clone();
+            }
+        }
+        let text: std::rc::Rc<str> = std::rc::Rc::from(crate::ui::expr::to_json(&self.context()).to_string());
+        self.ctx_cache = Some((self.ctx_rev, std::time::Instant::now(), text.clone()));
+        text
+    }
+
     pub(crate) fn script_deliver(&mut self, message: Value, window: &mut Window, cx: &mut Context<Self>) {
-        let ctx = crate::ui::expr::to_json(&self.context()).to_string();
+        let ctx = self.script_context();
         let Some(scripts) = self.scripts.as_mut() else { return };
         let outs = scripts.deliver(message, ctx);
         for m in outs {
@@ -255,6 +271,7 @@ impl Workspace {
         match m["type"].as_str().unwrap_or("") {
             "do" => self.run_action(&m["action"], window, cx),
             "data" => {
+                self.ctx_rev += 1;
                 if let Some(n) = m["name"].as_str() {
                     self.script_data.insert(n.to_string(), m["value"].clone());
                 }
@@ -554,6 +571,7 @@ impl Workspace {
     }
 
     pub(crate) fn set_state(&mut self, key: String, value: Value) {
+        self.ctx_rev += 1;
         self.state.insert(key.clone(), value.clone());
         self.user_state.insert(key, value);
         self.save_state();
@@ -564,6 +582,7 @@ impl Workspace {
     }
 
     fn on_incoming(&mut self, msg: Incoming, window: &mut Window, cx: &mut Context<Self>) {
+        self.ctx_rev += 1;
         match msg {
             Incoming::Connected => {
                 self.connected = true;

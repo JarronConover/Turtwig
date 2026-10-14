@@ -52,7 +52,7 @@ full at the end of this file. Change anything by overriding it in your settings 
 
 ## Scripts
 
-Anything the built-in actions and data can't do, a script can: scripts are JavaScript (QuickJS),
+Anything the built-in actions and data can't do, a script can: scripts are JavaScript, run by JavaScriptCore (the JIT-compiling engine Safari uses),
 loaded from `scripts` in settings (`{"name": "source"}`) and from every `scripts/<name>.js` next to the
 settings file. Saving one restarts all scripts at once (fresh state, old timers stopped). Errors go to
 `problems.txt`; `ab.log` writes `scripts.log`.
