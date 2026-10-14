@@ -33,7 +33,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("designer.reset", "end the designer conversation and start fresh"),
     ("settings.undo", "put the settings file back as it was before the last designer request (repeatable)"),
     ("settings.open / settings.reload / settings.docs", "edit, reload, or read the settings reference"),
-    ("notify", "{text}: a notification"),
+    ("notify", "{text}: a notification inside the window"),
+    ("notify.system", "{title, text, chat?, sound?: bool}: a macOS notification banner; clicking it brings the window up on `chat`"),
+    ("dock.bounce", "bounce the Dock icon once"),
     ("open", "{url}: open a URL or app link"),
     ("shell", "{run, env?: {NAME: value}, notify?: bool}: run a shell command on the Mac (pass user text through env, not into run); notify shows its last output line"),
     ("settings.agent", "{request}: a local Claude Code agent reads SETTINGS.md and edits your settings to do what request says; the app reloads when it saves"),
@@ -239,6 +241,16 @@ impl Workspace {
             "notify" => {
                 use gpui_kit::component::WindowExt as _;
                 window.push_notification(s("text").unwrap_or_default(), cx);
+            }
+            "notify.system" => {
+                self.notify_count += 1;
+                let id = format!("{}#{}", s("chat").unwrap_or_default(), self.notify_count);
+                #[cfg(target_os = "macos")]
+                crate::macos::notify(&id, &s("title").unwrap_or("Agent Box".into()), &s("text").unwrap_or_default(), a.get("sound").and_then(Value::as_bool) != Some(false));
+            }
+            "dock.bounce" => {
+                #[cfg(target_os = "macos")]
+                crate::macos::bounce();
             }
             "open" => {
                 if let Some(u) = s("url") {

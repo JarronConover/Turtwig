@@ -26,6 +26,12 @@ pub struct Settings {
     /** Layout glides, enter animations, and style easing (see SETTINGS.md, Motion). */
     #[serde(default)]
     pub motion: Value,
+    /** Actions to run when something happens: chat.waiting, chat.finished, chat.stopped, designer.finished. */
+    #[serde(default)]
+    pub events: Map<String, Value>,
+    /** `badge`: a template for the Dock icon's badge (empty or null hides it). */
+    #[serde(default)]
+    pub dock: Value,
     /** Look of the built-in diff view. */
     #[serde(default)]
     pub diff: Value,

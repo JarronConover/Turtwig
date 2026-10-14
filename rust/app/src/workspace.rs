@@ -69,6 +69,10 @@ pub struct Workspace {
     pub(crate) send_when_ready: HashSet<String>,
     pub(crate) next_attachment: u64,
     pub(crate) dragging: bool,
+    pub(crate) focused: bool,
+    pending_events: Vec<String>,
+    pub(crate) notify_count: u64,
+    badge: Option<String>,
     pub(crate) diff_collapsed: HashSet<String>,
     pub(crate) diff_scroll: UniformListScrollHandle,
     focus: FocusHandle,
@@ -115,6 +119,19 @@ impl Workspace {
                 }
             }
         });
+        #[cfg(target_os = "macos")]
+        let clicks = crate::macos::init().map(|rx| {
+            cx.spawn_in(window, async move |this, cx| {
+                while let Ok(id) = rx.recv_async().await {
+                    let chat = id.split('#').next().unwrap_or("").to_string();
+                    if this.update_in(cx, |ws, window, cx| ws.open_chat_from_notification(&chat, window, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        #[cfg(not(target_os = "macos"))]
+        let clicks: Option<Task<()>> = None;
         let mut transcripts: HashMap<String, Transcript> = HashMap::new();
         transcripts.entry(crate::designer::CHAT_ID.into()).or_default().append(0, &crate::designer::past_entries());
         let user_state = load_state();
@@ -157,10 +174,14 @@ impl Workspace {
             send_when_ready: HashSet::new(),
             next_attachment: 0,
             dragging: false,
+            focused: true,
+            pending_events: vec![],
+            notify_count: 0,
+            badge: None,
             diff_collapsed: HashSet::new(),
             diff_scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
-            _tasks: vec![listen, watch, env_push, designer_listen],
+            _tasks: [listen, watch, env_push, designer_listen].into_iter().chain(clicks).collect(),
             _subscriptions: vec![],
         };
         ws.configure_motion();
@@ -185,6 +206,7 @@ impl Workspace {
             }
             Out::Done { error } => {
                 self.designer.working = false;
+                self.pending_events.push("designer.finished".into());
                 if let Some(text) = error {
                     let from = t.lines;
                     t.append(from, &[json!({"type": "system", "level": "error", "content": text})]);
@@ -288,10 +310,64 @@ impl Workspace {
                 self.exprs = Exprs::default();
                 self.configure_motion();
                 self.pending_motion = true;
+                let ctx = self.context();
+                self.update_badge(&ctx);
             }
             Err(e) => self.settings_error = Some(format!("{e:#}")),
         }
         cx.notify();
+    }
+
+    /** Runs `events` from settings for chat state changes: chat.waiting (now needs you), chat.finished
+    (working to idle), chat.stopped. The chat is `.chat` in the action's context. */
+    fn fire_chat_events(&mut self, before: &HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut fired = vec![];
+        for c in &self.model.chats {
+            let Some(old) = before.get(&c.id) else { continue };
+            let event = match (old.as_str(), c.state.as_str()) {
+                (o, "waiting") if o != "waiting" => "chat.waiting",
+                ("working", "idle") => "chat.finished",
+                ("working" | "waiting" | "idle", "stopped") => "chat.stopped",
+                _ => continue,
+            };
+            fired.push((event, c.clone()));
+        }
+        for (event, chat) in fired {
+            self.fire_event(event, vec![("chat".into(), to_val(&self.chat_json(&chat)))], window, cx);
+        }
+    }
+
+    fn open_chat_from_notification(&mut self, chat: &str, window: &mut Window, cx: &mut Context<Self>) {
+        window.activate_window();
+        cx.activate(true);
+        if chat == crate::designer::CHAT_ID {
+            self.set_state("designer_open".into(), Value::Bool(true));
+        } else if let Some(path) = self.all_worktrees().iter().find(|w| w.chat_ids.iter().any(|c| c == chat)).map(|w| w.path.clone()) {
+            self.active_chat.insert(path.clone(), chat.to_string());
+            self.select(path, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn update_badge(&mut self, ctx: &Val) {
+        let label = self.settings.dock.get("badge").map(|t| self.exprs.resolve(t, ctx)).map(|v| value_text(&v)).filter(|s| !s.is_empty() && s != "0");
+        if label != self.badge {
+            #[cfg(target_os = "macos")]
+            crate::macos::set_badge(label.as_deref());
+            self.badge = label;
+        }
+    }
+
+    pub(crate) fn fire_event(&mut self, event: &str, extra: Vec<(String, Val)>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(spec) = self.settings.events.get(event).cloned() else { return };
+        let ctx = crate::ui::expr::with(&self.context(), extra);
+        if let Some(cond) = spec.get("if").and_then(Value::as_str) {
+            if !self.exprs.truthy(cond, &ctx) {
+                return;
+            }
+        }
+        let action = self.exprs.resolve_action(spec.get("do").unwrap_or(&Value::Null), &ctx);
+        self.run_action(&action, window, cx);
     }
 
     /** problems.txt lets an agent that just edited settings see what broke. */
@@ -336,7 +412,13 @@ impl Workspace {
                 self.term_by_id.clear();
             }
             Incoming::Event(Event::Model(m)) => {
+                let before: HashMap<String, String> = self.model.chats.iter().map(|c| (c.id.clone(), c.state.clone())).collect();
                 self.model = m;
+                if !before.is_empty() {
+                    self.fire_chat_events(&before, window, cx);
+                }
+                let ctx = self.context();
+                self.update_badge(&ctx);
                 self.pending_motion = true;
                 self.mark_diffs_stale();
                 if let Some(id) = self.pending_select.clone() {
@@ -447,6 +529,7 @@ impl Workspace {
             "app": {
                 "connected": self.connected,
                 "dragging": self.dragging,
+                "focused": self.focused,
                 "status": self.status,
                 "ssh_host": self.model.ssh_host,
                 "settings_error": self.settings_error,
@@ -498,6 +581,8 @@ impl Workspace {
             o.insert("active".into(), Value::Bool(self.current_chat().map(|x| x.id == c.id).unwrap_or(false)));
             o.insert("age_text".into(), Value::String(age_text(c.last_activity)));
             o.insert("attachments".into(), self.attachments_json(&c.id));
+            let last = self.transcripts.get(&c.id).and_then(|t| t.items.iter().rev().find_map(|i| if let Item::Assistant { text } = i { Some(text.clone()) } else { None }));
+            o.insert("last_message".into(), last.map(|t| Value::String(t.chars().take(280).collect())).unwrap_or(Value::Null));
             let activity = self.transcripts.get(&c.id).filter(|_| c.state == "working").map(|t| t.activity()).unwrap_or_default();
             o.insert("activity".into(), Value::String(activity));
         }
@@ -1029,6 +1114,9 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.register_terminals(cx);
+        for e in std::mem::take(&mut self.pending_events) {
+            self.fire_event(&e, vec![], window, cx);
+        }
         for a in std::mem::take(&mut self.pending_actions) {
             self.run_action(&a, window, cx);
         }
@@ -1049,6 +1137,7 @@ impl Render for Workspace {
             self.ensure_diff(&p, &base, cx);
         }
         self.dragging = cx.has_active_drag();
+        self.focused = window.is_window_active();
         let ctx = self.context();
         let body = self.render_view("main", &ctx, window, cx);
         self.write_problems();

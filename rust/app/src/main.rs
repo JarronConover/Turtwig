@@ -1,5 +1,8 @@
 mod designer;
 mod diff;
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+mod macos;
 mod remote;
 mod settings;
 mod terminal;

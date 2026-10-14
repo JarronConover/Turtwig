@@ -622,6 +622,28 @@
     }
   },
 
+  // What happens when chats change while you're elsewhere. Each event: {"if": jq, "do": action}; the chat is .chat.
+  "events": {
+    "chat.waiting": {
+      "if": ".app.focused | not",
+      "do": [
+        { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} needs you", "text": "{{ .chat.waiting_on.message // \"It's waiting for an answer.\" }}" },
+        "dock.bounce"
+      ]
+    },
+    "chat.finished": {
+      "if": ".app.focused | not",
+      "do": { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} finished", "text": "{{ .chat.last_message // \"Ready for your next message.\" }}" }
+    },
+    "designer.finished": {
+      "if": ".app.focused | not",
+      "do": { "do": "notify.system", "chat": "designer", "title": "The designer finished", "text": "Your changes are in." }
+    }
+  },
+
+  // The Dock icon's badge: how many chats are waiting on you.
+  "dock": { "badge": "{{ [.chats[] | select(.state == \"waiting\")] | length }}" },
+
   "keys": [
     { "key": "cmd-k", "do": "palette.open" },
     { "key": "cmd-shift-p", "do": "palette.open" },

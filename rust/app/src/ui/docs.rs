@@ -35,6 +35,8 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `components` | Reusable nodes; use one as `{"type": "Name", "props": {...}}` and read props inside as `.props.x`. |
 | `theme` | Named values referenced as `@name` in styles (colors, fonts) and readable as `.theme.name`. `animations: false` turns animation off. |
 | `state` | UI state and starting values. Read as `.state.key`; change with `state.set` / `state.toggle` / `state.cycle`. |
+| `events` | Actions to run when things happen: `chat.waiting`, `chat.finished`, `chat.stopped` (the chat is `.chat`), `designer.finished`. Each is `{"if": jq, "do": action}`. |
+| `dock` | `badge`: a template for the Dock icon's badge; empty or 0 hides it. |
 | `keys` | `[{"key": "cmd-k", "do": <action>, "if": <jq>}]`. Key names: `cmd`, `ctrl`, `alt`, `shift` + `-` + key (`cmd-shift-p`, `ctrl-\``, `cmd-\\`). |
 | `commands` | Command palette entries: `[{"label", "do", "if"}]`. Worktrees are added automatically. |
 | `motion` | How things move: `move` (glide to new positions), `enter` (how new nodes come in), `style` (colors and sizes ease), `enabled`. See Motion. |
@@ -137,7 +139,7 @@ Examples:
 | `.selected.diff` | the selected worktree's changes for `state.diff_base`: `{loaded, loading, error, base, base_label, files, added, removed, truncated}` |
 | `.state` | UI state (see `state` in the defaults) |
 | `.theme` | theme values |
-| `.app` | `{connected, status, ssh_host, settings_error, errors}` |
+| `.app` | `{connected, status, ssh_host, settings_error, errors, dragging (files over the window), focused (the window is in front)}` |
 | `.now` | unix seconds |
 | `.props`, `.<as>`, `.index`, `.input` | inside components, `for` loops, and a `prompt`'s `then` |
 "##;
