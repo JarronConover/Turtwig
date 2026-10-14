@@ -63,6 +63,7 @@ pub struct Workspace {
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
     term_by_id: HashMap<u64, Entity<TerminalView>>,
     expanded_tools: HashSet<String>,
+    images: HashMap<String, Option<std::sync::Arc<Image>>>,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -143,6 +144,7 @@ impl Workspace {
             terminals: HashMap::new(),
             term_by_id: HashMap::new(),
             expanded_tools: HashSet::new(),
+            images: HashMap::new(),
             focus: cx.focus_handle(),
             _tasks: vec![listen, watch, env_push, designer_listen],
             _subscriptions: vec![],
@@ -538,19 +540,26 @@ impl Workspace {
             if let InputEvent::PressEnter { secondary, .. } = ev {
                 let enter_sends = ws.settings.chat.get("enter_sends").and_then(Value::as_bool).unwrap_or(true);
                 if *secondary != enter_sends {
-                    let text = state.read(cx).value().trim().to_string();
-                    if !text.is_empty() {
-                        if id == crate::designer::CHAT_ID {
-                            ws.designer_send(text, cx);
-                        } else {
-                            ws.remote.send(Call::ChatSend { chat_id: id.clone(), text });
-                        }
-                        state.update(cx, |s, cx| s.set_value("", window, cx));
-                    }
+                    let _ = state;
+                    ws.send_composer(&id, window, cx);
                 }
             }
         }));
         self.composers.insert(chat_id.to_string(), state);
+    }
+
+    pub(crate) fn send_composer(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.composers.get(id).cloned() else { return };
+        let text = state.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if id == crate::designer::CHAT_ID {
+            self.designer_send(text, cx);
+        } else {
+            self.remote.send(Call::ChatSend { chat_id: id.to_string(), text });
+        }
+        state.update(cx, |s, cx| s.set_value("", window, cx));
     }
 
     fn register_terminals(&mut self, cx: &mut Context<Self>) {
@@ -805,7 +814,17 @@ impl Workspace {
         for (i, item) in items.iter().enumerate() {
             let key = format!("{chat_id}:{i}");
             let el: Option<AnyElement> = match item {
-                Item::User { text } => Some(style::apply(div(), &st("user"), &theme).child(text.clone()).into_any_element()),
+                Item::User { text } => {
+                    let thumbs: Vec<AnyElement> = local_uploads(text)
+                        .into_iter()
+                        .map(|p| style::apply(img(p).object_fit(ObjectFit::Contain), &st("image"), &theme).into_any_element())
+                        .collect();
+                    Some(style::apply(v_flex(), &st("user"), &theme).child(text.clone()).children(thumbs).into_any_element())
+                }
+                Item::Image { media_type, data } => {
+                    let image = self.images.entry(key.clone()).or_insert_with(|| decode_image(media_type, data)).clone();
+                    image.map(|i| style::apply(img(i).object_fit(ObjectFit::Contain), &st("image"), &theme).into_any_element())
+                }
                 Item::Assistant { text } => {
                     Some(style::apply(div(), &st("assistant"), &theme).child(TextView::markdown(SharedString::from(key), text.clone())).into_any_element())
                 }
@@ -862,7 +881,55 @@ impl Workspace {
             self.ensure_composer(&chat, window, cx);
         }
         let c = self.composers.get(&chat)?.clone();
-        Some(Textarea::new(&c).appearance(false).into_any_element())
+        let view = cx.entity().downgrade();
+        let (paste_view, paste_chat) = (view.clone(), chat.clone());
+        let textarea = Textarea::new(&c).appearance(false).on_paste(move |item, window, cx| {
+            let files = attachments_from_clipboard(item);
+            if files.is_empty() {
+                return false;
+            }
+            let chat = paste_chat.clone();
+            paste_view.update(cx, |ws, cx| ws.attach(chat, files, window, cx)).is_ok()
+        });
+        let theme = self.settings.theme.clone();
+        let over = self.settings.chat.get("drop_target").and_then(Value::as_object).cloned().unwrap_or_default();
+        Some(
+            div()
+                .id(SharedString::from(format!("composer-drop:{chat}")))
+                .child(textarea)
+                .drag_over::<ExternalPaths>(move |s, _, _, _| {
+                    let mut s = s;
+                    style::refine(&mut s, &over, &theme);
+                    s
+                })
+                .on_drop(move |paths: &ExternalPaths, window, cx| {
+                    let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
+                    let chat = chat.clone();
+                    let _ = view.update(cx, |ws, cx| ws.attach(chat, files, window, cx));
+                })
+                .into_any_element(),
+        )
+    }
+
+    /** Puts pasted or dropped files where the chat's agent can read them (the box, for box chats) and
+    inserts their paths into the composer. */
+    pub(crate) fn attach(&mut self, chat: String, files: Vec<Attachment>, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        let local = chat == crate::designer::CHAT_ID || self.chat(&chat).map(|c| c.host == "mac").unwrap_or(false);
+        let host = self.settings.connection.ssh_host.clone();
+        let Some(composer) = self.composers.get(&chat).cloned() else { return };
+        if !local {
+            window.push_notification("Uploading to the box…", cx);
+        }
+        cx.spawn_in(window, async move |_, cx| {
+            let result = cx.background_spawn(async move { stage_attachments(files, local.then_some(()).map_or(Some(host), |_| None)) }).await;
+            cx.update(|window, cx| match result {
+                Ok(paths) => composer.update(cx, |s, cx| s.insert(format!("{} ", paths.join(" ")), window, cx)),
+                Err(e) => window.push_notification(format!("Couldn't attach: {e}"), cx),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn waiting_card(&self, chat: &Chat, cx: &mut Context<Self>) -> AnyElement {
@@ -997,4 +1064,104 @@ fn age_text(ts: Option<f64>) -> String {
 
 fn load_state() -> Map<String, Value> {
     std::fs::read_to_string(settings::dir().join("ui-state.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+pub enum Attachment {
+    Bytes { bytes: Vec<u8>, ext: String },
+    Path(std::path::PathBuf),
+}
+
+fn attachments_from_clipboard(item: &ClipboardItem) -> Vec<Attachment> {
+    item.entries()
+        .iter()
+        .flat_map(|e| match e {
+            ClipboardEntry::Image(i) => vec![Attachment::Bytes { bytes: i.bytes.clone(), ext: image_ext(i.format).into() }],
+            ClipboardEntry::ExternalPaths(p) => p.paths().iter().cloned().map(Attachment::Path).collect(),
+            ClipboardEntry::String(_) => vec![],
+        })
+        .collect()
+}
+
+fn image_ext(f: ImageFormat) -> &'static str {
+    match f {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Webp => "webp",
+        ImageFormat::Svg => "svg",
+        ImageFormat::Bmp => "bmp",
+        ImageFormat::Tiff => "tiff",
+        _ => "img",
+    }
+}
+
+fn uploads_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agent-box/uploads")
+}
+
+/** Copies each file into ~/.agent-box/uploads (and, given a host, the same folder on it); returns
+the paths the agent should read. */
+fn stage_attachments(files: Vec<Attachment>, host: Option<String>) -> Result<Vec<String>, String> {
+    let dir = uploads_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let mut out = vec![];
+    for (i, f) in files.into_iter().enumerate() {
+        let (name, local) = match f {
+            Attachment::Bytes { bytes, ext } => {
+                let name = format!("{stamp}-{i}.{ext}");
+                let p = dir.join(&name);
+                std::fs::write(&p, bytes).map_err(|e| e.to_string())?;
+                (name, p)
+            }
+            Attachment::Path(p) => {
+                let base = p.file_name().map(|n| n.to_string_lossy().replace(' ', "-")).unwrap_or_else(|| "file".into());
+                let name = format!("{stamp}-{base}");
+                let copy = dir.join(&name);
+                std::fs::copy(&p, &copy).map_err(|e| format!("{}: {e}", p.display()))?;
+                (name, copy)
+            }
+        };
+        match &host {
+            None => out.push(local.to_string_lossy().into_owned()),
+            Some(host) => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let file = std::fs::File::open(&local).map_err(|e| e.to_string())?;
+                let o = std::process::Command::new("ssh")
+                    .env("PATH", format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"))
+                    .args([host.as_str(), &format!("mkdir -p ~/.agent-box/uploads && cat > ~/.agent-box/uploads/{name} && printf %s \"$HOME\"")])
+                    .stdin(file)
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                if !o.status.success() {
+                    return Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("upload failed").to_string());
+                }
+                let remote_home = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                out.push(format!("{remote_home}/.agent-box/uploads/{name}"));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/** Images this app uploaded that a message mentions, as their local copies (for thumbnails). */
+fn local_uploads(text: &str) -> Vec<std::path::PathBuf> {
+    let dir = uploads_dir();
+    text.split_whitespace()
+        .filter_map(|w| w.split("/.agent-box/uploads/").nth(1))
+        .map(|name| dir.join(name))
+        .filter(|p| p.exists() && matches!(p.extension().and_then(|e| e.to_str()), Some("png" | "jpg" | "jpeg" | "gif" | "webp")))
+        .collect()
+}
+
+fn decode_image(media_type: &str, data: &str) -> Option<std::sync::Arc<Image>> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+    let format = match media_type {
+        "image/jpeg" => ImageFormat::Jpeg,
+        "image/gif" => ImageFormat::Gif,
+        "image/webp" => ImageFormat::Webp,
+        _ => ImageFormat::Png,
+    };
+    Some(std::sync::Arc::new(Image::from_bytes(format, bytes)))
 }

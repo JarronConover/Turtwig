@@ -7,6 +7,8 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub enum Item {
     User { text: String },
+    /** An image the user attached (base64, as Claude Code stores it). */
+    Image { media_type: String, data: String },
     Assistant { text: String },
     Thinking { text: String },
     Tool { id: String, name: String, summary: String, input: Value, result: Option<String>, is_error: bool },
@@ -27,7 +29,7 @@ impl Transcript {
     pub fn activity(&self) -> String {
         match self.items.last() {
             Some(Item::Tool { name, summary, result: None, .. }) => format!("{} {summary}", verb(name)),
-            Some(Item::Tool { .. }) | Some(Item::User { .. }) => "Thinking".into(),
+            Some(Item::Tool { .. }) | Some(Item::User { .. }) | Some(Item::Image { .. }) => "Thinking".into(),
             Some(Item::Thinking { .. }) => "Thinking".into(),
             Some(Item::Assistant { .. }) => "Writing".into(),
             _ => String::new(),
@@ -62,6 +64,12 @@ impl Transcript {
                     for b in blocks {
                         match b.get("type").and_then(Value::as_str) {
                             Some("text") => self.user_text(b["text"].as_str().unwrap_or("")),
+                            Some("image") => {
+                                if let Some(data) = b["source"]["data"].as_str() {
+                                    let media_type = b["source"]["media_type"].as_str().unwrap_or("image/png").to_string();
+                                    self.items.push(Item::Image { media_type, data: data.to_string() });
+                                }
+                            }
                             Some("tool_result") => self.tool_result(b),
                             _ => {}
                         }

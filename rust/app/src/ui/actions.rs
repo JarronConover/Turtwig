@@ -16,6 +16,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.send", "{chat, text}: send a message"),
     ("chat.keys", "{chat, keys: [..]}: press keys in the chat's session (Enter, Escape, Up, 1, ...)"),
     ("chat.archive / chat.stop / chat.start", "{chat}"),
+    ("chat.attach", "{chat, paths: [..]}: attach files to a chat's composer (uploaded to the box for box chats); pasting or dropping images and files does the same"),
+    ("composer.send", "{chat}: send what's in a chat's composer"),
     ("chat.move", "{chat, to: mac|box}: move a chat between machines"),
     ("section.new", "{assign?: path}: ask for a name, create the section (and move that worktree into it)"),
     ("section.rename", "{id, name?}: rename (asks when name is missing)"),
@@ -135,6 +137,21 @@ impl Workspace {
                         },
                         cx,
                     );
+                }
+            }
+            "chat.attach" => {
+                let paths: Vec<crate::workspace::Attachment> = a
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|p| p.iter().filter_map(Value::as_str).map(|x| crate::workspace::Attachment::Path(x.into())).collect())
+                    .unwrap_or_default();
+                if let Some(id) = chat() {
+                    self.attach(id, paths, window, cx);
+                }
+            }
+            "composer.send" => {
+                if let Some(id) = chat() {
+                    self.send_composer(&id, window, cx);
                 }
             }
             "chat.move" => {

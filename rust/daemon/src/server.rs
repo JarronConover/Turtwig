@@ -332,7 +332,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         Call::ChatArchive { chat_id } => chat_tool(&["archive", &chat_id], 120),
         Call::ChatSend { chat_id, text } => chat_tool(&["send", &chat_id, &text], 60),
         Call::ChatKeys { chat_id, keys } => {
-            let target = format!("={}", util::chat_session(&chat_id));
+            let target = format!("={}:", util::chat_session(&chat_id));
             let mut args = vec!["send-keys", "-t", target.as_str()];
             args.extend(keys.iter().map(|k| k.as_str()));
             let o = util::run("tmux", &args, &[], None, Duration::from_secs(10));

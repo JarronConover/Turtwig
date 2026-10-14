@@ -167,7 +167,7 @@ fn pane_waiting(session: &str) -> bool {
     static WAITING: OnceLock<Regex> = OnceLock::new();
     let re = WAITING
         .get_or_init(|| Regex::new(r"(?i)Enter to select|Esc to cancel|Do you want to proceed|❯ 1\. Yes").unwrap());
-    let o = util::run("tmux", &["capture-pane", "-pt", &format!("={session}")], &[], None, Duration::from_secs(5));
+    let o = util::run("tmux", &["capture-pane", "-pt", &format!("={session}:")], &[], None, Duration::from_secs(5));
     let lines: Vec<&str> = o.stdout.lines().collect();
     let tail = lines[lines.len().saturating_sub(25)..].join("\n");
     o.ok && re.is_match(&tail)

@@ -591,6 +591,8 @@
     "designer_placeholder": "Describe a change to the app…",
     "list": { "gap": 14, "padding": [18, 28], "width": "full", "max_width": 860, "self": "center" },
     "user": { "padding": 10, "radius": 8, "background": "@user_bubble", "border": 1, "border_color": "@line", "font_size": 14 },
+    "image": { "max_width": 360, "max_height": 240, "radius": 8, "margin": [8, 0, 0, 0] },
+    "drop_target": { "border": 1, "border_color": "@accent", "radius": 10 },
     "assistant": { "font_size": 14 },
     "thinking": { "font_size": 13, "italic": true, "color": "@text_muted" },
     "tool": { "gap": 8, "align": "center" },
