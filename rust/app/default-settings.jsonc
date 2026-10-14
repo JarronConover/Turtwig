@@ -1,11 +1,16 @@
-// Built-in defaults: super.engineering's look. Your settings file overrides any part of this.
+// Built-in defaults: super.engineering's layout, written in the same settings language you use.
+// Override any part in your settings file; SETTINGS.md (next to it) documents every key.
 {
   "connection": {
     "ssh_host": "coder.tj-agents",
     "daemon": "~/agent-box/rust/target/release/agent-boxd",
     "retry_seconds": 3
   },
+
   "theme": {
+    "animations": true,
+    "font_ui": ".SystemUIFont",
+    "font_mono": "Menlo",
     "window": "#212122",
     "card": "#1e1e1f",
     "line": "#323235",
@@ -17,79 +22,484 @@
     "hover": "#28282b",
     "selection": "#272c35",
     "selection_border": "#485262",
+    "pill": "#262626",
+    "pill_hover": "#2e2e2e",
+    "user_bubble": "#292929",
+    "code_bg": "#171717",
+    "composer": "#212121",
+    "waiting_bg": "#2a2212",
+    "claude": "#d97757",
+    "tab_border": "#3b4350",
+    "tab_bg": "#22262e",
     "warning": "#f0a43a",
     "danger": "#d8566c",
     "merged": "#8b5cf6",
-    "success": "#3fb950",
-    "font_family": ".SystemUIFont",
-    "mono_font_family": "Menlo",
-    "font_size": 14,
-    "card_radius": 13,
-    "row_radius": 8
+    "success": "#3fb950"
   },
-  "animation": { "enabled": true, "duration_ms": 140, "sidebar_ms": 200, "spinner_ms": 900 },
-  "layout": {
-    "type": "row",
-    "children": [
-      { "type": "sidebar", "style": { "width": 339, "id": "sidebar", "resizable": true, "min_width": 220 } },
-      {
-        "type": "column",
-        "style": { "grow": 1, "padding": [0, 14, 0, 0] },
-        "children": [
-          { "type": "toolbar", "style": { "height": 44 } },
-          {
-            "type": "card",
-            "style": { "grow": 0.7, "id": "chat-card", "resizable": true, "min_height": 160 },
-            "children": [{ "type": "chat_tabs", "style": { "height": 40 } }, { "type": "chat", "style": { "grow": 1 } }]
+
+  "state": {
+    "sidebar_open": true,
+    "terminal_open": true,
+    "sidebar_width": 339,
+    "terminal_height": 300
+  },
+
+  "views": {
+    "main": {
+      "type": "row",
+      "style": { "width": "full", "height": "full" },
+      "children": [
+        { "type": "Sidebar", "if": ".state.sidebar_open" },
+        { "type": "MainArea", "style": { "grow": 1 } }
+      ]
+    }
+  },
+
+  "components": {
+    "Sidebar": {
+      "about": "The left column: projects, sections, worktree rows, footer buttons. Resizable (state.sidebar_width).",
+      "type": "stack",
+      "style": { "width": "{{ .state.sidebar_width }}", "height": "full", "shrink": 0, "background": "@window" },
+      "animate": { "from": { "opacity": 0, "x": -16 }, "duration": 180 },
+      "children": [
+        {
+          "type": "column",
+          "style": { "width": "full", "height": "full" },
+          "children": [
+            {
+              "type": "row",
+              "style": { "height": 44, "shrink": 0, "padding": [0, 0, 0, 88], "align": "center" },
+              "children": [
+                { "type": "IconButton", "props": { "icon": "panel-left", "tooltip": "Hide sidebar  ⌘\\", "do": { "do": "state.toggle", "key": "sidebar_open" } } },
+                { "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } }
+              ]
+            },
+            {
+              "type": "scroll",
+              "props": { "handle": "sidebar" },
+              "style": { "grow": 1, "min_height": 0, "padding": [0, 6, 10, 6] },
+              "children": [
+                { "type": "text", "props": { "text": "Agent box" }, "style": { "height": 30, "padding": [6, 8, 0, 8], "font_size": 15, "font_weight": "semibold" } },
+                { "type": "SectionLabel", "props": { "text": "Projects" } },
+                {
+                  "for": ".projects", "as": "p", "key": ".p.name",
+                  "type": "column",
+                  "children": [
+                    {
+                      "type": "row",
+                      "style": { "height": 37, "padding": [0, 8], "gap": 8, "align": "center" },
+                      "children": [
+                        { "type": "Badge", "props": { "letter": "{{ .p.letter }}", "hue": "{{ .p.hue }}", "size": 22 } },
+                        { "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "grow": 1, "font_size": 14 } },
+                        { "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "repo": "{{ .p.repo }}" } } }
+                      ]
+                    },
+                    { "for": ".p.items", "as": "w", "key": ".w.path", "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": false } }
+                  ]
+                },
+                {
+                  "for": ".sections", "as": "s", "key": ".s.id",
+                  "type": "column",
+                  "children": [
+                    {
+                      "type": "SectionLabel",
+                      "props": {
+                        "text": "{{ .s.name }}",
+                        "collapsed": "{{ (\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end }}"
+                      },
+                      "style": { "cursor": "pointer" },
+                      "on": { "click": { "do": "state.toggle", "key": "collapsed:{{ .s.id }}", "default": "{{ .s.collapsed }}" } },
+                      "menu": [
+                        { "label": "Rename…", "do": { "do": "section.rename", "id": "{{ .s.id }}" } },
+                        { "separator": true },
+                        { "label": "Delete section", "do": { "do": "section.delete", "id": "{{ .s.id }}" } }
+                      ]
+                    },
+                    {
+                      "if": "(\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end | not",
+                      "for": ".s.items", "as": "w", "key": ".w.path",
+                      "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": true }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "row",
+              "style": { "height": 46, "shrink": 0, "padding": [0, 18], "gap": 4, "align": "center" },
+              "children": [
+                { "type": "IconButton", "props": { "icon": "settings", "tooltip": "Settings  ⌘,", "do": "settings.open" } },
+                { "type": "IconButton", "props": { "icon": "folder-plus", "tooltip": "New section", "do": "section.new" } },
+                { "type": "IconButton", "props": { "icon": "plus", "tooltip": "New chat  ⌘N", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } } },
+                { "type": "spacer" },
+                {
+                  "if": ".app.settings_error or (.app.errors | length > 0)",
+                  "type": "text", "props": { "text": "settings error" },
+                  "style": { "font_size": 11, "color": "@danger", "cursor": "pointer" },
+                  "tooltip": "{{ [.app.settings_error // empty] + .app.errors | join(\"\\n\") }}",
+                  "on": { "click": "settings.open" }
+                },
+                {
+                  "type": "box",
+                  "style": { "width": 7, "height": 7, "radius": 4, "background": "{{ if .app.connected then \"@success\" else \"@warning\" end }}" },
+                  "tooltip": "{{ .app.status }}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "resize_handle",
+          "props": { "state": "sidebar_width", "axis": "x", "min": 220, "max": 700 },
+          "style": { "position": "absolute", "top": 0, "right": -3, "width": 6, "height": "full" }
+        }
+      ]
+    },
+
+    "WorktreeRow": {
+      "about": "One worktree in the sidebar. props: w (a worktree), in_section (bool: sections show the project badge and emoji).",
+      "type": "row",
+      "style": {
+        "height": 33, "padding": "{{ if .props.in_section then [0, 12, 0, 8] else [0, 12, 0, 27] end }}",
+        "gap": 8, "align": "center", "radius": 8, "border": 1, "cursor": "pointer",
+        "border_color": "{{ if .props.w.selected then \"@selection_border\" else \"transparent\" end }}",
+        "background": "{{ if .props.w.selected then \"@selection\" else \"transparent\" end }}",
+        "hover": "{{ if .props.w.selected then {} else {\"background\": \"@hover\"} end }}"
+      },
+      "on": { "click": { "do": "select", "worktree": "{{ .props.w.path }}" } },
+      "tooltip": "{{ .props.w.branch // \"\" }}",
+      "menu": [
+        { "for": ".sections", "as": "s", "label": "Move to {{ .s.name }}", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": "{{ .s.id }}" } },
+        { "if": ".props.w.section", "label": "Remove from section", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": null } },
+        { "label": "New section…", "do": { "do": "section.new", "assign": "{{ .props.w.path }}" } },
+        { "separator": true },
+        { "label": "New chat here", "do": { "do": "chat.new", "dir": "{{ .props.w.path }}" } },
+        { "for": ".props.w.chats", "as": "c", "label": "Archive chat “{{ .c.name }}”", "do": { "do": "chat.archive", "chat": "{{ .c.id }}" } },
+        { "label": "Open in Cursor", "do": { "do": "open", "url": "cursor://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .props.w.path }}" } },
+        { "if": ".props.w.is_primary | not", "separator": true },
+        { "if": ".props.w.is_primary | not", "label": "Delete worktree", "do": { "do": "worktree.delete", "path": "{{ .props.w.path }}" } }
+      ],
+      "children": [
+        { "if": ".props.in_section", "type": "Badge", "props": { "letter": "{{ .props.w.letter }}", "hue": "{{ .props.w.hue }}", "size": 16 } },
+        { "if": ".props.in_section and .props.w.emoji", "type": "text", "props": { "text": "{{ .props.w.emoji }}" }, "style": { "width": 16, "shrink": 0, "font_size": 14 } },
+        {
+          "type": "row",
+          "style": { "grow": 1, "min_width": 0, "gap": 6, "align": "center" },
+          "children": [
+            { "type": "text", "props": { "text": "{{ if .props.in_section then .props.w.label else .props.w.title end }}" }, "style": { "truncate": true, "font_size": 14 } },
+            { "if": ".props.w.is_primary", "type": "icon", "props": { "name": "star-fill", "size": 11, "color": "@text_muted" } }
+          ]
+        },
+        { "type": "StatusIcon", "props": { "status": "{{ .props.w.status }}" } },
+        { "type": "text", "props": { "text": "{{ .props.w.age_text }}" }, "style": { "min_width": 22, "text_align": "right", "font_size": 12.5, "color": "@age" } }
+      ]
+    },
+
+    "StatusIcon": {
+      "about": "A small icon for a worktree status. props: status (working | waiting | merged | failing | pending | dirty | behind | idle).",
+      "type": "box",
+      "style": { "width": 14, "align": "center", "justify": "center" },
+      "children": [
+        { "if": ".props.status == \"working\"", "type": "spinner", "props": { "size": "xsmall", "color": "@age" } },
+        { "if": ".props.status == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" }, "tooltip": "Waiting for you" },
+        { "if": ".props.status == \"merged\"", "type": "icon", "props": { "name": "circle-check", "size": 12, "color": "@merged" }, "tooltip": "Merged" },
+        { "if": ".props.status == \"failing\"", "type": "icon", "props": { "name": "circle-x", "size": 12, "color": "@danger" }, "tooltip": "Checks failing" },
+        { "if": ".props.status == \"pending\"", "type": "icon", "props": { "name": "loader", "size": 12, "color": "@warning" }, "tooltip": "Checks running" },
+        { "if": ".props.status == \"dirty\"", "type": "icon", "props": { "name": "arrow-up", "size": 12, "color": "@age" }, "tooltip": "Unpushed work" },
+        { "if": ".props.status == \"behind\"", "type": "icon", "props": { "name": "arrow-down", "size": 12, "color": "@age" }, "tooltip": "Behind its base" }
+      ]
+    },
+
+    "SectionLabel": {
+      "about": "A small grey heading. props: text, collapsed (bool: shows a chevron).",
+      "type": "row",
+      "style": { "height": 34, "padding": [12, 8, 0, 8], "gap": 5, "align": "center", "font_size": 13, "color": "@text_muted" },
+      "children": [
+        { "type": "text", "props": { "text": "{{ .props.text }}" } },
+        { "if": ".props.collapsed", "type": "icon", "props": { "name": "chevron-right", "size": 12 } }
+      ]
+    },
+
+    "Badge": {
+      "about": "A rounded letter tile tinted by hue. props: letter, hue (0-360), size.",
+      "type": "box",
+      "style": {
+        "width": "{{ .props.size // 16 }}", "height": "{{ .props.size // 16 }}", "shrink": 0,
+        "radius": "{{ if (.props.size // 16) > 18 then 5 else 4 end }}", "align": "center", "justify": "center",
+        "background": "hsl({{ .props.hue // 210 }}, 24, 26)", "color": "hsl({{ .props.hue // 210 }}, 25, 76)",
+        "font_size": "{{ if (.props.size // 16) > 18 then 13 else 9.5 end }}"
+      },
+      "children": [{ "type": "text", "props": { "text": "{{ .props.letter }}" } }]
+    },
+
+    "IconButton": {
+      "about": "A square icon button. props: icon (Lucide name), do (action), tooltip, size (default 26).",
+      "type": "box",
+      "style": {
+        "width": "{{ .props.size // 26 }}", "height": "{{ .props.size // 26 }}", "shrink": 0, "radius": 6,
+        "align": "center", "justify": "center", "cursor": "pointer", "hover": { "background": "@hover" }, "active": { "opacity": 0.7 }
+      },
+      "tooltip": "{{ .props.tooltip // \"\" }}",
+      "on": { "click": "{{ .props.do }}" },
+      "children": [{ "type": "icon", "props": { "name": "{{ .props.icon }}", "size": 15, "color": "@text_muted" } }]
+    },
+
+    "Pill": {
+      "about": "A rounded button with text and an optional icon. props: text, icon, do, tooltip, mono (bool).",
+      "type": "row",
+      "style": {
+        "height": 26, "padding": [0, 10], "gap": 6, "align": "center", "radius": 13, "border": 1, "border_color": "@line",
+        "background": "@pill", "hover": { "background": "@pill_hover" }, "active": { "opacity": 0.75 },
+        "font_size": 12.5, "cursor": "pointer", "font_family": "{{ if .props.mono then \"@font_mono\" else \"@font_ui\" end }}"
+      },
+      "tooltip": "{{ .props.tooltip // \"\" }}",
+      "on": { "click": "{{ .props.do }}" },
+      "children": [
+        { "if": ".props.icon", "type": "icon", "props": { "name": "{{ .props.icon }}", "size": 13 } },
+        { "if": ".props.text", "type": "text", "props": { "text": "{{ .props.text }}" } }
+      ]
+    },
+
+    "MainArea": {
+      "about": "The right side: toolbar, chat card, branch bar, terminal card.",
+      "type": "column",
+      "style": { "height": "full", "min_width": 0, "padding": [0, 14, 14, 0] },
+      "children": [
+        { "type": "Toolbar" },
+        { "type": "ChatCard", "style": { "grow": 1, "min_height": 160 } },
+        { "type": "BranchBar" },
+        { "if": ".state.terminal_open", "type": "TerminalCard" }
+      ]
+    },
+
+    "Toolbar": {
+      "about": "The title bar: sidebar toggle (when hidden), worktree and chat, status, IDE and MR buttons. Drag it to move the window.",
+      "type": "row",
+      "style": { "height": 44, "shrink": 0, "gap": 8, "align": "center", "padding": [0, 0, 0, "{{ if .state.sidebar_open then 23 else 88 end }}"] },
+      "children": [
+        { "if": ".state.sidebar_open | not", "type": "IconButton", "props": { "icon": "panel-left", "size": 24, "tooltip": "Show sidebar  ⌘\\", "do": { "do": "state.toggle", "key": "sidebar_open" } }, "style": { "margin": [0, 8, 0, 0] } },
+        { "type": "box", "style": { "width": 6, "height": 6, "radius": 3, "background": "{{ if .selected.chat.alive then \"@success\" else \"@text_faint\" end }}" } },
+        {
+          "if": ".selected.worktree",
+          "type": "row",
+          "style": { "gap": 8, "align": "center" },
+          "children": [
+            { "type": "Badge", "props": { "letter": "{{ .selected.worktree.letter }}", "hue": "{{ .selected.worktree.hue }}", "size": 16 } },
+            { "type": "text", "props": { "text": "{{ .selected.worktree.title }}" }, "style": { "font_size": 13 } },
+            { "if": ".selected.chat", "type": "icon", "props": { "name": "chevron-right", "size": 12, "color": "@text_faint" } },
+            { "if": ".selected.chat", "type": "text", "props": { "text": "{{ .selected.chat.name }}" }, "style": { "font_size": 12, "color": "@age" } },
+            { "if": ".selected.worktree.uncommitted > 0", "type": "box", "style": { "width": 6, "height": 6, "radius": 3, "background": "@warning" }, "tooltip": "Uncommitted changes" }
+          ]
+        },
+        { "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } },
+        { "type": "Pill", "props": { "text": "{{ if .app.connected then \"agent box\" else .app.status end }}", "mono": true, "tooltip": "{{ .app.status }}", "do": "palette.open" } },
+        { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "square-terminal", "tooltip": "Open in Cursor", "do": { "do": "open", "url": "cursor://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } } },
+        { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "code", "tooltip": "Open in VS Code", "do": { "do": "open", "url": "vscode://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } } },
+        { "if": ".selected.worktree.mr", "type": "Pill", "props": { "text": "!{{ .selected.worktree.mr.number }}", "icon": "git-pull-request", "tooltip": "Open the merge request", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } } }
+      ]
+    },
+
+    "Card": {
+      "about": "A rounded panel.",
+      "type": "column",
+      "style": { "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" }
+    },
+
+    "ChatCard": {
+      "about": "Chat tabs, the transcript, a waiting card when the agent needs you, and the composer.",
+      "type": "column",
+      "style": { "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" },
+      "children": [
+        { "type": "ChatTabs" },
+        {
+          "type": "column",
+          "style": { "grow": 1, "min_height": 0 },
+          "children": [
+            {
+              "type": "transcript",
+              "props": { "empty": "{{ if .selected.worktree then \"No chat in this worktree yet. Press + above to start one.\" else \"Select a worktree\" end }}" },
+              "style": { "grow": 1, "min_height": 0 }
+            },
+            { "type": "waiting", "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" } },
+            {
+              "if": ".selected.chat",
+              "type": "box",
+              "style": { "shrink": 0, "padding": [4, 20, 14, 20], "width": "full", "max_width": 900, "self": "center" },
+              "children": [
+                {
+                  "type": "box",
+                  "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6 },
+                  "children": [{ "type": "composer" }]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+
+    "ChatTabs": {
+      "about": "One tab per chat in the selected worktree, then a + for a new chat there.",
+      "type": "row",
+      "style": { "height": 40, "shrink": 0, "padding": [0, 0, 0, 8], "align": "stretch" },
+      "children": [
+        {
+          "for": ".selected.chats", "as": "c", "key": ".c.id",
+          "type": "row",
+          "style": {
+            "position": "relative", "gap": 8, "padding": [0, 14], "align": "center", "font_size": 13, "cursor": "pointer",
+            "color": "{{ if .c.active then \"@text\" else \"@age\" end }}", "hover": { "color": "@text" }
           },
-          { "type": "branch_bar", "style": { "height": 54 } },
-          {
-            "type": "card",
-            "style": { "grow": 0.3, "min_height": 100 },
-            "children": [{ "type": "terminal_tabs", "style": { "height": 46 } }, { "type": "terminal", "style": { "grow": 1 } }]
-          }
-        ]
-      }
-    ]
+          "on": { "click": { "do": "select", "chat": "{{ .c.id }}" } },
+          "tooltip": "{{ .c.host }} · {{ .c.state }}",
+          "menu": [
+            { "label": "Move to {{ if .c.host == \"box\" then \"Mac\" else \"box\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
+            { "if": ".c.alive", "label": "Stop", "do": { "do": "chat.stop", "chat": "{{ .c.id }}" } },
+            { "if": ".c.alive | not", "label": "Start", "do": { "do": "chat.start", "chat": "{{ .c.id }}" } },
+            { "separator": true },
+            { "label": "Archive", "do": { "do": "chat.archive", "chat": "{{ .c.id }}" } }
+          ],
+          "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 140 },
+          "children": [
+            { "type": "icon", "props": { "name": "asterisk", "size": 12, "color": "@claude" } },
+            { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "max_width": 240, "truncate": true } },
+            { "if": ".c.state == \"working\"", "type": "spinner", "props": { "size": "xsmall" } },
+            { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" } },
+            { "if": ".c.active", "type": "box", "style": { "position": "absolute", "left": 0, "right": 0, "bottom": 0, "height": 2, "background": "@accent" } }
+          ]
+        },
+        { "if": ".selected.worktree", "type": "divider", "props": { "axis": "y" }, "style": { "margin": [10, 4] } },
+        {
+          "if": ".selected.worktree",
+          "type": "row",
+          "style": { "padding": [0, 10], "gap": 4, "align": "center", "color": "@text_muted", "cursor": "pointer", "hover": { "color": "@text" } },
+          "tooltip": "New chat here  ⌘N",
+          "on": { "click": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
+          "children": [{ "type": "icon", "props": { "name": "plus", "size": 13 } }]
+        }
+      ]
+    },
+
+    "BranchBar": {
+      "about": "Branch, uncommitted changes, and actions. Drag it up or down to resize the terminal (state.terminal_height).",
+      "type": "resize_handle",
+      "props": { "state": "terminal_height", "axis": "y", "invert": true, "min": 100, "max": 1200 },
+      "style": { "height": 54, "shrink": 0, "direction": "row", "gap": 10, "padding": [0, 16], "align": "center" },
+      "children": [
+        {
+          "if": ".selected.worktree",
+          "type": "row",
+          "style": { "grow": 1, "gap": 10, "align": "center" },
+          "children": [
+            { "type": "icon", "props": { "name": "git-branch", "size": 13, "color": "@age" } },
+            { "type": "text", "props": { "text": "{{ .selected.worktree.branch // \"detached\" }}" }, "style": { "font_size": 13 } },
+            { "type": "spacer" },
+            {
+              "if": ".selected.worktree.uncommitted > 0",
+              "type": "text",
+              "props": { "text": "{{ .selected.worktree.uncommitted }} uncommitted change{{ if .selected.worktree.uncommitted == 1 then \"\" else \"s\" end }}" },
+              "style": { "font_size": 12.5, "color": "@warning" }
+            },
+            { "if": ".selected.worktree.uncommitted > 0 and .selected.chat", "type": "Pill", "props": { "text": "Commit and push", "icon": "git-commit-horizontal", "do": { "do": "chat.send", "text": "Commit and push your changes." } } },
+            { "if": "(.selected.worktree.is_primary | not) and .selected.worktree.branch", "type": "Pill", "props": { "text": "Test on Mac", "icon": "laptop", "tooltip": "Check this branch out on the Mac with the box's latest work", "do": { "do": "worktree.test_local", "branch": "{{ .selected.worktree.branch }}" } } },
+            {
+              "if": ".selected.chat",
+              "type": "Pill",
+              "props": {
+                "text": "Move chat to {{ if .selected.chat.host == \"box\" then \"Mac\" else \"box\" end }}",
+                "icon": "{{ if .selected.chat.host == \"box\" then \"laptop\" else \"server\" end }}",
+                "do": { "do": "chat.move", "to": "{{ if .selected.chat.host == \"box\" then \"mac\" else \"box\" end }}" }
+              }
+            },
+            { "type": "IconButton", "props": { "icon": "{{ if .state.terminal_open then \"panel-bottom-close\" else \"panel-bottom-open\" end }}", "tooltip": "Terminal  ⌘J", "do": { "do": "state.toggle", "key": "terminal_open" } } }
+          ]
+        }
+      ]
+    },
+
+    "TerminalCard": {
+      "about": "The terminal for the selected worktree. Height: state.terminal_height.",
+      "type": "column",
+      "style": { "height": "{{ .state.terminal_height }}", "shrink": 0, "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" },
+      "animate": { "from": { "opacity": 0, "y": 10 }, "duration": 160 },
+      "children": [
+        {
+          "type": "row",
+          "style": { "height": 46, "shrink": 0, "padding": [0, 18], "gap": 4, "align": "center" },
+          "children": [
+            {
+              "type": "row",
+              "style": { "height": 26, "padding": [0, 11], "align": "center", "radius": 13, "border": 1, "border_color": "@tab_border", "background": "@tab_bg", "font_size": 13 },
+              "children": ["Terminal"]
+            }
+          ]
+        },
+        { "type": "terminal", "style": { "grow": 1, "min_height": 0 } }
+      ]
+    }
   },
-  "sidebar": {
-    "workspace_title": "Agent box",
-    "show_projects": true,
-    "show_sections": true,
-    "show_empty_sections": true,
-    "show_age": true,
-    "show_status": true,
-    "show_badges": true,
-    "sort": "none",
-    "row_height": 33,
-    "project_row_height": 37,
-    "title_size": 15,
-    "label_size": 13,
-    "row_text_size": 14
-  },
+
+  "keys": [
+    { "key": "cmd-k", "do": "palette.open" },
+    { "key": "cmd-shift-p", "do": "palette.open" },
+    { "key": "cmd-\\", "do": { "do": "state.toggle", "key": "sidebar_open" } },
+    { "key": "cmd-j", "do": { "do": "state.toggle", "key": "terminal_open" } },
+    { "key": "cmd-,", "do": "settings.open" },
+    { "key": "cmd-n", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
+    { "key": "cmd-]", "do": { "do": "select", "offset": 1 } },
+    { "key": "cmd-[", "do": { "do": "select", "offset": -1 } },
+    { "key": "cmd-q", "do": "app.quit" }
+  ],
+
+  "commands": [
+    { "label": "Customize Agent Box with an agent…", "do": { "do": "prompt", "title": "What should change? (an agent edits your settings)", "then": { "do": "settings.agent", "request": "{{ .input }}" } } },
+    { "label": "New chat here", "if": ".selected.worktree", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
+    { "label": "New orchestrator chat in redo", "do": { "do": "chat.new", "repo": "redo", "kind": "orchestrator" } },
+    { "label": "New feature chat in redo…", "do": { "do": "prompt", "title": "Branch name", "then": { "do": "chat.new", "repo": "redo", "kind": "feature", "branch": "{{ .input }}" } } },
+    { "label": "New section…", "do": "section.new" },
+    { "label": "Toggle sidebar", "do": { "do": "state.toggle", "key": "sidebar_open" } },
+    { "label": "Toggle terminal", "do": { "do": "state.toggle", "key": "terminal_open" } },
+    { "label": "Open in Cursor", "if": ".selected.worktree", "do": { "do": "open", "url": "cursor://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } },
+    { "label": "Open in VS Code", "if": ".selected.worktree", "do": { "do": "open", "url": "vscode://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } },
+    { "label": "Open merge request", "if": ".selected.worktree.mr", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } },
+    { "label": "Commit and push", "if": ".selected.chat", "do": { "do": "chat.send", "text": "Commit and push your changes." } },
+    { "label": "Test this branch on the Mac", "if": ".selected.worktree.branch and (.selected.worktree.is_primary | not)", "do": { "do": "worktree.test_local", "branch": "{{ .selected.worktree.branch }}" } },
+    { "label": "Move chat to the Mac", "if": ".selected.chat.host == \"box\"", "do": { "do": "chat.move", "to": "mac" } },
+    { "label": "Move chat to the box", "if": ".selected.chat.host == \"mac\"", "do": { "do": "chat.move", "to": "box" } },
+    { "label": "Stop chat", "if": ".selected.chat.alive", "do": "chat.stop" },
+    { "label": "Start chat", "if": ".selected.chat and (.selected.chat.alive | not)", "do": "chat.start" },
+    { "label": "Archive chat", "if": ".selected.chat", "do": "chat.archive" },
+    { "label": "Settings", "do": "settings.open" },
+    { "label": "Settings reference", "do": "settings.docs" },
+    { "label": "Reload settings", "do": "settings.reload" },
+    { "label": "Quit", "do": "app.quit" }
+  ],
+
   "chat": {
     "show_thinking": false,
     "collapse_tool_calls": true,
-    "show_tool_results": false,
-    "text_size": 14,
-    "max_width": 860,
-    "enter_sends": true
+    "enter_sends": true,
+    "placeholder": "Message the agent…",
+    "list": { "gap": 14, "padding": [18, 28], "width": "full", "max_width": 860, "self": "center" },
+    "user": { "padding": 10, "radius": 8, "background": "@user_bubble", "border": 1, "border_color": "@line", "font_size": 14 },
+    "assistant": { "font_size": 14 },
+    "thinking": { "font_size": 13, "italic": true, "color": "@text_muted" },
+    "tool": { "gap": 8, "align": "center" },
+    "tool_name": { "font_size": 13, "font_weight": "semibold" },
+    "tool_summary": { "font_size": 13, "color": "@text_muted" },
+    "tool_detail": { "margin": [0, 0, 0, 15], "padding": 10, "radius": 6, "background": "@code_bg", "font_family": "@font_mono", "font_size": 12, "color": "@age" },
+    "notice": { "font_size": 12.5, "color": "@danger" },
+    "empty": { "color": "@text_muted" },
+    "waiting": { "padding": 12, "radius": 10, "border": 1, "border_color": "@warning", "background": "@waiting_bg", "font_size": 13 },
+    "waiting_option": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "background": "@pill", "hover": { "background": "@pill_hover" }, "font_size": 12.5, "align": "center" }
   },
-  "terminal": { "font_size": 13, "line_height": 1.25, "padding": [14, 6] },
-  "keys": [
-    { "key": "cmd-k", "action": "palette" },
-    { "key": "cmd-shift-p", "action": "palette" },
-    { "key": "cmd-\\", "action": "toggle_sidebar" },
-    { "key": "cmd-,", "action": "open_settings" },
-    { "key": "cmd-n", "action": "new_chat" },
-    { "key": "cmd-j", "action": "toggle_terminal" },
-    { "key": "cmd-r", "action": "reconnect" },
-    { "key": "cmd-]", "action": "next_worktree" },
-    { "key": "cmd-[", "action": "previous_worktree" }
-  ],
-  "actions": [
-    { "name": "Open in Cursor", "run": "open 'cursor://vscode-remote/ssh-remote+{ssh_host}{path}'" },
-    { "name": "Open in VS Code", "run": "open 'vscode://vscode-remote/ssh-remote+{ssh_host}{path}'" },
-    { "name": "Open MR in browser", "run": "open '{mr_url}'" }
-  ]
+
+  "terminal": {
+    "font_family": "Menlo",
+    "font_size": 13,
+    "line_height": 1.25,
+    "padding": [14, 6],
+    "foreground": "#f5f5f7",
+    "background": "#1e1e1f"
+  }
 }

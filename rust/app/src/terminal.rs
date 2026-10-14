@@ -2,7 +2,7 @@
 painted with GPUI text runs. Keystrokes go back as bytes; the PTY follows this view's size. */
 
 use crate::remote::Remote;
-use crate::settings::{parse_color, Settings};
+use crate::settings::{parse_color, TerminalSettings};
 use agent_box_protocol::Call;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
@@ -47,7 +47,7 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(remote: Remote, session: Option<String>, cwd: Option<String>, settings: &Settings, cx: &mut Context<Self>) -> Self {
+    pub fn new(remote: Remote, session: Option<String>, cwd: Option<String>, ts: &TerminalSettings, cx: &mut Context<Self>) -> Self {
         let size = Size { cols: 100, rows: 30 };
         Self {
             term: Term::new(Config::default(), &size, VoidListener),
@@ -58,12 +58,12 @@ impl TerminalView {
             cwd,
             size: (100, 30),
             focus: cx.focus_handle(),
-            font: font(settings.theme.mono_font_family.clone()),
-            font_size: px(settings.terminal.font_size),
-            line_height: settings.terminal.line_height,
-            padding: settings.terminal.padding,
-            fg: parse_color("#d6d6d8"),
-            bg: parse_color(&settings.theme.card),
+            font: font(ts.font_family.clone()),
+            font_size: px(ts.font_size),
+            line_height: ts.line_height,
+            padding: ts.padding,
+            fg: parse_color(&ts.foreground),
+            bg: parse_color(&ts.background),
         }
     }
 

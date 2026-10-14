@@ -20,3 +20,6 @@ alacritty_terminal = "0.26"
 base64 = "0.22"
 notify = "6"
 flume = "0.11"
+jaq-core = "3.1"
+jaq-std = "3.0"
+jaq-json = { version = "2.0", features = ["serde"] }

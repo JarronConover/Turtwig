@@ -1,217 +1,104 @@
-/*! User settings: the whole UI (layout, widgets, theme, keys, actions) is data in one JSON-with-comments
-file, merged over the built-in defaults, validated by a generated JSON Schema, and reloaded on change. */
+/*! Settings are the whole app: views, components, theme, state, keys, and commands, as JSON with
+comments, deep-merged over the built-in defaults (which are themselves just settings). */
 
 use anyhow::{Context as _, Result};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 pub const DEFAULTS: &str = include_str!("../default-settings.jsonc");
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
-    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-    /** Box to connect to: the ssh host and the daemon binary on it. */
     pub connection: Connection,
-    pub theme: Theme,
-    pub animation: Animation,
-    /** The window, as a tree of containers and widgets. */
-    pub layout: Node,
-    pub sidebar: SidebarSettings,
-    pub chat: ChatSettings,
+    /** Named colors, fonts, and sizes; nodes refer to them as `@name`. */
+    pub theme: Map<String, Value>,
+    /** UI state and its starting values; actions change it, expressions read it as `.state`. */
+    pub state: Map<String, Value>,
+    /** Root views by name; `main` is the window. */
+    pub views: Map<String, Value>,
+    /** Reusable nodes, used as `{"type": "<Name>", "props": {...}}`. */
+    pub components: Map<String, Value>,
+    pub keys: Vec<Value>,
+    /** Extra command palette entries: `{"label", "do", "if"}`. */
+    pub commands: Vec<Value>,
+    pub chat: Value,
     pub terminal: TerminalSettings,
-    /** Key bindings: `{"key": "cmd-k", "action": "palette"}`. Later entries win. */
-    pub keys: Vec<KeyBinding>,
-    /** Extra commands for the palette and the keymap; `run` is a shell command, `{path}` and `{branch}` expand. */
-    pub actions: Vec<CustomAction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Connection {
     pub ssh_host: String,
     pub daemon: String,
-    /** Seconds between reconnect attempts. */
     pub retry_seconds: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Theme {
-    pub window: String,
-    pub card: String,
-    pub line: String,
-    pub text: String,
-    pub text_muted: String,
-    pub text_faint: String,
-    pub age: String,
-    pub accent: String,
-    pub hover: String,
-    pub selection: String,
-    pub selection_border: String,
-    pub warning: String,
-    pub danger: String,
-    pub merged: String,
-    pub success: String,
-    pub font_family: String,
-    pub mono_font_family: String,
-    pub font_size: f32,
-    pub card_radius: f32,
-    pub row_radius: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Animation {
-    pub enabled: bool,
-    /** Milliseconds for hovers, selection, and collapse. */
-    pub duration_ms: u64,
-    /** Milliseconds for the sidebar slide. */
-    pub sidebar_ms: u64,
-    pub spinner_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Node {
-    /** Children side by side. */
-    Row { children: Vec<Node>, #[serde(default)] style: Style },
-    /** Children stacked. */
-    Column { children: Vec<Node>, #[serde(default)] style: Style },
-    /** A bordered, rounded panel (super.engineering's cards). */
-    Card { children: Vec<Node>, #[serde(default)] style: Style },
-    Sidebar { #[serde(default)] style: Style },
-    Toolbar { #[serde(default)] style: Style },
-    ChatTabs { #[serde(default)] style: Style },
-    Chat { #[serde(default)] style: Style },
-    BranchBar { #[serde(default)] style: Style },
-    TerminalTabs { #[serde(default)] style: Style },
-    Terminal { #[serde(default)] style: Style },
-    Spacer { #[serde(default)] style: Style },
-}
-
-/** Sizing and spacing any node can override. */
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct Style {
-    pub width: Option<f32>,
-    pub height: Option<f32>,
-    /** Share of the free space (like CSS flex-grow). */
-    pub grow: Option<f32>,
-    pub min_width: Option<f32>,
-    pub min_height: Option<f32>,
-    /** [top, right, bottom, left] */
-    pub padding: Option<[f32; 4]>,
-    pub gap: Option<f32>,
-    pub background: Option<String>,
-    /** Whether the user can drag this node's size; persisted per node `id`. */
-    pub resizable: bool,
-    pub id: Option<String>,
-    pub hidden: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SidebarSettings {
-    pub workspace_title: String,
-    pub show_projects: bool,
-    pub show_sections: bool,
-    pub show_empty_sections: bool,
-    pub show_age: bool,
-    pub show_status: bool,
-    pub show_badges: bool,
-    /** none | activity | name */
-    pub sort: String,
-    pub row_height: f32,
-    pub project_row_height: f32,
-    pub title_size: f32,
-    pub label_size: f32,
-    pub row_text_size: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ChatSettings {
-    pub show_thinking: bool,
-    pub collapse_tool_calls: bool,
-    pub show_tool_results: bool,
-    pub text_size: f32,
-    pub max_width: Option<f32>,
-    /** Enter sends and shift-enter adds a line, or the reverse. */
-    pub enter_sends: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TerminalSettings {
+    pub font_family: String,
     pub font_size: f32,
     pub line_height: f32,
     pub padding: [f32; 2],
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct KeyBinding {
-    pub key: String,
-    pub action: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CustomAction {
-    pub name: String,
-    pub run: String,
-    #[serde(default)]
-    pub key: Option<String>,
+    pub foreground: String,
+    pub background: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        serde_json_lenient::from_str(DEFAULTS).expect("built-in settings parse")
+        serde_json::from_value(defaults_value()).expect("built-in settings are complete")
     }
+}
+
+pub fn dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agent-box/state/settings")
 }
 
 pub fn path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".agent-box/state/settings/settings.jsonc")
+    dir().join("settings.jsonc")
 }
 
-/** The user's file deep-merged over the complete defaults, so a file only needs what it changes. */
+pub fn defaults_value() -> Value {
+    serde_json_lenient::from_str(DEFAULTS).expect("built-in settings parse")
+}
+
+/** The user's file over the defaults. Objects merge key by key; `keys` merge by `key` and `commands`
+by `label`; any other array replaces the default; `null` removes a default. */
 pub fn load() -> Result<Settings> {
-    let mut base: serde_json::Value = serde_json_lenient::from_str(DEFAULTS)?;
+    let mut base = defaults_value();
     let p = path();
     if p.exists() {
         let text = std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
-        let user: serde_json::Value =
-            serde_json_lenient::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
-        merge(&mut base, user);
+        let user: Value = serde_json_lenient::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
+        merge(&mut base, user, "");
     }
-    serde_json::from_value(base).context("settings don't match the schema")
+    serde_json::from_value(base).context("settings")
 }
 
-fn merge(base: &mut serde_json::Value, over: serde_json::Value) {
+fn merge(base: &mut Value, over: Value, key: &str) {
     match (base, over) {
-        (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
+        (Value::Object(b), Value::Object(o)) => {
             for (k, v) in o {
-                merge(b.entry(k).or_insert(serde_json::Value::Null), v);
+                if k == "$schema" {
+                    continue;
+                }
+                if v.is_null() {
+                    b.remove(&k);
+                    continue;
+                }
+                merge(b.entry(k.clone()).or_insert(Value::Null), v, &k);
+            }
+        }
+        (Value::Array(b), Value::Array(o)) if key == "keys" || key == "commands" => {
+            let id = if key == "keys" { "key" } else { "label" };
+            for item in o {
+                match b.iter_mut().find(|x| x.get(id).is_some() && x.get(id) == item.get(id)) {
+                    Some(existing) => *existing = item,
+                    None => b.push(item),
+                }
             }
         }
         (b, o) => *b = o,
     }
-}
-
-/** Writes the schema next to the settings file so editors can validate and autocomplete. */
-pub fn write_schema() -> Result<()> {
-    let p = path();
-    std::fs::create_dir_all(p.parent().unwrap())?;
-    let schema = schemars::schema_for!(Settings);
-    std::fs::write(p.with_file_name("settings.schema.json"), serde_json::to_string_pretty(&schema)?)?;
-    if !p.exists() {
-        std::fs::write(&p, "// Agent Box settings. Anything here overrides the built-in defaults.\n// Schema: settings.schema.json\n{\n  \"$schema\": \"./settings.schema.json\"\n}\n")?;
-    }
-    Ok(())
 }
 
 pub fn parse_color(hex: &str) -> gpui_kit::Hsla {

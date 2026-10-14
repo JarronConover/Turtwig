@@ -1,0 +1,424 @@
+/*! The interpreter: turns a settings node into GPUI elements. Every node can repeat (`for`), hide
+(`if`), style itself, react to events, carry a context menu and tooltip, and animate. */
+
+use super::expr::{to_json, to_val, with};
+use super::style;
+use crate::workspace::Workspace;
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{Icon, Sizable as _};
+use gpui_kit::*;
+use jaq_json::Val;
+use serde_json::{Map, Value};
+use std::time::{Duration, Instant};
+
+pub struct Transition {
+    from: f32,
+    to: f32,
+    start: Instant,
+    duration: Duration,
+}
+
+impl Transition {
+    fn value(&self) -> (f32, bool) {
+        let t = (self.start.elapsed().as_secs_f32() / self.duration.as_secs_f32().max(0.001)).min(1.);
+        let e = 1. - (1. - t).powi(3);
+        (self.from + (self.to - self.from) * e, t < 1.)
+    }
+}
+
+pub const NODE_TYPES: &[(&str, &str)] = &[
+    ("box", "A container. `style.direction` sets row or column (default column)."),
+    ("row", "Children side by side."),
+    ("column", "Children stacked."),
+    ("stack", "Children layered on top of each other (later children on top); position them with `style.position: absolute`."),
+    ("scroll", "A scrolling container. `props.axis`: y (default) | x | both."),
+    ("text", "Text. `props.text` (templates allowed); a plain string node is shorthand for this."),
+    ("icon", "A Lucide icon. `props.name` (e.g. git-branch, panel-left, plus), `props.size` (points), `props.spin` (bool)."),
+    ("spinner", "A loading spinner. `props.size`: xsmall | small | medium | large."),
+    ("spacer", "Takes the remaining space (grow 1)."),
+    ("divider", "A 1-point line. `props.axis`: x (default, horizontal) | y."),
+    ("markdown", "Rendered Markdown. `props.text`, `props.id` for a stable identity."),
+    ("transcript", "The built-in chat transcript. `props.chat` (chat id; default the selected chat). Look: settings `chat`."),
+    ("composer", "The built-in message box for a chat. `props.chat`, `props.placeholder`."),
+    ("waiting", "The built-in card for a chat waiting on a permission or question, with its answer buttons. `props.chat`."),
+    ("terminal", "The built-in terminal for a worktree. `props.path` (default the selected worktree). Look: settings `terminal`."),
+    ("resize_handle", "A drag handle that sets a numeric state value. `props.state` (key), `props.axis` x|y, `props.min`, `props.max`, `props.invert` (bool, for handles on the far edge)."),
+    ("<Component>", "Any name under `components`; its `props` are available inside as `.props`."),
+];
+
+impl Workspace {
+    pub(crate) fn render_view(&mut self, name: &str, ctx: &Val, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(node) = self.settings.views.get(name).cloned() else {
+            return div().child(format!("No view named `{name}` in settings.views")).into_any_element();
+        };
+        let mut els = self.render(&node, ctx, name, window, cx);
+        if els.len() == 1 {
+            els.pop().unwrap()
+        } else {
+            div().size_full().children(els).into_any_element()
+        }
+    }
+
+    pub(crate) fn render(&mut self, node: &Value, ctx: &Val, path: &str, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let obj = match node {
+            Value::String(s) => {
+                let text = self.exprs.resolve(&Value::String(s.clone()), ctx);
+                return vec![div().child(value_text(&text)).into_any_element()];
+            }
+            Value::Array(items) => {
+                return items.iter().enumerate().flat_map(|(i, n)| self.render(n, ctx, &format!("{path}/{i}"), window, cx)).collect();
+            }
+            Value::Object(o) => o,
+            _ => return vec![],
+        };
+        if let Some(code) = obj.get("for").and_then(Value::as_str) {
+            let outs = self.exprs.run(code, ctx);
+            let items: Vec<Val> = match outs.as_slice() {
+                [Val::Arr(a)] => a.iter().cloned().collect(),
+                _ => outs,
+            };
+            let name = obj.get("as").and_then(Value::as_str).unwrap_or("item").to_string();
+            let mut node = obj.clone();
+            node.remove("for");
+            let node = Value::Object(node);
+            let mut out = vec![];
+            for (i, item) in items.into_iter().enumerate() {
+                let c = with(ctx, vec![(name.clone(), item), ("index".into(), to_val(&Value::from(i)))]);
+                let key = obj.get("key").and_then(Value::as_str).map(|k| value_text(&to_json(&self.exprs.first(k, &c)))).unwrap_or(i.to_string());
+                out.extend(self.render(&node, &c, &format!("{path}[{key}]"), window, cx));
+            }
+            return out;
+        }
+        if let Some(code) = obj.get("if").and_then(Value::as_str) {
+            if !self.exprs.truthy(code, ctx) {
+                return vec![];
+            }
+        }
+        let kind = obj.get("type").and_then(Value::as_str).unwrap_or("box").to_string();
+        if let Some(comp) = self.settings.components.get(&kind).cloned() {
+            let props = self.exprs.resolve(obj.get("props").unwrap_or(&Value::Null), ctx);
+            let c = with(ctx, vec![("props".into(), to_val(&props))]);
+            let mut comp = comp;
+            if let (Some(Value::Object(extra)), Value::Object(base)) = (obj.get("style"), &mut comp) {
+                let st = base.entry("style").or_insert(Value::Object(Map::new()));
+                if let Value::Object(st) = st {
+                    for (k, v) in extra {
+                        st.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            return self.render(&comp, &c, &format!("{path}:{kind}"), window, cx);
+        }
+        let props = match self.exprs.resolve(obj.get("props").unwrap_or(&Value::Null), ctx) {
+            Value::Object(p) => p,
+            _ => Map::new(),
+        };
+        let mut st = match self.exprs.resolve(obj.get("style").unwrap_or(&Value::Null), ctx) {
+            Value::Object(s) => s,
+            _ => Map::new(),
+        };
+        if st.get("hidden").and_then(Value::as_bool) == Some(true) {
+            return vec![];
+        }
+        self.apply_transitions(obj, &mut st, path, window);
+        let theme = self.settings.theme.clone();
+        let id = obj.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| path.to_string());
+        self.apply_enter(obj, &mut st, &id, window);
+
+        let children = |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| -> Vec<AnyElement> {
+            match obj.get("children") {
+                Some(Value::Array(kids)) => kids.iter().enumerate().flat_map(|(i, k)| ws.render(k, ctx, &format!("{path}/{i}"), window, cx)).collect(),
+                Some(single) => ws.render(single, ctx, &format!("{path}/0"), window, cx),
+                None => vec![],
+            }
+        };
+
+        let base: Div = match kind.as_str() {
+            "row" => div().flex().flex_row(),
+            "column" | "box" | "scroll" | "resize_handle" => div().flex().flex_col(),
+            "stack" => div().relative().flex().flex_col(),
+            "spacer" => div().flex_1(),
+            "divider" => {
+                let c = style::color(&Value::from("@line"), &theme).unwrap_or(gpui_kit::black());
+                if props.get("axis").and_then(Value::as_str) == Some("y") { div().w(px(1.)).h_full().bg(c) } else { div().h(px(1.)).w_full().bg(c) }
+            }
+            _ => div(),
+        };
+        let el = style::apply(base, &st, &theme);
+
+        let content: Vec<AnyElement> = match kind.as_str() {
+            "text" => vec![value_text(props.get("text").unwrap_or(&Value::Null)).into_any_element()],
+            "icon" => {
+                let name = props.get("name").and_then(Value::as_str).unwrap_or("circle");
+                let size = props.get("size").and_then(Value::as_f64).unwrap_or(14.) as f32;
+                let mut icon = Icon::empty().path(format!("icons/{name}.svg")).size(px(size));
+                if let Some(c) = props.get("color").and_then(|c| style::color(c, &theme)) {
+                    icon = icon.text_color(c);
+                } else if let Some(c) = st.get("color").and_then(|c| style::color(c, &theme)) {
+                    icon = icon.text_color(c);
+                }
+                if props.get("spin").and_then(Value::as_bool) == Some(true) {
+                    vec![icon
+                        .with_animation(SharedString::from(format!("{id}:spin")), Animation::new(Duration::from_millis(900)).repeat(), |i, d| {
+                            i.rotate(percentage(d))
+                        })
+                        .into_any_element()]
+                } else {
+                    vec![icon.into_any_element()]
+                }
+            }
+            "spinner" => {
+                let s = Spinner::new();
+                let s = match props.get("size").and_then(Value::as_str) {
+                    Some("xsmall") => s.xsmall(),
+                    Some("small") => s.small(),
+                    Some("large") => s.large(),
+                    _ => s,
+                };
+                let s = match props.get("color").and_then(|c| style::color(c, &theme)) {
+                    Some(c) => s.color(c),
+                    None => s,
+                };
+                vec![s.into_any_element()]
+            }
+            "markdown" => {
+                let text = value_text(props.get("text").unwrap_or(&Value::Null));
+                let mid = props.get("id").map(value_text).unwrap_or(id.clone());
+                vec![TextView::markdown(SharedString::from(mid), text).into_any_element()]
+            }
+            "transcript" => {
+                let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
+                vec![self.transcript_view(chat, &props, window, cx)]
+            }
+            "composer" => {
+                let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
+                self.composer_view(chat, &props, window, cx).into_iter().collect()
+            }
+            "waiting" => {
+                let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
+                chat.and_then(|c| self.chat(&c).cloned()).filter(|c| c.state == "waiting").map(|c| self.waiting_card(&c, cx)).into_iter().collect()
+            }
+            "terminal" => {
+                let path = props.get("path").and_then(Value::as_str).map(str::to_string).or_else(|| self.selected.clone());
+                path.and_then(|p| self.terminals.get(&p).cloned()).map(|t| div().size_full().child(t).into_any_element()).into_iter().collect()
+            }
+            "resize_handle" => vec![],
+            "scroll" => vec![],
+            _ => vec![],
+        };
+        let kids = children(self, window, cx);
+
+        let mut el = el.id(SharedString::from(id.clone()));
+        if kind == "scroll" {
+            el = match props.get("axis").and_then(Value::as_str) {
+                Some("x") => el.overflow_x_scroll(),
+                Some("both") => el.overflow_scroll(),
+                _ => el.overflow_y_scroll(),
+            };
+            if let Some(handle) = props.get("handle").and_then(Value::as_str) {
+                let h = self.scroll_handles.entry(handle.to_string()).or_default().clone();
+                el = el.track_scroll(&h);
+            }
+        }
+        if kind == "resize_handle" {
+            let key = props.get("state").and_then(Value::as_str).unwrap_or("").to_string();
+            let vertical = props.get("axis").and_then(Value::as_str) == Some("y");
+            let invert = props.get("invert").and_then(Value::as_bool) == Some(true);
+            let (min, max) = (
+                props.get("min").and_then(Value::as_f64).unwrap_or(80.) as f32,
+                props.get("max").and_then(Value::as_f64).unwrap_or(2000.) as f32,
+            );
+            el = el
+                .cursor(if vertical { CursorStyle::ResizeUpDown } else { CursorStyle::ResizeLeftRight })
+                .on_mouse_down(MouseButton::Left, cx.listener(move |ws, e: &MouseDownEvent, _, cx| {
+                    let start_size = ws.state.get(&key).and_then(Value::as_f64).unwrap_or(300.) as f32;
+                    let start = if vertical { f32::from(e.position.y) } else { f32::from(e.position.x) };
+                    ws.drag = Some(crate::workspace::Drag { key: key.clone(), vertical, invert, start, start_size, min, max });
+                    cx.stop_propagation();
+                }));
+        }
+        if let Some(Value::Object(h)) = st.get("hover") {
+            let (h, theme) = (h.clone(), theme.clone());
+            el = el.hover(move |mut s| {
+                style::refine(&mut s, &h, &theme);
+                s
+            });
+        }
+        if let Some(Value::Object(a)) = st.get("active") {
+            let (a, theme) = (a.clone(), theme.clone());
+            el = el.active(move |mut s| {
+                style::refine(&mut s, &a, &theme);
+                s
+            });
+        }
+        if let Some(Value::Object(on)) = obj.get("on") {
+            let get = |k: &str| on.get(k).map(|a| self.exprs.resolve_action(a, ctx));
+            let (click, double, down) = (get("click"), get("double_click"), get("mouse_down"));
+            for event in on.keys() {
+                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down") {
+                    self.exprs.note(format!("unknown event `{event}` at {path}"));
+                }
+            }
+            if let Some(down) = down {
+                el = el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, e: &MouseDownEvent, window, cx| {
+                    match (e.click_count, &double) {
+                        (2, Some(d)) => ws.run_action(d, window, cx),
+                        (1, _) => ws.run_action(&down, window, cx),
+                        _ => {}
+                    }
+                }));
+            } else if let Some(d) = double.clone() {
+                el = el.on_click(cx.listener(move |ws, e: &ClickEvent, window, cx| {
+                    if e.click_count() == 2 {
+                        ws.run_action(&d, window, cx);
+                    }
+                }));
+            }
+            if let Some(c) = click {
+                el = el.on_click(cx.listener(move |ws, e: &ClickEvent, window, cx| {
+                    if e.click_count() < 2 {
+                        ws.run_action(&c, window, cx);
+                    }
+                }));
+            }
+        }
+        if let Some(tip) = obj.get("tooltip") {
+            let tip = value_text(&self.exprs.resolve(tip, ctx));
+            if !tip.is_empty() {
+                el = el.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx));
+            }
+        }
+        let el = el.children(content).children(kids);
+        let el: AnyElement = if let Some(Value::Array(menu)) = obj.get("menu") {
+            let entries = self.menu_entries(menu, ctx);
+            let view = cx.entity();
+            el.context_menu(move |menu, window, _| {
+                let mut m = menu;
+                for (label, action, sep) in entries.iter() {
+                    if *sep {
+                        m = m.separator();
+                        continue;
+                    }
+                    let action = action.clone();
+                    m = m.item(PopupMenuItem::new(label.clone()).on_click(window.listener_for(&view, move |ws: &mut Workspace, _, window, cx| {
+                        ws.run_action(&action, window, cx)
+                    })));
+                }
+                m
+            })
+            .into_any_element()
+        } else {
+            el.into_any_element()
+        };
+        vec![el]
+    }
+
+    /** Menu entries with `if` applied and `for` expanded: (label, action, is_separator). */
+    fn menu_entries(&self, menu: &[Value], ctx: &Val) -> Vec<(String, Value, bool)> {
+        let mut out = vec![];
+        for m in menu {
+            if let Some(code) = m.get("for").and_then(Value::as_str) {
+                let name = m.get("as").and_then(Value::as_str).unwrap_or("item").to_string();
+                let mut one = m.clone();
+                if let Value::Object(o) = &mut one {
+                    o.remove("for");
+                }
+                let items: Vec<Val> = match self.exprs.run(code, ctx).as_slice() {
+                    [Val::Arr(a)] => a.iter().cloned().collect(),
+                    other => other.to_vec(),
+                };
+                for (i, item) in items.into_iter().enumerate() {
+                    let c = with(ctx, vec![(name.clone(), item), ("index".into(), to_val(&Value::from(i)))]);
+                    out.extend(self.menu_entries(std::slice::from_ref(&one), &c));
+                }
+                continue;
+            }
+            if let Some(code) = m.get("if").and_then(Value::as_str) {
+                if !self.exprs.truthy(code, ctx) {
+                    continue;
+                }
+            }
+            out.push((
+                value_text(&self.exprs.resolve(m.get("label").unwrap_or(&Value::Null), ctx)),
+                self.exprs.resolve_action(m.get("do").unwrap_or(&Value::Null), ctx),
+                m.get("separator").and_then(Value::as_bool) == Some(true),
+            ));
+        }
+        out
+    }
+
+    /** `animate`: when a node appears (it wasn't in the previous render), it fades and slides in from
+    `from` over `duration` ms, by easing its own opacity and offset; no wrapper, so layout is untouched. */
+    fn apply_enter(&mut self, obj: &Map<String, Value>, st: &mut Map<String, Value>, id: &str, window: &mut Window) {
+        let Some(Value::Object(a)) = obj.get("animate") else { return };
+        if self.settings.theme.get("animations").and_then(Value::as_bool) == Some(false) {
+            return;
+        }
+        let generation = self.render_generation;
+        let entry = self.entered.entry(id.to_string()).or_insert((Instant::now(), generation));
+        if entry.1 + 1 < generation {
+            entry.0 = Instant::now();
+        }
+        entry.1 = generation;
+        let ms = a.get("duration").and_then(Value::as_u64).unwrap_or(160).max(1) as f32;
+        let t = (entry.0.elapsed().as_secs_f32() * 1000. / ms).min(1.);
+        if t >= 1. {
+            return;
+        }
+        window.request_animation_frame();
+        let e = 1. - (1. - t).powi(4);
+        let from = a.get("from").cloned().unwrap_or(Value::Null);
+        let f = |k: &str| from.get(k).and_then(Value::as_f64).map(|x| x as f32);
+        if let Some(o) = f("opacity") {
+            let base = st.get("opacity").and_then(Value::as_f64).unwrap_or(1.) as f32;
+            st.insert("opacity".into(), Value::from((o + (base - o) * e) as f64));
+        }
+        for (k, side) in [("x", "left"), ("y", "top")] {
+            if let Some(d) = f(k) {
+                let base = st.get(side).and_then(Value::as_f64).unwrap_or(0.) as f32;
+                st.insert(side.into(), Value::from((base + d * (1. - e)) as f64));
+            }
+        }
+    }
+
+    /** `transition`: numeric style keys listed there ease from their old value to the new one. */
+    fn apply_transitions(&mut self, obj: &Map<String, Value>, st: &mut Map<String, Value>, path: &str, window: &mut Window) {
+        let Some(Value::Object(tr)) = obj.get("transition") else { return };
+        let enabled = self.settings.theme.get("animations").and_then(Value::as_bool) != Some(false);
+        for (prop, ms) in tr {
+            let Some(target) = st.get(prop).and_then(Value::as_f64).map(|x| x as f32) else { continue };
+            let key = format!("{path}#{prop}");
+            let ms = ms.as_u64().unwrap_or(200);
+            let shown = match self.transitions.get(&key) {
+                Some(t) if (t.to - target).abs() < 0.01 => {
+                    let (v, running) = t.value();
+                    if running {
+                        window.request_animation_frame();
+                    }
+                    v
+                }
+                Some(t) if enabled => {
+                    let (v, _) = t.value();
+                    self.transitions.insert(key.clone(), Transition { from: v, to: target, start: Instant::now(), duration: Duration::from_millis(ms) });
+                    window.request_animation_frame();
+                    v
+                }
+                _ => {
+                    self.transitions.insert(key.clone(), Transition { from: target, to: target, start: Instant::now(), duration: Duration::ZERO });
+                    target
+                }
+            };
+            st.insert(prop.clone(), Value::from(shown as f64));
+        }
+    }
+}
+
+pub fn value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}

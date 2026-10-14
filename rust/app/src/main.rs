@@ -2,6 +2,7 @@ mod remote;
 mod settings;
 mod terminal;
 mod transcript;
+mod ui;
 mod workspace;
 
 use gpui_kit::*;
@@ -22,7 +23,7 @@ fn open_main(cx: &mut App) {
 }
 
 fn main() {
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     // Clicking the Dock icon (or opening the app again) after closing the window brings it back.
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
