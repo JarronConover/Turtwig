@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod attach_view;
 pub mod diff_view;
 pub mod docs;
 pub mod expr;

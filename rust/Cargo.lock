@@ -120,6 +120,7 @@ dependencies = [
  "flume 0.11.1",
  "gpui-kit",
  "gpui-pre-platform",
+ "imagesize 0.13.0",
  "jaq-core",
  "jaq-json",
  "jaq-std",

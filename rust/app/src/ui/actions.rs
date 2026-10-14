@@ -16,7 +16,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.send", "{chat, text}: send a message"),
     ("chat.keys", "{chat, keys: [..]}: press keys in the chat's session (Enter, Escape, Up, 1, ...)"),
     ("chat.archive / chat.stop / chat.start", "{chat}"),
-    ("chat.attach", "{chat, paths: [..]}: attach files to a chat's composer (uploaded to the box for box chats); pasting or dropping images and files does the same"),
+    ("chat.attach", "{chat, paths: [..]}: attach files to a chat (preview chips above its composer; uploaded to the box for box chats; sent with the next message). An `on.drop` action gets the dropped files as `paths`."),
     ("composer.send", "{chat}: send what's in a chat's composer"),
     ("chat.move", "{chat, to: mac|box}: move a chat between machines"),
     ("section.new", "{assign?: path}: ask for a name, create the section (and move that worktree into it)"),

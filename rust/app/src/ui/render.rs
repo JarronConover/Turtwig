@@ -49,6 +49,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("composer", "The built-in message box for a chat. `props.chat`, `props.placeholder`."),
     ("waiting", "The built-in card for a chat waiting on a permission or question, with its answer buttons. `props.chat`."),
     ("terminal", "The built-in terminal for a worktree. `props.path` (default the selected worktree). Look: settings `terminal`."),
+    ("attachments", "Preview chips for files attached to a chat but not sent yet (spinner while uploading, × to remove). `props.chat` (default the selected chat), `props.size`. Look: settings `chat.attachments`, `chat.attachment`."),
     ("diff", "The built-in diff of a worktree: a file list beside the changes. `props.path` (default the selected worktree), `props.base` (default `state.diff_base`: uncommitted | branch). Click a file to jump, a file header to collapse, a line number to open it in the editor. Look: settings `diff`."),
     ("resize_handle", "A drag handle that sets a numeric state value. `props.state` (key), `props.axis` x|y, `props.min`, `props.max`, `props.invert` (bool, for handles on the far edge)."),
     ("<Component>", "Any name under `components`; its `props` are available inside as `.props`."),
@@ -220,6 +221,10 @@ impl Workspace {
                 path.and_then(|p| self.terminals.get(&p).cloned()).map(|t| div().size_full().child(t).into_any_element()).into_iter().collect()
             }
             "diff" => vec![self.diff_view(&props, window, cx)],
+            "attachments" => {
+                let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
+                self.attachments_view(chat, &props, cx).into_iter().collect()
+            }
             "resize_handle" => vec![],
             "scroll" => vec![],
             _ => vec![],
@@ -262,6 +267,13 @@ impl Workspace {
                 s
             });
         }
+        if let Some(Value::Object(d)) = st.get("drag_over") {
+            let (d, theme) = (d.clone(), theme.clone());
+            el = el.drag_over::<ExternalPaths>(move |mut s, _, _, _| {
+                style::refine(&mut s, &d, &theme);
+                s
+            });
+        }
         if let Some(Value::Object(a)) = st.get("active") {
             let (a, theme) = (a.clone(), theme.clone());
             el = el.active(move |mut s| {
@@ -271,9 +283,19 @@ impl Workspace {
         }
         if let Some(Value::Object(on)) = obj.get("on") {
             let get = |k: &str| on.get(k).map(|a| self.exprs.resolve_action(a, ctx));
-            let (click, double, down) = (get("click"), get("double_click"), get("mouse_down"));
+            let (click, double, down, drop) = (get("click"), get("double_click"), get("mouse_down"), get("drop"));
+            if let Some(drop) = drop {
+                el = el.on_drop(cx.listener(move |ws, paths: &ExternalPaths, window, cx| {
+                    let list: Vec<Value> = paths.paths().iter().map(|p| Value::String(p.to_string_lossy().into_owned())).collect();
+                    let mut action = drop.clone();
+                    if let Value::Object(o) = &mut action {
+                        o.insert("paths".into(), Value::Array(list));
+                    }
+                    ws.run_action(&action, window, cx);
+                }));
+            }
             for event in on.keys() {
-                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down") {
+                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down" | "drop") {
                     self.exprs.note(format!("unknown event `{event}` at {path}"));
                 }
             }

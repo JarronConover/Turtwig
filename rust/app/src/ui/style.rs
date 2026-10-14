@@ -38,6 +38,7 @@ pub const STYLE_KEYS: &[(&str, &str)] = &[
     ("hidden", "bool: render nothing"),
     ("hover", "object of style keys applied while the pointer is over the node"),
     ("active", "object of style keys applied while it's pressed"),
+    ("drag_over", "object of style keys applied while files are dragged over the node (pair with `on.drop`)"),
 ];
 
 pub fn color(v: &Value, theme: &Map<String, Value>) -> Option<Hsla> {

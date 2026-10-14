@@ -242,7 +242,7 @@
                   "children": [
                     {
                       "type": "box",
-                      "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6 },
+                      "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6, "gap": 6 },
                       "children": [{ "type": "composer", "props": { "chat": "designer" } }]
                     }
                   ]
@@ -410,7 +410,7 @@
     },
 
     "ChatCard": {
-      "about": "Chat tabs, the transcript, a waiting card when the agent needs you, and the composer.",
+      "about": "Chat tabs, the transcript, a waiting card when the agent needs you, and the composer. Drop files on the transcript or composer to attach them.",
       "type": "column",
       "style": { "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" },
       "children": [
@@ -442,7 +442,7 @@
               "children": [
                 {
                   "type": "box",
-                  "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6 },
+                  "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6, "gap": 6 },
                   "children": [{ "type": "composer" }]
                 }
               ]
@@ -657,7 +657,10 @@
     "list": { "gap": 14, "padding": [18, 28], "width": "full", "max_width": 860, "self": "center" },
     "user": { "padding": 10, "radius": 8, "background": "@user_bubble", "border": 1, "border_color": "@line", "font_size": 14 },
     "image": { "max_width": 360, "max_height": 240, "radius": 8, "margin": [8, 0, 0, 0] },
-    "drop_target": { "border": 1, "border_color": "@accent", "radius": 10 },
+    "file": { "margin": [8, 0, 0, 0], "padding": [4, 8], "radius": 6, "background": "@pill", "font_size": 12.5, "color": "@age" },
+    "attachments": { "gap": 8, "padding": [2, 2, 4, 2] },
+    "drop_overlay": { "radius": 10, "border": 2, "border_color": "@accent", "background": "#488efc24", "color": "@text", "font_size": 14, "gap": 8 },
+    "attachment": { "radius": 8, "border": 1, "border_color": "@line", "background": "@pill" },
     "assistant": { "font_size": 14 },
     "thinking": { "font_size": 13, "italic": true, "color": "@text_muted" },
     "tool": { "gap": 8, "align": "center" },
