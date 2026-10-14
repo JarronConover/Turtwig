@@ -113,6 +113,7 @@ Examples:
 | `.selected.worktree` | the selected worktree (or null) |
 | `.selected.chat` | its active chat (or null) |
 | `.selected.chats` | all chats in the selected worktree |
+| `.selected.diff` | the selected worktree's changes for `state.diff_base`: `{loaded, loading, error, base, base_label, files, added, removed, truncated}` |
 | `.state` | UI state (see `state` in the defaults) |
 | `.theme` | theme values |
 | `.app` | `{connected, status, ssh_host, settings_error, errors}` |
