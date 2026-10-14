@@ -22,15 +22,16 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("section.new", "{assign?: path}: ask for a name, create the section (and move that worktree into it)"),
     ("section.rename", "{id, name?}: rename (asks when name is missing)"),
     ("section.delete", "{id}"),
-    ("section.move", "{id?, index?, before?: section id}: reorder a section (id defaults to `dragged`)"),
-    ("worktree.move", "{path?, section?: id|null, before?: path}: move a worktree into a section (null: under its project), before another or last (path defaults to `dragged`)"),
-    ("project.move", "{repo?, index?, before?: repo}: reorder a project (repo defaults to `dragged`)"),
+    ("section.move", "{id?, index? | target: section id with zone}: reorder a section (id defaults to `dragged`)"),
+    ("worktree.move", "{path?, section?: id|null, before?: path | target: path with zone: before|after}: move a worktree into a section (null: under its project), next to another or last (path defaults to `dragged`; drops supply `zone`)"),
+    ("project.move", "{repo?, index? | target: repo with zone}: reorder a project (repo defaults to `dragged`)"),
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
     ("worktree.delete", "{path}"),
     ("worktree.test_local", "{branch}: check the branch out on the Mac with the box's latest work"),
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
     ("palette.open", "the command palette"),
     ("steps.expand_all / steps.collapse_all", "{chat?}: open or close every step line in a chat's transcript"),
+    ("drop.preview", "{key, zone: before|inside|after, kind?}: show a drop target's indicator without dragging (for styling); cleared by the next drag"),
     ("diff.refresh", "reload the selected worktree's diff now"),
     ("diff.collapse_all / diff.expand_all", "collapse or expand every file in the diff"),
     ("designer.send", "{text}: ask the designer (a local agent that edits these settings live) for a change"),
@@ -50,6 +51,18 @@ pub const ACTIONS: &[(&str, &str)] = &[
 const SETTINGS_AGENT: &str = r#"cd "$HOME/.agent-box/state/settings" && claude -p "You are customizing the Agent Box app for its user. Read SETTINGS.md in this folder first: it documents every setting and holds the full defaults. Then edit settings.jsonc (only that file) to do what the user asks, keeping their existing overrides. The app reloads on save; problems show up in its settings panel, so keep the file valid JSON with comments. When done, reply with one short sentence saying what you changed. The user's request: $REQUEST" --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep 2>&1 | tail -n 1"#;
 
 impl Workspace {
+    /** The worktree listed after `target` in its list, skipping `moving`; None when `target` is last. */
+    fn worktree_after(&self, target: &str, moving: &str) -> Option<String> {
+        let m = &self.model;
+        let lists = m.projects.iter().map(|p| &p.items).chain(m.sections.iter().map(|s| &s.items));
+        for list in lists {
+            if let Some(i) = list.iter().position(|w| w.path == target) {
+                return list[i + 1..].iter().find(|w| w.path != moving).map(|w| w.path.clone());
+            }
+        }
+        None
+    }
+
     /** Applies a worktree move to the local model at once, so the sidebar settles before the box confirms. */
     fn move_worktree_now(&mut self, path: &str, section: Option<&str>, before: Option<&str>) {
         let m = &mut self.model;
@@ -215,16 +228,23 @@ impl Workspace {
             }
             "worktree.move" => {
                 if let Some(path) = s("path").or_else(|| s("dragged")) {
-                    if s("before").as_deref() != Some(path.as_str()) {
-                        self.move_worktree_now(&path, s("section").as_deref(), s("before").as_deref());
-                        self.call(Call::WorktreeMove { path, section: s("section"), before: s("before") }, cx);
+                    let before = match (s("target"), s("zone").as_deref()) {
+                        (Some(t), Some("after")) => self.worktree_after(&t, &path),
+                        (Some(t), _) => Some(t),
+                        (None, _) => s("before"),
+                    };
+                    if before.as_deref() != Some(path.as_str()) {
+                        self.move_worktree_now(&path, s("section").as_deref(), before.as_deref());
+                        self.call(Call::WorktreeMove { path, section: s("section"), before }, cx);
                     }
                 }
             }
             "section.move" => {
                 if let Some(id) = s("id").or_else(|| s("dragged")) {
                     let ids: Vec<String> = self.model.sections.iter().map(|x| x.id.clone()).filter(|x| *x != id).collect();
-                    let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize).or_else(|| s("before").and_then(|b| ids.iter().position(|x| *x == b))).unwrap_or(ids.len());
+                    let after = s("zone").as_deref() == Some("after");
+                    let target = s("target").or_else(|| s("before"));
+                    let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize).or_else(|| target.and_then(|b| ids.iter().position(|x| *x == b)).map(|i| i + after as usize)).unwrap_or(ids.len());
                     if let Some(from) = self.model.sections.iter().position(|x| x.id == id) {
                         let sec = self.model.sections.remove(from);
                         self.model.sections.insert(index.min(self.model.sections.len()), sec);
@@ -235,7 +255,9 @@ impl Workspace {
             "project.move" => {
                 if let Some(repo) = s("repo").or_else(|| s("dragged")) {
                     let repos: Vec<String> = self.model.projects.iter().map(|p| p.repo.clone()).filter(|r| *r != repo).collect();
-                    let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize).or_else(|| s("before").and_then(|b| repos.iter().position(|x| *x == b))).unwrap_or(repos.len());
+                    let after = s("zone").as_deref() == Some("after");
+                    let target = s("target").or_else(|| s("before"));
+                    let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize).or_else(|| target.and_then(|b| repos.iter().position(|x| *x == b)).map(|i| i + after as usize)).unwrap_or(repos.len());
                     if let Some(from) = self.model.projects.iter().position(|p| p.repo == repo) {
                         let p = self.model.projects.remove(from);
                         self.model.projects.insert(index.min(self.model.projects.len()), p);
@@ -290,6 +312,10 @@ impl Workspace {
                         }
                     }
                 }
+            }
+            "drop.preview" => {
+                self.drop_hint = s("key").map(|key| crate::ui::render::DropHint { key, zone: s("zone").unwrap_or("inside".into()), kind: s("kind").unwrap_or_default() });
+                self.drop_preview = true;
             }
             "diff.refresh" => {
                 for d in self.diffs.values_mut() {

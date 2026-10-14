@@ -114,17 +114,21 @@
                       "id": "project-row",
                       "type": "row",
                       "style": {
-                        "height": 37, "padding": [0, 8], "gap": 8, "align": "center", "radius": 8, "border": 1, "border_color": "transparent",
-                        "drag_over_item": { "border_color": "@accent", "background": "#488efc1a" }
+                        "position": "relative", "height": 37, "padding": [0, 8], "gap": 8, "align": "center", "radius": 8, "border": 1,
+                        "border_color": "{{ if .app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\" then \"@accent\" else \"transparent\" end }}",
+                        "background": "{{ if .app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\" then \"#488efc1a\" else \"transparent\" end }}"
                       },
                       "drag": { "kind": "project", "value": "{{ .p.repo }}", "label": "{{ .p.name }}" },
+                      "drop_key": "proj:{{ .p.repo }}",
+                      "drop_zones": { "worktree": "inside", "project": "edges" },
                       "on": {
                         "drop_item": [
                           { "accept": "worktree", "do": { "do": "worktree.move", "section": null } },
-                          { "accept": "project", "do": { "do": "project.move", "before": "{{ .p.repo }}" } }
+                          { "accept": "project", "do": { "do": "project.move", "target": "{{ .p.repo }}" } }
                         ]
                       },
                       "children": [
+                        { "type": "DropLine", "props": { "key": "proj:{{ .p.repo }}" } },
                         { "type": "Badge", "props": { "letter": "{{ .p.letter }}", "hue": "{{ .p.hue }}", "size": 22 } },
                         { "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "grow": 1, "font_size": 14 } },
                         { "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "repo": "{{ .p.repo }}" } } }
@@ -141,15 +145,22 @@
                       "type": "SectionLabel",
                       "props": {
                         "text": "{{ .s.name }}",
+                        "drop_key": "sec:{{ .s.id }}",
                         "collapsed": "{{ (\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end }}"
                       },
-                      "style": { "cursor": "pointer", "radius": 6, "drag_over_item": { "color": "@accent", "background": "#488efc1a" } },
+                      "style": {
+                        "position": "relative", "cursor": "pointer", "radius": 6,
+                        "background": "{{ if .app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\" then \"#488efc1a\" else \"transparent\" end }}",
+                        "color": "{{ if .app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\" then \"@accent\" else \"@text_muted\" end }}"
+                      },
                       "drag": { "kind": "section", "value": "{{ .s.id }}", "label": "{{ .s.name }}" },
+                      "drop_key": "sec:{{ .s.id }}",
+                      "drop_zones": { "worktree": "inside", "section": "edges" },
                       "on": {
                         "click": { "do": "state.toggle", "key": "collapsed:{{ .s.id }}", "default": "{{ .s.collapsed }}" },
                         "drop_item": [
                           { "accept": "worktree", "do": { "do": "worktree.move", "section": "{{ .s.id }}", "before": "{{ .s.items[0].path // \"\" }}" } },
-                          { "accept": "section", "do": { "do": "section.move", "before": "{{ .s.id }}" } }
+                          { "accept": "section", "do": { "do": "section.move", "target": "{{ .s.id }}" } }
                         ]
                       },
                       "menu": [
@@ -295,13 +306,15 @@
         "border_color": "{{ if .props.w.selected then \"@selection_border\" else \"transparent\" end }}",
         "background": "{{ if .props.w.selected then \"@selection\" else \"transparent\" end }}",
         "hover": "{{ if .props.w.selected then {} else {\"background\": \"@hover\"} end }}",
-        "drag_over_item": { "border_color": "@accent", "background": "#488efc1a" }
+        "position": "relative"
       },
       "on": {
         "click": { "do": "select", "worktree": "{{ .props.w.path }}" },
-        "drop_item": { "accept": "worktree", "do": { "do": "worktree.move", "section": "{{ .props.w.section.id }}", "before": "{{ .props.w.path }}" } }
+        "drop_item": { "accept": "worktree", "do": { "do": "worktree.move", "section": "{{ .props.w.section.id }}", "target": "{{ .props.w.path }}" } }
       },
       "drag": { "kind": "worktree", "value": "{{ .props.w.path }}", "label": "{{ .props.w.title }}" },
+      "drop_key": "wt:{{ .props.w.path }}",
+      "drop_zones": "edges",
       "tooltip": "{{ .props.w.branch // \"\" }}",
       "menu": [
         { "for": ".sections", "as": "s", "label": "Move to {{ .s.name }}", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": "{{ .s.id }}" } },
@@ -315,6 +328,7 @@
         { "if": ".props.w.is_primary | not", "label": "Delete worktree", "do": { "do": "worktree.delete", "path": "{{ .props.w.path }}" } }
       ],
       "children": [
+        { "type": "DropLine", "props": { "key": "wt:{{ .props.w.path }}" } },
         { "if": ".props.child", "type": "icon", "props": { "name": "corner-down-right", "size": 12, "color": "@text_faint" }, "style": { "margin": [0, -2, 0, -14] } },
         { "if": ".props.w.chats | any(.kind == \"orchestrator\")", "type": "icon", "props": { "name": "workflow", "size": 14, "color": "@accent" }, "tooltip": "Orchestrator" },
         { "if": ".props.in_section and (.props.w.chats | any(.kind == \"orchestrator\") | not)", "type": "Badge", "props": { "letter": "{{ .props.w.letter }}", "hue": "{{ .props.w.hue }}", "size": 16 } },
@@ -330,6 +344,18 @@
         { "type": "StatusIcon", "props": { "status": "{{ .props.w.status }}" } },
         { "type": "text", "props": { "text": "{{ .props.w.age_text }}" }, "style": { "min_width": 22, "text_align": "right", "font_size": 12.5, "color": "@age" } }
       ]
+    },
+
+    "DropLine": {
+      "about": "The insertion line shown above or below a drop target while dragging. props: key (the target's drop_key). Its parent needs position: relative.",
+      "type": "box",
+      "motion": false,
+      "if": ".app.drop.key == .props.key and (.app.drop.zone == \"before\" or .app.drop.zone == \"after\")",
+      "style": {
+        "position": "absolute", "left": 6, "right": 6, "height": 2, "radius": 1, "background": "@accent",
+        "top": "{{ if .app.drop.zone == \"before\" then -3 else null end }}",
+        "bottom": "{{ if .app.drop.zone == \"after\" then -3 else null end }}"
+      }
     },
 
     "StatusIcon": {
@@ -348,10 +374,11 @@
     },
 
     "SectionLabel": {
-      "about": "A small grey heading. props: text, collapsed (bool: shows a chevron).",
+      "about": "A small grey heading. props: text, collapsed (bool: shows a chevron), drop_key (shows drop lines for reordering).",
       "type": "row",
       "style": { "height": 34, "padding": [12, 8, 0, 8], "gap": 5, "align": "center", "font_size": 13, "color": "@text_muted" },
       "children": [
+        { "if": ".props.drop_key", "type": "DropLine", "props": { "key": "{{ .props.drop_key }}" } },
         { "type": "text", "props": { "text": "{{ .props.text }}" } },
         { "if": ".props.collapsed", "type": "icon", "props": { "name": "chevron-right", "size": 12 } }
       ]

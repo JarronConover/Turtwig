@@ -68,6 +68,8 @@ pub struct Workspace {
     pub(crate) send_when_ready: HashSet<String>,
     pub(crate) next_attachment: u64,
     pub(crate) dragging: bool,
+    pub(crate) drop_hint: Option<crate::ui::render::DropHint>,
+    pub(crate) drop_preview: bool,
     pub(crate) focused: bool,
     pending_events: Vec<String>,
     pub(crate) notify_count: u64,
@@ -173,6 +175,8 @@ impl Workspace {
             send_when_ready: HashSet::new(),
             next_attachment: 0,
             dragging: false,
+            drop_hint: None,
+            drop_preview: false,
             focused: true,
             pending_events: vec![],
             notify_count: 0,
@@ -528,6 +532,7 @@ impl Workspace {
             "app": {
                 "connected": self.connected,
                 "dragging": self.dragging,
+                "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
                 "focused": self.focused,
                 "status": self.status,
                 "ssh_host": self.model.ssh_host,
@@ -1074,6 +1079,11 @@ impl Render for Workspace {
             self.ensure_diff(&p, &base, cx);
         }
         self.dragging = cx.has_active_drag();
+        if self.dragging {
+            self.drop_preview = false;
+        } else if !self.drop_preview {
+            self.drop_hint = None;
+        }
         self.focused = window.is_window_active();
         let ctx = self.context();
         let body = self.render_view("main", &ctx, window, cx);

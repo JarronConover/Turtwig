@@ -308,6 +308,36 @@ impl Workspace {
             let get = |k: &str| on.get(k).map(|a| self.exprs.resolve_action(a, ctx));
             let (click, double, down, drop) = (get("click"), get("double_click"), get("mouse_down"), get("drop"));
             if let Some(spec) = on.get("drop_item") {
+                let drop_key = obj.get("drop_key").map(|k| value_text(&self.exprs.resolve(k, ctx))).unwrap_or_else(|| id.clone());
+                let zones = self.exprs.resolve(obj.get("drop_zones").unwrap_or(&Value::Null), ctx);
+                let (k2, z2) = (drop_key.clone(), zones.clone());
+                el = el.on_drag_move::<DragItem>(cx.listener(move |ws, e: &DragMoveEvent<DragItem>, _, cx| {
+                    let kind = e.drag(cx).kind.clone();
+                    let mine = ws.drop_hint.as_ref().is_some_and(|h| h.key == k2);
+                    if !e.bounds.contains(&e.event.position) {
+                        if mine {
+                            ws.drop_hint = None;
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    let mode = match &z2 {
+                        Value::String(m) => m.clone(),
+                        Value::Object(by_kind) => by_kind.get(&kind).map(value_text).unwrap_or_else(|| "inside".into()),
+                        _ => "inside".into(),
+                    };
+                    let rel = (f32::from(e.event.position.y - e.bounds.origin.y) / f32::from(e.bounds.size.height).max(1.)).clamp(0., 1.);
+                    let zone = match mode.as_str() {
+                        "edges" => if rel < 0.5 { "before" } else { "after" },
+                        "edges+inside" => if rel < 0.25 { "before" } else if rel > 0.75 { "after" } else { "inside" },
+                        _ => "inside",
+                    };
+                    let hint = DropHint { key: k2.clone(), zone: zone.into(), kind };
+                    if ws.drop_hint.as_ref() != Some(&hint) {
+                        ws.drop_hint = Some(hint);
+                        cx.notify();
+                    }
+                }));
                 let specs: Vec<(Vec<String>, Value)> = match spec {
                     Value::Array(list) => list.iter().map(|s| (accepted(Some(s)), self.exprs.resolve_action(s.get("do").unwrap_or(&Value::Null), ctx))).collect(),
                     one => vec![(accepted(Some(one)), self.exprs.resolve_action(one.get("do").unwrap_or(one), ctx))],
@@ -315,8 +345,10 @@ impl Workspace {
                 el = el.on_drop(cx.listener(move |ws, item: &DragItem, window, cx| {
                     let Some((_, action)) = specs.iter().find(|(accept, _)| accept.is_empty() || accept.contains(&item.kind)) else { return };
                     let mut action = action.clone();
+                    let zone = ws.drop_hint.take().filter(|h| h.key == drop_key).map(|h| h.zone).unwrap_or_else(|| "inside".into());
                     if let Value::Object(o) = &mut action {
                         o.insert("dragged".into(), item.value.clone());
+                        o.insert("zone".into(), Value::String(zone));
                     }
                     ws.run_action(&action, window, cx);
                     cx.stop_propagation();
@@ -540,6 +572,14 @@ pub struct DragItem {
     pub kind: String,
     pub value: Value,
     pub label: String,
+}
+
+/** Where a dragged item would land: the target's `drop_key` and before | inside | after. */
+#[derive(Clone, PartialEq)]
+pub struct DropHint {
+    pub key: String,
+    pub zone: String,
+    pub kind: String,
 }
 
 /** The pill that follows the pointer while dragging. Look: theme `drag_preview`. */
