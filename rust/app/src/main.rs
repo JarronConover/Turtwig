@@ -1,15 +1,26 @@
-use gpui::*;
+mod remote;
+mod settings;
+mod terminal;
+mod transcript;
+mod workspace;
 
-struct Hello;
-
-impl Render for Hello {
-    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().bg(rgb(0x212122)).text_color(rgb(0xf5f5f7)).child("Agent Box")
-    }
-}
+use gpui_kit::*;
 
 fn main() {
-    gpui_platform::application().run(|cx: &mut App| {
-        cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| Hello)).unwrap();
+    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(|cx: &mut App| {
+        gpui_kit::init(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        let options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: Some("Agent Box".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(20.), px(15.))),
+            }),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1500.), px(940.)), cx))),
+            ..Default::default()
+        };
+        gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| workspace::Workspace::new(window, cx)))
+            .expect("open the main window");
+        cx.activate(true);
     });
 }

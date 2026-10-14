@@ -9,7 +9,7 @@ use std::path::PathBuf;
 pub const DEFAULTS: &str = include_str!("../default-settings.jsonc");
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Settings {
     #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
@@ -29,7 +29,7 @@ pub struct Settings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Connection {
     pub ssh_host: String,
     pub daemon: String,
@@ -38,7 +38,7 @@ pub struct Connection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Theme {
     pub window: String,
     pub card: String,
@@ -63,7 +63,7 @@ pub struct Theme {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Animation {
     pub enabled: bool,
     /** Milliseconds for hovers, selection, and collapse. */
@@ -113,7 +113,7 @@ pub struct Style {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SidebarSettings {
     pub workspace_title: String,
     pub show_projects: bool,
@@ -132,7 +132,7 @@ pub struct SidebarSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ChatSettings {
     pub show_thinking: bool,
     pub collapse_tool_calls: bool,
@@ -144,7 +144,7 @@ pub struct ChatSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalSettings {
     pub font_size: f32,
     pub line_height: f32,
@@ -173,25 +173,12 @@ impl Default for Settings {
     }
 }
 
-macro_rules! defaults_from_settings {
-    ($($t:ty => $field:ident),*) => {$(
-        impl Default for $t {
-            fn default() -> Self {
-                let all: serde_json::Value = serde_json_lenient::from_str(DEFAULTS).expect("built-in settings parse");
-                serde_json::from_value(all[stringify!($field)].clone()).expect("built-in settings section")
-            }
-        }
-    )*};
-}
-defaults_from_settings!(Connection => connection, Theme => theme, Animation => animation,
-    SidebarSettings => sidebar, ChatSettings => chat, TerminalSettings => terminal);
-
 pub fn path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(".agent-box/state/settings/settings.jsonc")
 }
 
-/** The user's file deep-merged over the defaults, so a file only needs what it changes. */
+/** The user's file deep-merged over the complete defaults, so a file only needs what it changes. */
 pub fn load() -> Result<Settings> {
     let mut base: serde_json::Value = serde_json_lenient::from_str(DEFAULTS)?;
     let p = path();

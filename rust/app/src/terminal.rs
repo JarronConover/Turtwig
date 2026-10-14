@@ -236,7 +236,7 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, _| this.focus.focus(window)))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.focus.focus(window, cx)))
             .size_full()
             .child(
                 canvas(
