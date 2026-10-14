@@ -252,6 +252,23 @@ final class Shell: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMe
         }
     }
 
+    // JavaScript alert/confirm from the app's own pages, as sheets.
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let a = NSAlert()
+        a.messageText = message
+        a.beginSheetModal(for: window) { _ in completionHandler() }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let a = NSAlert()
+        a.messageText = message
+        a.addButton(withTitle: "OK")
+        a.addButton(withTitle: "Cancel")
+        a.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn) }
+    }
+
     // Links meant for a new window, and app URLs (cursor://, vscode://), go to macOS.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {

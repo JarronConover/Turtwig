@@ -34,16 +34,20 @@ for key, value in (("GIT_AUTHOR_NAME", f"agent-box ({HOST})"), ("GIT_AUTHOR_EMAI
     os.environ.setdefault(key, value)
     os.environ.setdefault(key.replace("AUTHOR", "COMMITTER"), value)
 
-if ON_BOX:
-    # Same layout as the Mac (~/dev/redo is a link to the template's ~/project),
-    # so the factory skills' paths work unchanged.
-    PRIMARY = {"redo": HOME / "dev" / "redo"}
-    WORKTREES = HOME / "dev" / "redo-worktrees"
-    WT = HOME / "redo-monorepo-worktrees" / "bin" / "wt"
-else:
-    PRIMARY = {"redo": HOME / "dev" / "redo"}
-    WORKTREES = HOME / "dev" / "redo-worktrees"
-    WT = Path("wt")
+# Same layout on both machines (on the box ~/dev/redo links to the template's
+# ~/project), so the factory skills' paths work unchanged.
+PRIMARY = {"redo": HOME / "dev" / "redo", "internal-tools": HOME / "dev" / "redotech-internal-tools",
+           "redo-data": HOME / "dev" / "redo-data"}
+WORKTREES = HOME / "dev" / "redo-worktrees"
+WT = HOME / "redo-monorepo-worktrees" / "bin" / "wt" if ON_BOX else Path("wt")
+
+
+def repo_of(directory):
+    real = os.path.realpath(str(directory))
+    for repo, path in PRIMARY.items():
+        if os.path.realpath(str(path)) == real:
+            return repo
+    return None
 
 
 def now():
@@ -136,7 +140,9 @@ def trust_folder(path):
 
 
 def worktree_dir(chat):
-    return WORKTREES / chat["branch"].replace("/", "-")
+    repo = chat.get("repo") or "redo"
+    base = WORKTREES if repo == "redo" else HOME / "dev" / f"{PRIMARY[repo].name}-worktrees"
+    return base / chat["branch"].replace("/", "-")
 
 
 def ensure_worktree(chat, restore_from=None):
@@ -144,9 +150,7 @@ def ensure_worktree(chat, restore_from=None):
     restore_from: also apply that host's latest WIP (the worktree must be clean)."""
     if not chat.get("branch"):
         return Path(chat["dir"])
-    repo = chat.get("repo", "redo")
-    if repo != "redo":
-        sys.exit(f"only the redo repo is supported so far, not {repo!r}")
+    repo = chat.get("repo") or "redo"
     primary = PRIMARY[repo]
     wt_dir = worktree_dir(chat)
     if wt_dir.exists():
@@ -159,8 +163,15 @@ def ensure_worktree(chat, restore_from=None):
                 check=False, capture_output=True).returncode == 0
     remote = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/remotes/origin/{chat['branch']}"],
                  check=False, capture_output=True).returncode == 0
-    if base and not local and not remote:
-        run(["git", "-C", str(primary), "branch", "-q", "--no-track", chat["branch"], f"origin/{base}"])
+    if not local and not remote:
+        run(["git", "-C", str(primary), "branch", "-q", "--no-track", chat["branch"], f"origin/{base or 'main'}"])
+    if repo != "redo":
+        # wt is redo-only; the other repos take plain worktrees.
+        wt_dir.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "-C", str(primary), "worktree", "add", "-q", str(wt_dir), chat["branch"]])
+        if restore_from:
+            wip_restore(wt_dir, restore_from, fresh=True)
+        return wt_dir
     env = dict(os.environ, WT_PRIMARY=str(primary), WT_BASE=str(WORKTREES))
     made = run([str(WT), chat["branch"], "--no-start"], env=env, capture_output=True, check=False)
     if not wt_dir.exists():
@@ -225,12 +236,23 @@ def transcript(chat):
     return PROJECTS / project_slug(chat["dir"]) / f"{chat['id']}.jsonl"
 
 
+def slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "chat"
+
+
 def cmd_new(args):
     chat_id = str(uuid.uuid4())
+    if args.dir and not args.repo:
+        args.repo = repo_of(args.dir)
+    args.repo = args.repo or "redo"
+    if args.kind == "orchestrator" and not args.branch:
+        # Like super.engineering, an orchestrator gets a blank worktree of its
+        # own; /ship-feature renames its branch when it takes it over.
+        args.branch = f"sc-{slug(args.name)}-{chat_id[:4]}"
     if args.branch:
         directory = None
     else:
-        directory = Path(args.dir).expanduser().resolve() if args.dir else PRIMARY["redo"]
+        directory = Path(args.dir).expanduser().resolve() if args.dir else PRIMARY[args.repo]
     chat = {
         "id": chat_id,
         "name": args.name,
@@ -491,7 +513,7 @@ def main():
     n.add_argument("--kind", default="feature", choices=["orchestrator", "feature", "primary"])
     n.add_argument("--branch", help="run in this branch's worktree (created with wt)")
     n.add_argument("--base", help="new branch starts from origin/<base> instead of main")
-    n.add_argument("--repo", default="redo")
+    n.add_argument("--repo", choices=list(PRIMARY), help="default: the --dir's repo, else redo")
     n.add_argument("--dir", help="no branch: run here (default: the primary checkout)")
     n.add_argument("--parent", help="orchestrator chat id")
     n.add_argument("--feature", help="feature slug for grouping")

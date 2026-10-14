@@ -67,6 +67,16 @@
   dialog button { font: inherit; color: var(--ink); background: #1e1e1f; border: 1px solid var(--line); border-radius: 7px; padding: 5px 12px; }
   dialog button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .empty { color: var(--faint); padding: 6px 8px 6px 28px; font-size: 12.5px; }
+  .menu { position: fixed; z-index: 10; background: #2a2a2d; border: 1px solid #3a3a3e; border-radius: 9px; padding: 5px;
+          min-width: 200px; box-shadow: 0 12px 34px rgba(0,0,0,.5); font-size: 13px; }
+  .menu .mi { padding: 6px 10px; border-radius: 6px; color: var(--ink); display: flex; justify-content: space-between; gap: 16px; }
+  .menu .mi:hover { background: var(--accent); color: #fff; }
+  .menu .mi.danger { color: #ff7b7b; }
+  .menu .mi.danger:hover { background: #c94848; color: #fff; }
+  .menu .sep { height: 1px; background: #3a3a3e; margin: 4px 6px; }
+  .menu .hdr { padding: 5px 10px 3px; color: var(--muted); font-size: 11.5px; }
+  .label.drop, .ws.drop { color: var(--ink); background: #262b36; border-radius: 6px; }
+  .row.dragging { opacity: .45; }
 </style>
 </head>
 <body>
@@ -74,22 +84,36 @@
 <div id="list"></div>
 <footer>
   <div class="fbtn" id="settings-btn" title="Settings"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 5.6a2.4 2.4 0 1 0 0 4.8 2.4 2.4 0 0 0 0-4.8z" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M6.8 1.5h2.4l.4 1.8 1.4.8 1.8-.6 1.2 2-1.4 1.3v1.6l1.4 1.3-1.2 2-1.8-.6-1.4.8-.4 1.8H6.8l-.4-1.8-1.4-.8-1.8.6-1.2-2 1.4-1.3V7.2L2 5.9l1.2-2 1.8.6 1.4-.8z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg></div>
-  <div class="fbtn" id="newdir-btn" title="New chat on the box"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M1.8 3.5h4.3l1.4 1.5h6.7v8H1.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 7.3v3.4M6.3 9h3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></div>
+  <div class="fbtn" id="newdir-btn" title="New section"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M1.8 3.5h4.3l1.4 1.5h6.7v8H1.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 7.3v3.4M6.3 9h3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></div>
   <div class="wsw" id="wsw"></div>
   <span id="updated" hidden></span>
 </footer>
 
 <dialog id="new-dlg">
   <form method="dialog" id="new-form">
-    <strong>New chat on the box</strong>
+    <strong id="new-title">New chat</strong>
     <label>Name</label><input name="name" required placeholder="what this chat is for">
-    <label>Branch (empty = this folder / primary checkout)</label><input name="branch" placeholder="tj/feature-slug">
-    <label>Stack on (base branch)</label><input name="base" placeholder="main">
     <label>Kind</label>
-    <select name="kind"><option>primary</option><option>feature</option><option>orchestrator</option></select>
+    <select name="kind">
+      <option value="primary">Chat in the main checkout</option>
+      <option value="feature">Chat on a branch (new worktree)</option>
+      <option value="orchestrator">Orchestrator (its own worktree)</option>
+    </select>
+    <div id="branch-fields">
+      <label>Branch</label><input name="branch" placeholder="tj/feature-slug">
+      <label>Stack on (base branch)</label><input name="base" placeholder="main">
+    </div>
     <label>First message</label><textarea name="prompt" rows="3" placeholder="/ship-feature AIOPSUP-…"></textarea>
-    <input type="hidden" name="dir">
-    <div class="bar"><button value="cancel">Cancel</button><button class="primary" value="ok">Start</button></div>
+    <input type="hidden" name="dir"><input type="hidden" name="repo">
+    <div class="bar"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Start</button></div>
+  </form>
+</dialog>
+
+<dialog id="name-dlg">
+  <form method="dialog" id="name-form">
+    <strong id="name-title">New section</strong>
+    <label>Name</label><input name="name" required placeholder="Feature name">
+    <div class="bar"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Save</button></div>
   </form>
 </dialog>
 
@@ -99,7 +123,7 @@
     <label>IDE</label>
     <select name="ide"><option value="cursor">Cursor</option><option value="vscode">VS Code</option><option value="custom">Custom</option></select>
     <label>Custom IDE URL ({host}, {dir})</label><input name="ide_custom" placeholder="zed://ssh/{host}{dir}">
-    <div class="bar"><button value="cancel">Cancel</button><button class="primary" value="ok">Save</button></div>
+    <div class="bar"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">Save</button></div>
   </form>
 </dialog>
 
@@ -138,13 +162,23 @@ const IC = {
   pending: `<svg class="ic" viewBox="0 0 12 12" style="color:var(--orange)"><path d="M6 1.2l5 9.3H1z" fill="currentColor"/></svg>`,
   chat: `<svg class="ic" viewBox="0 0 12 12"><path d="M2 2.5h8v5.5H5l-3 2z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>`,
 };
+// A chat that finished since you last looked at its worktree gets a dot.
+const viewed = store.get("viewed", {});
+function unseen(it) {
+  return (it.chats || []).some((c) => c.last_ts && !c.working && c.last_ts > (viewed[c.id] || 0) + 1);
+}
+function markViewed(it) {
+  for (const c of it.chats || []) viewed[c.id] = Date.now() / 1000;
+  store.set("viewed", viewed);
+}
+
 function status(it) {
   if (it.agent_status === "working" || it.agent_status === "running") return IC.spin;
   const pr = it.pr || {};
   if (pr.state === "merged") return IC.merged;
   if (pr.checks && pr.checks.status === "failing") return IC.fail;
   if (it.attention === "input" || it.agent_status === "waiting") return IC.chat;
-  if (it.attention || it.agent_status === "review") return IC.dot;
+  if (it.attention || it.agent_status === "review" || unseen(it)) return IC.dot;
   if (pr.checks && pr.checks.status === "pending") return IC.pending;
   const local = it.local || {};
   if (local.uncommitted || local.unpushed) return IC.up;
@@ -159,7 +193,7 @@ function row(it, host, cls) {
   const m = /^(\p{Extended_Pictographic}\uFE0F?)\s*(.*)$/u.exec(label);
   const emoji = cls === "item" && m ? `<span class="emoji">${esc(m[1])}</span>` : "";
   const text = cls === "item" && m ? m[2] : label;
-  return `<div class="row ${cls} ${selected === key ? "sel" : ""}" data-key="${esc(key)}">
+  return `<div class="row ${cls} ${selected === key ? "sel" : ""}" data-key="${esc(key)}" draggable="true">
     ${cls === "child" ? "" : badge(it)}${emoji}
     <span class="title">${esc(text)}${it.is_primary ? '<span class="star">★</span>' : ""}</span>
     <span class="meta">${status(it)}<span class="age">${age(it.age)}</span></span></div>`;
@@ -171,16 +205,16 @@ function render() {
   const out = [];
   for (const h of data.hosts) {
     out.push(`<div class="ws" id="ws-${h.host}">${h.host === "box" ? "Agent box" : "Mac"}</div>`);
-    out.push(`<div class="label">Projects</div>`);
+    out.push(`<div class="label" data-section="">Projects</div>`);
     for (const p of h.projects) {
       out.push(`<div class="row proj">${badge({ hue: p.hue, letter: p.name[0].toUpperCase() })}<span class="title">${esc(p.name)}</span>
-        <span class="add" ${h.host === "box" ? `data-new="${esc(p.items.find((i) => i.is_primary)?.path || "")}"` : ""} title="New chat in ${esc(p.name)}"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span></div>`);
+        <span class="add" data-new="${esc(p.items.find((i) => i.is_primary)?.path || "")}" data-repo="${esc(p.name)}" title="New chat in ${esc(p.name)}"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span></div>`);
       for (const it of p.items) out.push(row({ ...it, letter: p.name[0].toUpperCase(), hue: p.hue }, h.host, "child"));
     }
     for (const s of h.sections) {
       const key = `${h.host}:${s.id}`;
       const isCol = touched.has(key) ? collapsed.has(key) : s.collapsed;
-      out.push(`<div class="label toggle" data-toggle="${esc(key)}" data-default="${s.collapsed}">${esc(s.name)}${isCol ? '<span class="chev">›</span>' : ""}</div>`);
+      out.push(`<div class="label toggle" data-toggle="${esc(key)}" data-section="${esc(s.id)}" data-name="${esc(s.name)}" data-default="${s.collapsed}">${esc(s.name)}${isCol ? '<span class="chev">›</span>' : ""}</div>`);
       if (!isCol) {
         for (const it of s.items) out.push(row(it, h.host, "item"));
         if (!s.items.length) out.push(`<div class="empty">No worktrees</div>`);
@@ -191,7 +225,7 @@ function render() {
   $("#wsw").innerHTML = data.hosts.map((h, i) => `<div class="wsdot ${i === 0 ? "on" : ""}" data-ws="${h.host}" title="${h.host === "box" ? "Agent box" : "Mac"}"><i></i></div>`).join("");
   $("#updated").textContent = new Date(data.generated_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   let needs = 0;
-  for (const h of data.hosts) for (const s of h.sections) for (const it of s.items) if (it.attention) needs++;
+  for (const it of Object.values(items)) if (it.agent_status === "waiting" || (it.pr && it.pr.checks && it.pr.checks.status === "failing")) needs++;
   if (native) native.postMessage({ type: "status", needs });
   if (!render.restored) {
     render.restored = true;
@@ -206,6 +240,7 @@ async function select(key, quiet) {
   if (!it) return;
   selected = key;
   store.set("selected", key);
+  markViewed(it);
   if (!quiet) render();
   let term = null;
   if (it.host === "box") {
@@ -236,18 +271,135 @@ async function refresh() {
   }
 }
 
-window.openNewChat = (dir) => {
+window.openNewChat = (dir, repo, kind) => {
   const f = $("#new-form");
   f.reset();
   f.dir.value = dir || "";
+  f.repo.value = repo || "";
+  f.kind.value = kind || "primary";
+  $("#new-title").textContent = repo ? `New chat in ${repo}` : "New chat";
+  syncKind();
   $("#new-dlg").showModal();
 };
+function syncKind() {
+  const f = $("#new-form");
+  $("#branch-fields").style.display = f.kind.value === "feature" ? "" : "none";
+  f.branch.required = f.kind.value === "feature";
+}
+$("#new-form").kind.addEventListener("change", syncKind);
+
+async function api(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) alert((out.stderr || out.stdout || "That didn't work").trim().split("\n").pop());
+  await refresh();
+  return r.ok;
+}
+function askName(title, value) {
+  return new Promise((resolve) => {
+    const d = $("#name-dlg"), f = $("#name-form");
+    $("#name-title").textContent = title;
+    f.reset();
+    f.name.value = value || "";
+    d.onclose = () => resolve(d.returnValue === "ok" ? f.name.value.trim() : null);
+    d.showModal();
+  });
+}
+async function newSection(thenAssign) {
+  const name = await askName("New section");
+  if (!name) return;
+  await api("/api/sections", { name });
+  if (thenAssign) {
+    const sec = data && data.hosts[0].sections.find((x) => x.name === name);
+    if (sec) api("/api/sections/assign", { path: thenAssign, section: sec.id });
+  }
+}
+
+let menuEl = null;
+function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
+function menu(x, y, entries) {
+  closeMenu();
+  menuEl = document.createElement("div");
+  menuEl.className = "menu";
+  menuEl.innerHTML = entries.map((e, i) => e === "-" ? '<div class="sep"></div>'
+    : e.header ? `<div class="hdr">${esc(e.header)}</div>`
+    : `<div class="mi ${e.danger ? "danger" : ""}" data-i="${i}">${esc(e.label)}</div>`).join("");
+  document.body.appendChild(menuEl);
+  const r = menuEl.getBoundingClientRect();
+  menuEl.style.left = Math.min(x, innerWidth - r.width - 6) + "px";
+  menuEl.style.top = Math.min(y, innerHeight - r.height - 6) + "px";
+  menuEl.addEventListener("click", (ev) => {
+    const i = ev.target.closest("[data-i]")?.dataset.i;
+    if (i !== undefined) { const fn = entries[i].run; closeMenu(); fn(); }
+  });
+}
+window.addEventListener("click", (e) => { if (menuEl && !menuEl.contains(e.target)) closeMenu(); });
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+
+$("#list").addEventListener("contextmenu", (e) => {
+  const rowEl = e.target.closest(".row[data-key]");
+  const secEl = e.target.closest(".label[data-section]");
+  if (!rowEl && !(secEl && secEl.dataset.section)) return;
+  e.preventDefault();
+  if (secEl) {
+    const id = secEl.dataset.section, name = secEl.dataset.name;
+    return menu(e.clientX, e.clientY, [
+      { label: "Rename…", run: async () => { const n = await askName("Rename section", name); if (n) api("/api/sections/rename", { id, name: n }); } },
+      { label: "Delete section", danger: true, run: () => { if (confirm(`Delete "${name}"? Its worktrees move back to Projects.`)) api("/api/sections/delete", { id }); } },
+    ]);
+  }
+  const it = items[rowEl.dataset.key];
+  const secs = data.hosts[0].sections;
+  const entries = [{ header: "Move to section" }];
+  for (const sec of secs) entries.push({ label: sec.name, run: () => api("/api/sections/assign", { path: it.path, section: sec.id }) });
+  entries.push({ label: "New section…", run: () => newSection(it.path) });
+  if (!it.is_primary) entries.push({ label: "Remove from section", run: () => api("/api/sections/assign", { path: it.path, section: null }) });
+  entries.push("-");
+  entries.push({ label: "New chat here", run: () => window.openNewChat(it.path, it.project) });
+  for (const c of it.chats || []) entries.push({ label: `Archive chat "${c.name}"`, run: () => api("/api/chats/archive", { id: c.id }) });
+  if (!it.is_primary) {
+    entries.push("-");
+    entries.push({ label: "Delete worktree", danger: true, run: () => {
+      if (confirm(`Delete the worktree for ${it.branch}? It must have no uncommitted changes.`)) api("/api/worktrees/delete", { path: it.path });
+    } });
+  }
+  menu(e.clientX, e.clientY, entries);
+});
+
+// Drag a worktree onto a section heading (or Projects) to move it there.
+let dragKey = null;
+$("#list").addEventListener("dragstart", (e) => {
+  const r = e.target.closest(".row[data-key]");
+  if (!r) return;
+  dragKey = r.dataset.key;
+  r.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", dragKey);
+});
+$("#list").addEventListener("dragend", () => {
+  dragKey = null;
+  document.querySelectorAll(".dragging,.drop").forEach((x) => x.classList.remove("dragging", "drop"));
+});
+$("#list").addEventListener("dragover", (e) => {
+  const t = e.target.closest(".label[data-section]");
+  document.querySelectorAll(".drop").forEach((x) => x !== t && x.classList.remove("drop"));
+  if (!t || !dragKey) return;
+  e.preventDefault();
+  t.classList.add("drop");
+});
+$("#list").addEventListener("drop", (e) => {
+  const t = e.target.closest(".label[data-section]");
+  if (!t || !dragKey) return;
+  e.preventDefault();
+  const it = items[dragKey];
+  api("/api/sections/assign", { path: it.path, section: t.dataset.section || null });
+});
 window.refreshSidebar = refresh;
 
 $("#list").addEventListener("click", (e) => {
   const t = e.target.closest("[data-new],[data-toggle],.row[data-key]");
   if (!t) return;
-  if (t.dataset.new !== undefined) return window.openNewChat(t.dataset.new);
+  if (t.dataset.new !== undefined) return window.openNewChat(t.dataset.new, t.dataset.repo);
   if (t.dataset.toggle) {
     const k = t.dataset.toggle;
     const was = touched.has(k) ? collapsed.has(k) : t.dataset.default === "true";
@@ -259,7 +411,7 @@ $("#list").addEventListener("click", (e) => {
   }
   select(t.dataset.key);
 });
-$("#newdir-btn").addEventListener("click", () => window.openNewChat(""));
+$("#newdir-btn").addEventListener("click", () => newSection());
 $("#wsw").addEventListener("click", (e) => {
   const d = e.target.closest("[data-ws]");
   if (!d) return;
@@ -270,12 +422,11 @@ $("#toggle").addEventListener("click", () => native && native.postMessage({ type
 $("#new-dlg").addEventListener("close", async () => {
   if ($("#new-dlg").returnValue !== "ok") return;
   const body = Object.fromEntries(new FormData($("#new-form")));
+  if (body.kind !== "feature") { delete body.branch; delete body.base; }
   for (const k of Object.keys(body)) if (!body[k]) delete body[k];
-  if (body.branch) delete body.dir;
-  const r = await fetch("/api/chats", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const out = await r.json();
-  if (!r.ok) alert((out.stderr || out.stdout || "failed").trim());
-  refresh();
+  if (body.branch || body.kind === "orchestrator") delete body.dir;
+  if (body.repo === "redotech-internal-tools") body.repo = "internal-tools";
+  await api("/api/chats", body);
 });
 $("#settings-btn").addEventListener("click", () => {
   const f = $("#settings-form");

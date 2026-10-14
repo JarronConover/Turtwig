@@ -1,43 +1,52 @@
 #!/usr/bin/env python3
-"""Dashboard server: the orchestrator tree as JSON plus the web UI.
-
-Reads the chat registry (agent-box `state` branch) and the ship-feature
-dispatcher's durable files (~/.local/state/redo). Listens on localhost only;
-the Mac app reaches it through an ssh tunnel.
-"""
+"""Dashboard server for the Agent Box app: the sidebar (worktrees grouped into
+projects and feature sections, with their chats and MR/CI status) as JSON, the
+app's pages, and a small HTTP API over the same `chat` and `sc` commands the
+agents use. Listens on localhost only; the Mac app reaches it through an ssh
+tunnel. GET /api lists the endpoints."""
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HOME = Path.home()
 REGISTRY = HOME / ".agent-box" / "state" / "registry" / "chats"
-# The box's own dispatcher state, then the Mac's (synced read-only by env-push).
-STATE_ROOTS = [HOME / ".local" / "state" / "redo", HOME / ".agent-box" / "mac-state"]
 PROJECTS = HOME / ".claude" / "projects"
 CHAT = ROOT / "bin" / "chat"
 SC = ROOT / "shim" / "sc"
+REPOS = {"redo": ("redo", "redo/redoapp/product/redo"),
+         "internal-tools": ("redotech-internal-tools", "redo/redoapp/internal/redotech-internal-tools"),
+         "redo-data": ("redo-data", "redo/redoapp/product/redo-data")}
 sys.path.insert(0, str(ROOT / "lib"))
 import sidebar as sidebar_lib  # noqa: E402
 
-# ship.py DIGEST_EMOJI: a digest stage (before `:`) -> the stage chip.
-STAGE_EMOJI = {
-    **dict.fromkeys(("blocked", "todo", "waiting", "queued"), "⏳"),
-    **dict.fromkeys(("implementing", "fixing", "ci-fixing"), "🛠️"),
-    **dict.fromkeys(("handed-off", "verifying", "reviewed", "readying"), "🔍"),
-    "reviewing": "👀", "error": "✋", "ci-running": "🧪", "ready": "🧪", "final-look": "🧐",
-    "awaiting-approval": "🙋", "approved": "🟢",
-    **dict.fromkeys(("merged", "deploying", "deployed", "after-merge"), "🚀"),
-    "done": "🏁",
+API = {
+    "GET /api/sidebar": "projects and feature sections of worktrees, each with its chats, MR/CI, and status",
+    "POST /api/chats": "{name, kind?, branch?, base?, dir?, repo?, prompt?, model?}: start a chat "
+                       "(an orchestrator without a branch gets its own worktree)",
+    "POST /api/chats/start|stop|archive": "{id}",
+    "POST /api/chats/send": "{id, text}: type a message into a running chat",
+    "POST /api/sections": "{name}: create a section",
+    "POST /api/sections/rename": "{id, name}",
+    "POST /api/sections/delete": "{id}",
+    "POST /api/sections/assign": "{path, section}: put a worktree in a section (section null = out of it)",
+    "POST /api/worktrees/delete": "{path}: delete a clean worktree",
+    "POST /api/shell": "{path}: the tmux shell session for a worktree's terminal",
 }
-DONE_STAGES = {"done"}
+
+
+def now():
+    return time.time()
 
 
 def iso(ts):
@@ -59,6 +68,15 @@ def tmux_sessions():
     return set(out.stdout.split()) if out.returncode == 0 else set()
 
 
+# A chat is waiting on TJ when its screen shows a question or a permission prompt.
+WAITING = re.compile(r"Enter to select|Esc to cancel|Do you want to proceed|❯ 1\. Yes", re.I)
+
+
+def waiting(session):
+    out = subprocess.run(["tmux", "capture-pane", "-pt", "=" + session], capture_output=True, text=True)
+    return bool(WAITING.search("\n".join(out.stdout.splitlines()[-25:]))) if out.returncode == 0 else False
+
+
 def chats():
     alive = tmux_sessions()
     host = "box" if os.environ.get("CODER_AGENT_URL") else "mac"
@@ -67,136 +85,116 @@ def chats():
         c = read_json(path)
         if not c or c.get("status") == "archived":
             continue
-        c["alive"] = c.get("host") == host and f"chat-{c['id'][:8]}" in alive
+        session = f"chat-{c['id'][:8]}"
+        c["alive"] = c.get("host") == host and session in alive
         t = PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", c.get("dir") or "") / f"{c['id']}.jsonl"
-        c["last_activity"] = iso(t.stat().st_mtime) if t.exists() else None
+        c["last_ts"] = t.stat().st_mtime if t.exists() else None
+        c["last_activity"] = iso(c["last_ts"]) if c["last_ts"] else None
+        c["working"] = bool(c["alive"] and c["last_ts"] and now() - c["last_ts"] < 20)
+        c["waiting"] = bool(c["alive"] and not c["working"] and waiting(session))
         result.append(c)
     return result
 
 
-def parse_digest(digest):
-    head, _, tail = (digest or "").partition("|")
-    stages = dict(x.split("=", 1) for x in head.split() if "=" in x)
-    needs = [x.strip() for x in tail.split(",") if x.strip()]
-    return stages, needs
+class Cache:
+    """Values refreshed in the background so /api/sidebar never waits on git or GitLab."""
+
+    def __init__(self, ttl, fn):
+        self.ttl, self.fn, self.data, self.busy = ttl, fn, {}, set()
+
+    def get(self, key):
+        hit = self.data.get(key)
+        if (not hit or now() - hit[0] > self.ttl) and key not in self.busy:
+            self.busy.add(key)
+            threading.Thread(target=self._fill, args=(key,), daemon=True).start()
+        return hit[1] if hit else None
+
+    def _fill(self, key):
+        try:
+            self.data[key] = (now(), self.fn(key))
+        except Exception:  # a failed refresh keeps the last value
+            pass
+        finally:
+            self.busy.discard(key)
 
 
-def features(chat_by_branch):
-    result, seen = [], set()
-    for root in STATE_ROOTS:
-        ship, handoffs = root / "ship-feature", root / "handoffs"
-        for fpath in sorted(ship.glob("*.feature.json")) if ship.exists() else []:
-            parent = fpath.name.removesuffix(".feature.json")
-            if parent in seen:
-                continue
-            seen.add(parent)
-            result.append(feature_row(parent, fpath, ship, handoffs, chat_by_branch, root))
-    result.sort(key=lambda f: (f["done"], -(datetime.datetime.fromisoformat(f["updated_at"].replace("Z", "+00:00")).timestamp()
-                                             if f["updated_at"] else 0)))
-    return result
+def _git_local(path):
+    r = subprocess.run(["git", "-C", path, "status", "--porcelain", "--branch"], capture_output=True, text=True)
+    if r.returncode:
+        return {}
+    lines = r.stdout.splitlines()
+    head = lines[0] if lines else ""
+    ahead = re.search(r"ahead (\d+)", head)
+    return {"uncommitted": len(lines) - 1, "unpushed": int(ahead.group(1)) if ahead else 0,
+            "behind_target": bool(re.search(r"behind \d+", head))}
 
 
-def feature_row(parent, fpath, ship, handoffs, chat_by_branch, root):
-    feature = read_json(fpath) or {}
-    events = (read_json(ship / f"{parent}.json") or {}).get("events", {})
-    printed = events.get("printed") or {}
-    stages, needs = parse_digest(printed.get("digest"))
-    short = feature.get("short", {})
-    legs = []
-    for ticket, raw in stages.items():
-        stage, _, detail = raw.partition(":")
-        base, _, leg_repo = ticket.partition("@")
-        handoff = read_json(handoffs / ticket / "handoff.json") or {}
-        branch = handoff.get("branch")
-        legs.append({
-            "ticket": ticket,
-            "label": (short.get(ticket) or short.get(base) or base) + (f" · {leg_repo}" if leg_repo else ""),
-            "stage": stage,
-            "detail": detail,
-            "emoji": "✋" if stage.startswith("parked") else STAGE_EMOJI.get(stage, "•"),
-            "needs_you": ticket in needs or stage == "error" or stage.startswith("parked"),
-            "mr": handoff.get("mr"),
-            "branch": branch,
-            "repo": handoff.get("repo"),
-            "chat": chat_by_branch.get(branch),
-            "url": f"https://linear.app/redo/issue/{base}",
-        })
-    active = [x for x in legs if x["stage"] not in DONE_STAGES]
-    return {
-        "host": "mac" if root.name == "mac-state" else "box",
-        "parent": parent,
-        "name": feature.get("name") or parent,
-        "url": f"https://linear.app/redo/issue/{parent}",
-        "updated_at": iso(printed["at"]) if printed.get("at") else None,
-        "done": bool(legs) and not active,
-        "legs": legs,
-        "needs_you": [x["label"] for x in legs if x["needs_you"]],
-    }
+def glab_json(path):
+    r = subprocess.run(["glab", "api", path], capture_output=True, text=True, timeout=30)
+    try:
+        return json.loads(r.stdout) if r.returncode == 0 else None
+    except ValueError:
+        return None
 
 
-def state():
-    cs = chats()
-    by_branch = {c["branch"]: c for c in cs if c.get("branch")}
-    fs = features(by_branch)
-    attached = {leg["chat"]["id"] for f in fs for leg in f["legs"] if leg["chat"]}
-    return {
-        "generated_at": iso(datetime.datetime.now().timestamp()),
-        "features": fs,
-        "chats": [c for c in cs if c["id"] not in attached],
-        "ssh_host": os.environ.get("AGENT_BOX_SSH_HOST", "coder.tj-agents"),
-    }
+def _mr(key):
+    """The newest MR for a branch, shaped like super.engineering's: {state, number, url, checks}."""
+    repo, branch = key
+    project = REPOS.get(repo, (None, None))[1]
+    if not project or not branch:
+        return None
+    pid = project.replace("/", "%2F")
+    mrs = glab_json(f"projects/{pid}/merge_requests?source_branch={branch}&order_by=updated_at&per_page=1") or []
+    if not mrs:
+        return None
+    m = glab_json(f"projects/{pid}/merge_requests/{mrs[0]['iid']}") or mrs[0]
+    state = "draft" if m.get("draft") and m["state"] == "opened" else m["state"]
+    pipe = (m.get("head_pipeline") or {}).get("status")
+    checks = {"success": "passing", "failed": "failing", "running": "pending", "pending": "pending",
+              "created": "pending"}.get(pipe or "")
+    return {"state": state, "number": m["iid"], "url": m["web_url"], "checks": {"status": checks} if checks else None}
 
 
-_dirty_cache = {}
+LOCAL = Cache(20, _git_local)
+MRS = Cache(90, _mr)
 
 
-def uncommitted(path):
-    """Changed-file count for a worktree, cached for 30 s (git status is slow on the monorepo)."""
-    now = datetime.datetime.now().timestamp()
-    hit = _dirty_cache.get(path)
-    if hit and now - hit[0] < 30:
-        return hit[1]
-    r = subprocess.run(["git", "-C", path, "status", "--porcelain"], capture_output=True, text=True)
-    n = len(r.stdout.splitlines()) if r.returncode == 0 else None
-    _dirty_cache[path] = (now, n)
-    return n
+def sc_run(args, path=None):
+    env = dict(os.environ, **({"SUPER_ENGINEERING_WORKTREE_PATH": path} if path else {}))
+    return subprocess.run([sys.executable, str(SC), *args, "--json"], capture_output=True, text=True,
+                          timeout=600, env=env, cwd=path or str(HOME))
 
 
-def box_sidebar():
-    def sc(*args):
-        r = subprocess.run([sys.executable, str(SC), *args], capture_output=True, text=True, timeout=60)
-        return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
-    return sidebar_lib.build(sc("workspace", "list", "--json"), sc("section", "list", "--json"), "box")
+def sc_json(*args):
+    r = sc_run(list(args))
+    return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
 
 
 def sidebar():
-    """The box's sidebar, with each worktree's chats attached (including chats
-    moved to the Mac, which keep their place)."""
     cs = chats()
     by_dir = {}
     for c in cs:
         if c.get("dir"):
             by_dir.setdefault(os.path.realpath(c["dir"]), []).append(c)
-    hosts = []
-    if os.environ.get("CODER_AGENT_URL"):
-        box = box_sidebar()
-        for group in box["projects"] + box["sections"]:
-            for it in group["items"]:
-                it["chats"] = by_dir.get(os.path.realpath(it["path"]), [])
-                it["local"] = {"uncommitted": uncommitted(it["path"])}
-                if any(c["alive"] and c["last_activity"] and
-                       datetime.datetime.now(datetime.timezone.utc).timestamp()
-                       - datetime.datetime.fromisoformat(c["last_activity"].replace("Z", "+00:00")).timestamp() < 90
-                       for c in it["chats"]):
-                    it["agent_status"] = "working"
-        hosts.append(box)
-    return {"generated_at": iso(datetime.datetime.now().timestamp()), "hosts": hosts,
+    repo_of = {name: key for key, (name, _) in REPOS.items()}
+    box = sidebar_lib.build(sc_json("workspace", "list"), sc_json("section", "list"), "box")
+    for group in box["projects"] + box["sections"]:
+        for it in group["items"]:
+            it["chats"] = by_dir.get(os.path.realpath(it["path"]), [])
+            it["local"] = LOCAL.get(it["path"]) or {}
+            if not it["is_primary"]:
+                it["pr"] = MRS.get((repo_of.get(it.get("project")), it.get("branch")))
+            if any(c["working"] for c in it["chats"]):
+                it["agent_status"] = "working"
+            elif any(c["waiting"] for c in it["chats"]):
+                it["agent_status"] = "waiting"
+            it["age"] = max([c["last_ts"] or 0 for c in it["chats"]] + [it.get("age") or 0]) or None
+    return {"generated_at": iso(now()), "hosts": [box],
             "ssh_host": os.environ.get("AGENT_BOX_SSH_HOST", "coder.tj-agents")}
 
 
 def shell_session(path):
     """A tmux shell in this worktree for the terminal pane; created on first use."""
-    import hashlib
     name = "sh-" + hashlib.sha1(os.path.realpath(path).encode()).hexdigest()[:10]
     if subprocess.run(["tmux", "has-session", "-t", "=" + name], capture_output=True).returncode != 0:
         subprocess.run(["tmux", "new-session", "-d", "-s", name, "-c", path,
@@ -218,34 +216,55 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def page(self, name):
+        self.send(200, (ROOT / "web" / name).read_bytes(), "text/html; charset=utf-8")
+
     def do_GET(self):
-        if self.path == "/api/state":
-            return self.send(200, state())
+        if self.path == "/api":
+            return self.send(200, API)
         if self.path == "/api/sidebar":
             return self.send(200, sidebar())
         if self.path in ("/", "/index.html"):
-            return self.send(200, (ROOT / "web" / "index.html").read_bytes(), "text/html; charset=utf-8")
+            return self.page("index.html")
         if self.path == "/main":
-            return self.send(200, (ROOT / "web" / "main.html").read_bytes(), "text/html; charset=utf-8")
+            return self.page("main.html")
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
-        if self.path == "/api/chats":
+        p = self.path
+        if p == "/api/shell":
+            return self.send(200, {"session": shell_session(body["path"])})
+        if p == "/api/chats":
             args = [sys.executable, str(CHAT), "new", body["name"]]
-            for key in ("branch", "base", "feature", "parent", "kind", "model", "prompt", "dir"):
+            for key in ("branch", "base", "feature", "parent", "kind", "model", "prompt", "dir", "repo"):
                 if body.get(key):
                     args += [f"--{key}", body[key]]
-        elif self.path in ("/api/chats/stop", "/api/chats/start", "/api/chats/archive"):
-            args = [sys.executable, str(CHAT), self.path.rsplit("/", 1)[1], body["id"]]
-        elif self.path == "/api/shell":
-            return self.send(200, {"session": shell_session(body["path"])})
-        elif self.path == "/api/chats/send":
-            args = [sys.executable, str(CHAT), "send", body["id"], body["text"]]
+            out = subprocess.run(args, capture_output=True, text=True, timeout=900)
+        elif p in ("/api/chats/stop", "/api/chats/start", "/api/chats/archive"):
+            out = subprocess.run([sys.executable, str(CHAT), p.rsplit("/", 1)[1], body["id"]],
+                                 capture_output=True, text=True, timeout=300)
+        elif p == "/api/chats/send":
+            out = subprocess.run([sys.executable, str(CHAT), "send", body["id"], body["text"]],
+                                 capture_output=True, text=True, timeout=60)
+        elif p == "/api/sections":
+            out = sc_run(["section", "create", body["name"], "--manual"])
+        elif p == "/api/sections/rename":
+            out = sc_run(["section", "edit", body["id"], "--name", body["name"]])
+        elif p == "/api/sections/delete":
+            out = sc_run(["section", "delete", body["id"]])
+        elif p == "/api/sections/assign":
+            out = sc_run(["section", "assign", body["section"]] if body.get("section") else ["section", "unassign"],
+                         path=body["path"])
+        elif p == "/api/worktrees/delete":
+            item = next((d for d in sidebar_lib.walk(sc_json("workspace", "list"))
+                         if d.get("path") == body["path"] and d.get("id")), None)
+            if not item:
+                return self.send(404, {"stderr": "no such worktree"})
+            out = sc_run(["worktree", "delete", item["id"]])
         else:
             return self.send(404, {"error": "not found"})
-        out = subprocess.run(args, capture_output=True, text=True, timeout=600)
         self.send(200 if out.returncode == 0 else 500, {"stdout": out.stdout, "stderr": out.stderr})
 
 
