@@ -267,6 +267,29 @@ impl Workspace {
                 s
             });
         }
+        if let Some(Value::Object(spec)) = obj.get("drag") {
+            let spec = self.exprs.resolve(&Value::Object(spec.clone()), ctx);
+            let item = DragItem {
+                kind: spec.get("kind").and_then(Value::as_str).unwrap_or("item").to_string(),
+                value: spec.get("value").cloned().unwrap_or(Value::Null),
+                label: spec.get("label").map(value_text).unwrap_or_default(),
+            };
+            let preview_style = self.settings.theme.get("drag_preview").and_then(Value::as_object).cloned().unwrap_or_default();
+            let theme2 = theme.clone();
+            el = el.on_drag(item, move |item, _, _, cx| {
+                cx.new(|_| DragPreview { label: item.label.clone(), style: preview_style.clone(), theme: theme2.clone() })
+            });
+        }
+        if let Some(Value::Object(d)) = st.get("drag_over_item") {
+            let accept = accepted(obj.get("on").and_then(|o| o.get("drop_item")));
+            let (d, theme) = (d.clone(), theme.clone());
+            el = el.drag_over::<DragItem>(move |mut s, item, _, _| {
+                if accept.is_empty() || accept.contains(&item.kind) {
+                    style::refine(&mut s, &d, &theme);
+                }
+                s
+            });
+        }
         if let Some(Value::Object(d)) = st.get("drag_over") {
             let (d, theme) = (d.clone(), theme.clone());
             el = el.drag_over::<ExternalPaths>(move |mut s, _, _, _| {
@@ -284,6 +307,21 @@ impl Workspace {
         if let Some(Value::Object(on)) = obj.get("on") {
             let get = |k: &str| on.get(k).map(|a| self.exprs.resolve_action(a, ctx));
             let (click, double, down, drop) = (get("click"), get("double_click"), get("mouse_down"), get("drop"));
+            if let Some(spec) = on.get("drop_item") {
+                let specs: Vec<(Vec<String>, Value)> = match spec {
+                    Value::Array(list) => list.iter().map(|s| (accepted(Some(s)), self.exprs.resolve_action(s.get("do").unwrap_or(&Value::Null), ctx))).collect(),
+                    one => vec![(accepted(Some(one)), self.exprs.resolve_action(one.get("do").unwrap_or(one), ctx))],
+                };
+                el = el.on_drop(cx.listener(move |ws, item: &DragItem, window, cx| {
+                    let Some((_, action)) = specs.iter().find(|(accept, _)| accept.is_empty() || accept.contains(&item.kind)) else { return };
+                    let mut action = action.clone();
+                    if let Value::Object(o) = &mut action {
+                        o.insert("dragged".into(), item.value.clone());
+                    }
+                    ws.run_action(&action, window, cx);
+                    cx.stop_propagation();
+                }));
+            }
             if let Some(drop) = drop {
                 el = el.on_drop(cx.listener(move |ws, paths: &ExternalPaths, window, cx| {
                     let list: Vec<Value> = paths.paths().iter().map(|p| Value::String(p.to_string_lossy().into_owned())).collect();
@@ -295,7 +333,7 @@ impl Workspace {
                 }));
             }
             for event in on.keys() {
-                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down" | "drop") {
+                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down" | "drop" | "drop_item") {
                     self.exprs.note(format!("unknown event `{event}` at {path}"));
                 }
             }
@@ -493,6 +531,38 @@ impl Workspace {
             };
             st.insert(prop, value);
         }
+    }
+}
+
+/** What a node with `drag` carries; drop targets with `on.drop_item` get `value` as the action's `dragged`. */
+#[derive(Clone)]
+pub struct DragItem {
+    pub kind: String,
+    pub value: Value,
+    pub label: String,
+}
+
+/** The pill that follows the pointer while dragging. Look: theme `drag_preview`. */
+pub struct DragPreview {
+    label: String,
+    style: Map<String, Value>,
+    theme: Map<String, Value>,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        style::apply(div(), &self.style, &self.theme).child(self.label.clone())
+    }
+}
+
+fn accepted(spec: Option<&Value>) -> Vec<String> {
+    if let Some(Value::Array(list)) = spec {
+        return list.iter().flat_map(|s| accepted(Some(s))).collect();
+    }
+    match spec.and_then(|s| s.get("accept")) {
+        Some(Value::String(k)) => vec![k.clone()],
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        _ => vec![],
     }
 }
 

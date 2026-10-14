@@ -44,6 +44,10 @@ pub enum Call {
     SectionDelete { id: String },
     SectionAssign { path: String, section: Option<String> },
     WorktreeDelete { path: String },
+    /** Put a worktree in `section` (None: back under its project) before `before` (a path), or last. */
+    WorktreeMove { path: String, section: Option<String>, before: Option<String> },
+    SectionMove { id: String, index: usize },
+    ProjectMove { repo: String, index: usize },
     /** `{diff, base, from, truncated}`: unified diff text; `base` "uncommitted" (default) or "branch". */
     WorktreeDiff { path: String, base: Option<String> },
     /** Attach to a tmux session: a chat's, or the shell of `cwd` when `session` is None. */

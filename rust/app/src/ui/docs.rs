@@ -81,6 +81,9 @@ A node is an object (or a string, shorthand for a text node, or an array of node
   "on": { "click": {"do": "select", "worktree": "{{ .w.path }}"}, "double_click": "window.zoom" },
   "menu": [ {"label": "Rename", "do": {"do": "section.rename", "id": "{{ .s.id }}"}}, {"separator": true} ],
   "tooltip": "{{ .w.branch }}",
+  "drag": { "kind": "worktree", "value": "{{ .w.path }}", "label": "{{ .w.title }}" },  // makes the node draggable
+  // and on a drop target: "on": { "drop_item": { "accept": "worktree", "do": {"do": "worktree.move", "before": "{{ .w.path }}"} } }
+  // (the dragged value arrives as the action's `dragged`; style it with style.drag_over_item)
   "animate": { "from": {"opacity": 0, "y": 6}, "duration": 160 },   // plays when the node first appears
   "transition": { "width": 200 },     // these style keys (numbers or colors) ease to their new value (ms)
   "motion": false,                    // opt this node out of gliding, enter animation, and style easing

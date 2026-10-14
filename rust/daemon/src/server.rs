@@ -350,6 +350,18 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let id = find_item_id(&ws, &path).ok_or("no such worktree")?;
             sc_tool(&["worktree", "delete", &id], None)
         }
+        Call::WorktreeMove { path, section, before } => {
+            let ws = sc_tool(&["workspace", "list"], None)?;
+            let id = find_item_id(&ws, &path).ok_or("no such worktree")?;
+            let section = section.unwrap_or_else(|| "none".into());
+            let mut args = vec!["worktree", "move", id.as_str(), "--section", section.as_str()];
+            if let Some(b) = before.as_deref() {
+                args.extend(["--before", b]);
+            }
+            sc_tool(&args, None)
+        }
+        Call::SectionMove { id, index } => sc_tool(&["section", "move", &id, "--index", &index.to_string()], None),
+        Call::ProjectMove { repo, index } => sc_tool(&["project", "move", &repo, "--index", &index.to_string()], None),
         Call::WorktreeDiff { path, base } => crate::diff::worktree_diff(&path, base.as_deref()),
         Call::TermOpen { session, cwd, cols, rows } => {
             let session = match (session, cwd) {

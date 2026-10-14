@@ -120,7 +120,13 @@ def items(store):
                 "path": path, "branch": branch, "is_primary": primary, "selected": False, "visible": True,
                 "agent_status": "idle", "attention": None, "pr": None, "local": {},
                 "section": meta.get("section"),
+                "order": meta.get("order"),
             })
+    rank = {name: i for i, name in enumerate(store.data.get("project_order", []))}
+    repo_rank = {repo: rank.get(repo, len(rank) + i) for i, repo in enumerate(REPOS)}
+    out.sort(key=lambda it: (repo_rank[it["project_id"]] if not it["section"] else 0,
+                             it["order"] if it["order"] is not None else (-1 if it["is_primary"] else 1e9),
+                             it["title"]))
     return out
 
 
@@ -185,6 +191,12 @@ def section_cmd(args):
                 sec["name"] = flag(args, "--name")
             s.save(f"section edit {sec['name']}")
             out("section", sec)
+        elif sub == "move":
+            sec = by(args[1]) or die(f"no section {args[1]!r}")
+            secs.remove(sec)
+            secs.insert(max(0, min(int(flag(args, "--index", len(secs))), len(secs))), sec)
+            s.save(f"section move {sec['name']}")
+            out("section", sec)
         elif sub == "delete":
             sec = by(args[1]) or die(f"no section {args[1]!r}")
             secs.remove(sec)
@@ -232,6 +244,27 @@ def worktree_cmd(args):
             s.wt(it["path"])["label"] = args[2]
             s.save(f"label {it['worktree']}: {args[2]}")
             out("worktree_label", {"id": it["id"], "label": args[2]})
+        elif sub == "move":
+            it = find_item(s, args[1])
+            target = flag(args, "--section")
+            target = None if target in (None, "none", "") else target
+            if target and not any(x["section_id"] == target for x in s.data["sections"]):
+                die(f"no section {target!r}")
+            group = [x for x in items(s) if x["section"] == target and x["path"] != it["path"]
+                     and (target or x["project_id"] == it["project_id"])]
+            before = flag(args, "--before")
+            ix = next((i for i, x in enumerate(group) if before and before in (x["id"], x["path"])), None)
+            if ix is None:
+                ix = max(0, min(int(flag(args, "--index", len(group))), len(group)))
+            group.insert(ix, it)
+            for n, x in enumerate(group):
+                s.wt(x["path"])["order"] = n
+            if target:
+                s.wt(it["path"])["section"] = target
+            else:
+                s.wt(it["path"]).pop("section", None)
+            s.save(f"move {it['worktree']}")
+            out("worktree_moved", {"id": it["id"], "section": target, "index": ix})
         elif sub == "delete":
             it = find_item(s, args[1])
             if it["is_primary"]:
@@ -283,6 +316,20 @@ def worktree_create(args):
     print(json.dumps({"kind": "worktree_created", "response": resp, **resp}))
 
 
+def project_cmd(args):
+    sub = args[0] if args else ""
+    if sub != "move" or len(args) < 2 or args[1] not in REPOS:
+        die(f"usage: sc project move {'|'.join(REPOS)} --index N")
+    with Store() as s:
+        order = [r for r in s.data.get("project_order", []) if r in REPOS]
+        order += [r for r in REPOS if r not in order]
+        order.remove(args[1])
+        order.insert(max(0, min(int(flag(args, "--index", len(order))), len(order))), args[1])
+        s.data["project_order"] = order
+        s.save(f"project move {args[1]}")
+        out("project_order", {"order": order})
+
+
 def layout_cmd(args):
     sub = args[0] if args else ""
     if sub == "capabilities":
@@ -314,6 +361,9 @@ the agent-box registry; there is no super.engineering app here. Supported:
   sc worktree status|rename-branch NEW|set-target-branch B [--json]   (act on the caller's worktree;
                      SUPER_ENGINEERING_WORKTREE_PATH overrides, as in the app)
   sc worktree set-label ITEM_ID LABEL|delete ITEM_ID [--force] [--json]
+  sc worktree move ITEM_ID [--section SECTION|none] [--before ITEM_ID | --index N] [--json]
+  sc section move SECTION --index N [--json]
+  sc project move redo|internal-tools|redo-data --index N [--json]
   sc layout run tabs --label L [--prompt TEXT] [--worktree PATH]   (starts a Remote Control chat TJ
                      sees on his dashboard and phone)
   sc layout capabilities --output json
@@ -334,6 +384,8 @@ def main():
         section_cmd(rest)
     elif cmd == "worktree":
         worktree_cmd(rest)
+    elif cmd == "project":
+        project_cmd(rest)
     elif cmd == "layout":
         layout_cmd(rest)
     else:

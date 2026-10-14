@@ -40,7 +40,8 @@
     "warning": "#f0a43a",
     "danger": "#d8566c",
     "merged": "#8b5cf6",
-    "success": "#3fb950"
+    "success": "#3fb950",
+    "drag_preview": { "padding": [5, 10], "radius": 8, "background": "#2b2f38", "border": 1, "border_color": "#488efc", "color": "#f5f5f7", "font_size": 13, "shadow": "lg", "opacity": 0.95 }
   },
 
   // How things move. move: nodes glide to new positions after a change (give a node an `id` so it
@@ -110,8 +111,19 @@
                   "type": "column",
                   "children": [
                     {
+                      "id": "project-row",
                       "type": "row",
-                      "style": { "height": 37, "padding": [0, 8], "gap": 8, "align": "center" },
+                      "style": {
+                        "height": 37, "padding": [0, 8], "gap": 8, "align": "center", "radius": 8, "border": 1, "border_color": "transparent",
+                        "drag_over_item": { "border_color": "@accent", "background": "#488efc1a" }
+                      },
+                      "drag": { "kind": "project", "value": "{{ .p.repo }}", "label": "{{ .p.name }}" },
+                      "on": {
+                        "drop_item": [
+                          { "accept": "worktree", "do": { "do": "worktree.move", "section": null } },
+                          { "accept": "project", "do": { "do": "project.move", "before": "{{ .p.repo }}" } }
+                        ]
+                      },
                       "children": [
                         { "type": "Badge", "props": { "letter": "{{ .p.letter }}", "hue": "{{ .p.hue }}", "size": 22 } },
                         { "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "grow": 1, "font_size": 14 } },
@@ -131,8 +143,15 @@
                         "text": "{{ .s.name }}",
                         "collapsed": "{{ (\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end }}"
                       },
-                      "style": { "cursor": "pointer" },
-                      "on": { "click": { "do": "state.toggle", "key": "collapsed:{{ .s.id }}", "default": "{{ .s.collapsed }}" } },
+                      "style": { "cursor": "pointer", "radius": 6, "drag_over_item": { "color": "@accent", "background": "#488efc1a" } },
+                      "drag": { "kind": "section", "value": "{{ .s.id }}", "label": "{{ .s.name }}" },
+                      "on": {
+                        "click": { "do": "state.toggle", "key": "collapsed:{{ .s.id }}", "default": "{{ .s.collapsed }}" },
+                        "drop_item": [
+                          { "accept": "worktree", "do": { "do": "worktree.move", "section": "{{ .s.id }}", "before": "{{ .s.items[0].path // \"\" }}" } },
+                          { "accept": "section", "do": { "do": "section.move", "before": "{{ .s.id }}" } }
+                        ]
+                      },
                       "menu": [
                         { "label": "Rename…", "do": { "do": "section.rename", "id": "{{ .s.id }}" } },
                         { "separator": true },
@@ -275,9 +294,14 @@
         "gap": 8, "align": "center", "radius": 8, "border": 1, "cursor": "pointer",
         "border_color": "{{ if .props.w.selected then \"@selection_border\" else \"transparent\" end }}",
         "background": "{{ if .props.w.selected then \"@selection\" else \"transparent\" end }}",
-        "hover": "{{ if .props.w.selected then {} else {\"background\": \"@hover\"} end }}"
+        "hover": "{{ if .props.w.selected then {} else {\"background\": \"@hover\"} end }}",
+        "drag_over_item": { "border_color": "@accent", "background": "#488efc1a" }
       },
-      "on": { "click": { "do": "select", "worktree": "{{ .props.w.path }}" } },
+      "on": {
+        "click": { "do": "select", "worktree": "{{ .props.w.path }}" },
+        "drop_item": { "accept": "worktree", "do": { "do": "worktree.move", "section": "{{ .props.w.section.id }}", "before": "{{ .props.w.path }}" } }
+      },
+      "drag": { "kind": "worktree", "value": "{{ .props.w.path }}", "label": "{{ .props.w.title }}" },
       "tooltip": "{{ .props.w.branch // \"\" }}",
       "menu": [
         { "for": ".sections", "as": "s", "label": "Move to {{ .s.name }}", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": "{{ .s.id }}" } },

@@ -307,9 +307,6 @@ pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model 
             }
         }
     }
-    for p in &mut projects {
-        p.items.sort_by(|a, b| (!a.is_primary, &a.title).cmp(&(!b.is_primary, &b.title)));
-    }
     Model {
         host: "box".into(),
         ssh_host: std::env::var("AGENT_BOX_SSH_HOST").unwrap_or_else(|_| "coder.tj-agents".into()),

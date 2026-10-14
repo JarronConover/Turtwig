@@ -22,6 +22,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("section.new", "{assign?: path}: ask for a name, create the section (and move that worktree into it)"),
     ("section.rename", "{id, name?}: rename (asks when name is missing)"),
     ("section.delete", "{id}"),
+    ("section.move", "{id?, index?, before?: section id}: reorder a section (id defaults to `dragged`)"),
+    ("worktree.move", "{path?, section?: id|null, before?: path}: move a worktree into a section (null: under its project), before another or last (path defaults to `dragged`)"),
+    ("project.move", "{repo?, index?, before?: repo}: reorder a project (repo defaults to `dragged`)"),
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
     ("worktree.delete", "{path}"),
     ("worktree.test_local", "{branch}: check the branch out on the Mac with the box's latest work"),
@@ -187,6 +190,27 @@ impl Workspace {
             "section.assign" => {
                 if let Some(path) = s("path") {
                     self.call(Call::SectionAssign { path, section: s("section") }, cx);
+                }
+            }
+            "worktree.move" => {
+                if let Some(path) = s("path").or_else(|| s("dragged")) {
+                    if s("before").as_deref() != Some(path.as_str()) {
+                        self.call(Call::WorktreeMove { path, section: s("section"), before: s("before") }, cx);
+                    }
+                }
+            }
+            "section.move" => {
+                if let Some(id) = s("id").or_else(|| s("dragged")) {
+                    let ids: Vec<String> = self.model.sections.iter().map(|x| x.id.clone()).filter(|x| *x != id).collect();
+                    let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize).or_else(|| s("before").and_then(|b| ids.iter().position(|x| *x == b))).unwrap_or(ids.len());
+                    self.call(Call::SectionMove { id, index }, cx);
+                }
+            }
+            "project.move" => {
+                if let Some(repo) = s("repo").or_else(|| s("dragged")) {
+                    let repos: Vec<String> = self.model.projects.iter().map(|p| p.repo.clone()).filter(|r| *r != repo).collect();
+                    let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize).or_else(|| s("before").and_then(|b| repos.iter().position(|x| *x == b))).unwrap_or(repos.len());
+                    self.call(Call::ProjectMove { repo, index }, cx);
                 }
             }
             "worktree.delete" => {
