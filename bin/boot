@@ -36,14 +36,18 @@ settings="$HOME/.claude/settings.json"
 mkdir -p "$(dirname "$settings")"
 [ -s "$settings" ] || echo '{}' > "$settings"
 tmp=$(mktemp)
-jq --arg sync "$AGENT_BOX_DIR/bin/turn-sync" --arg start "$AGENT_BOX_DIR/bin/session-start" '
+boxd="$AGENT_BOX_DIR/rust/target/release/agent-boxd"
+jq --arg sync "$AGENT_BOX_DIR/bin/turn-sync" --arg start "$AGENT_BOX_DIR/bin/session-start" \
+  --arg boxd "$boxd hook 2> /dev/null || true" '
   def ensure(event; cmd):
     .hooks[event] = ((.hooks[event] // [])
       | map(select(any(.hooks[]?; .command == cmd) | not))
       + [{hooks: [{type: "command", command: cmd}]}]);
   ensure("Stop"; $sync) | ensure("SubagentStop"; $sync) | ensure("SessionStart"; $start)
   | if $box then
-      .enableAllProjectMcpServers = true
+      reduce ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "PermissionRequest",
+              "Stop", "SubagentStop", "SessionStart", "SessionEnd") as $e (.; ensure($e; $boxd))
+      | .enableAllProjectMcpServers = true
       | .permissions.defaultMode = "bypassPermissions"
       | .skipDangerousModePermissionPrompt = true
     else . end
@@ -84,5 +88,17 @@ if [ "$AGENT_HOST" = box ]; then
   # Terminals: /?arg=<tmux session> attaches to that chat's tmux session.
   tmux has-session -t =agent-box-tty 2> /dev/null \
     || tmux new-session -d -s agent-box-tty "ttyd -i 127.0.0.1 -p 8791 -W -a -t fontSize=13 -t 'fontFamily=ui-monospace,SF Mono,Menlo,monospace' -t 'theme={\"background\":\"#1e1e1f\",\"foreground\":\"#d6d6d8\",\"cursor\":\"#d6d6d8\",\"selectionBackground\":\"#3a4252\"}' -t disableLeaveAlert=true tmux attach -t 2>&1 | tee -a $AGENT_HOME/log/ttyd.log"
+  # agent-boxd, the native app's daemon: rebuilt when its sources are newer than the binary.
+  if [ -d "$AGENT_BOX_DIR/rust/daemon" ] && { [ ! -x "$boxd" ] || [ -n "$(find "$AGENT_BOX_DIR/rust/daemon" \
+      "$AGENT_BOX_DIR/rust/protocol" \( -name '*.rs' -o -name Cargo.toml \) -newer "$boxd" | head -1)" ]; }; then
+    if (cd "$AGENT_BOX_DIR/rust" && "$HOME/.cargo/bin/cargo" build --release -q -p agent-boxd) \
+      >> "$AGENT_HOME/log/boxd-build.log" 2>&1; then
+      tmux kill-session -t =agent-boxd 2> /dev/null
+    else
+      log "agent-boxd build failed; see log/boxd-build.log"
+    fi
+  fi
+  [ -x "$boxd" ] && { tmux has-session -t =agent-boxd 2> /dev/null \
+    || tmux new-session -d -s agent-boxd "$boxd run 2>&1 | tee -a $AGENT_HOME/log/boxd.log"; }
 fi
 log "boot done"

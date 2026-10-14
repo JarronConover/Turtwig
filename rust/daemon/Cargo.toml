@@ -1,0 +1,16 @@
+[package]
+name = "agent-boxd"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-box-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+rusqlite = { version = "0.40", features = ["bundled"] }
+portable-pty = "0.9"
+base64 = "0.22"
+sha1_smol = "1"
+regex = "1"
+libc = "0.2"
