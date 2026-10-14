@@ -81,6 +81,6 @@ if [ "$AGENT_HOST" = box ]; then
     || tmux new-session -d -s agent-box-web "$AGENT_BOX_DIR/bin/dashboard --port 8790 2>&1 | tee -a $AGENT_HOME/log/dashboard.log"
   # Terminals: /?arg=<tmux session> attaches to that chat's tmux session.
   tmux has-session -t =agent-box-tty 2> /dev/null \
-    || tmux new-session -d -s agent-box-tty "ttyd -i 127.0.0.1 -p 8791 -W -a -t fontSize=13 tmux attach -t 2>&1 | tee -a $AGENT_HOME/log/ttyd.log"
+    || tmux new-session -d -s agent-box-tty "ttyd -i 127.0.0.1 -p 8791 -W -a -t fontSize=13 -t 'fontFamily=ui-monospace,SF Mono,Menlo,monospace' -t 'theme={\"background\":\"#1e1e1f\",\"foreground\":\"#d6d6d8\",\"cursor\":\"#d6d6d8\",\"selectionBackground\":\"#3a4252\"}' -t disableLeaveAlert=true tmux attach -t 2>&1 | tee -a $AGENT_HOME/log/ttyd.log"
 fi
 log "boot done"

@@ -26,11 +26,4 @@ rsync -a --delete "$HOME/.local/state/redo/ship-feature" "$HOME/.local/state/red
 ssh -n "$host" 'mkdir -p ~/.config/redo' 2> /dev/null
 rsync -au "$HOME/.config/redo/cursor-environments.json" "$HOME/.config/redo/cursor-typecheck-agents.json" \
   "$host:.config/redo/"
-# super.engineering's sidebar (worktrees, sections, labels, statuses) for the
-# dashboard, until every feature runs on the box.
-if command -v sc > /dev/null; then
-  "$(dirname "$0")/sc-snapshot" > "$HOME/.agent-box/mac-sidebar.json.tmp" 2> /dev/null \
-    && mv "$HOME/.agent-box/mac-sidebar.json.tmp" "$HOME/.agent-box/mac-sidebar.json" \
-    && rsync -a "$HOME/.agent-box/mac-sidebar.json" "$host:.agent-box/mac-state/sidebar.json"
-fi
 echo "env pushed to $host"

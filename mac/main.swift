@@ -3,15 +3,19 @@ import Carbon.HIToolbox
 import UserNotifications
 import WebKit
 
-// Agent Box: a thin native shell laid out like super.engineering. The sidebar,
-// tab strip, and branch bar are pages served by the box's dashboard; the chat
-// is claude.ai; the terminal is the box's ttyd. Everything heavy runs on the
-// box; this window reaches it through an ssh tunnel.
+// Agent Box: a thin native shell drawn like super.engineering. The sidebar and
+// the main chrome (toolbar, tab strip, branch bar, terminal tabs) are pages the
+// box's dashboard serves; the chat (claude.ai) and the terminal (the box's
+// ttyd) are native web views placed over holes the main page reports.
+// Everything heavy runs on the box, reached through an ssh tunnel.
 
 let sshHost = UserDefaults.standard.string(forKey: "sshHost") ?? "coder.tj-agents"
 let dashPort = 18790
 let ttyPort = 18791
 let agentBoxDir = (NSHomeDirectory() as NSString).appendingPathComponent("dev/agent-box")
+let sidebarWidth: CGFloat = 339
+let chromeColor = NSColor(srgbRed: 0x21 / 255, green: 0x21 / 255, blue: 0x22 / 255, alpha: 1)
+let cardColor = NSColor(srgbRed: 0x1e / 255, green: 0x1e / 255, blue: 0x1f / 255, alpha: 1)
 
 final class Tunnel {
     private var process: Process?
@@ -49,68 +53,84 @@ final class Tunnel {
     }
 }
 
-final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
+// A web view whose empty title-bar area drags the window, like a native title bar.
+final class ChromeWebView: WKWebView {
+    var dragBand: CGFloat = 44
+    var hits: [CGRect] = []
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let y = isFlipped ? p.y : bounds.height - p.y
+        if y < dragBand, !hits.contains(where: { $0.contains(CGPoint(x: p.x, y: y)) }) {
+            if event.clickCount == 2 { window?.zoom(nil) } else { window?.performDrag(with: event) }
+            return
+        }
+        super.mouseDown(with: event)
+    }
+}
+
+final class Root: NSView {
+    override var isFlipped: Bool { true }
+}
+
+final class Shell: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
     var window: NSWindow!
-    var dash: WKWebView!
-    var header: WKWebView!
+    var root: Root!
+    var side: ChromeWebView!
+    var main: ChromeWebView!
     var chat: WKWebView!
-    var bar: WKWebView!
     var term: WKWebView!
-    var rightSplit: NSSplitView!
     var statusItem: NSStatusItem!
     let tunnel = Tunnel()
     var lastNeeds = 0
     var selectedTerm: String?
     var current: [String: Any]?
     var hotKey: EventHotKeyRef?
+    var sidebarShown = true
+    var chatHole = CGRect.zero
+    var termHole = CGRect.zero
 
-    // Same layout as super.engineering: sidebar | (tabs + chat) over (branch bar + terminal).
     func applicationDidFinishLaunching(_ notification: Notification) {
         tunnel.start()
 
-        dash = makeWeb(bridged: true)
-        header = makeWeb(bridged: true)
-        bar = makeWeb(bridged: true)
-        chat = makeWeb(bridged: false)
-        term = makeWeb(bridged: false)
+        side = makeChrome()
+        main = makeChrome()
+        chat = makeWeb(WKWebView.self, bridged: false)
+        term = makeWeb(WKWebView.self, bridged: false)
+        side.hits = [CGRect(x: 88, y: 12, width: 28, height: 22)]
+        for v in [chat!, term!] {
+            v.wantsLayer = true
+            v.layer?.cornerRadius = 12
+            v.layer?.masksToBounds = true
+        }
+        // Rounded only at the bottom, where the chat hole meets its card's corners.
+        chat.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        term.layer?.maskedCorners = []
 
-        let top = stack(fixed: header, height: 40, flexible: chat)
-        let bottom = stack(fixed: bar, height: 72, flexible: term)
-
-        rightSplit = NSSplitView()
-        rightSplit.isVertical = false
-        rightSplit.dividerStyle = .thin
-        rightSplit.autosaveName = "AgentBoxRight2"
-        rightSplit.addArrangedSubview(top)
-        rightSplit.addArrangedSubview(bottom)
-
-        let main = NSSplitView()
-        main.isVertical = true
-        main.dividerStyle = .thin
-        main.autosaveName = "AgentBoxMain2"
-        main.addArrangedSubview(dash)
-        main.addArrangedSubview(rightSplit)
+        root = Root()
+        root.wantsLayer = true
+        root.layer?.backgroundColor = chromeColor.cgColor
+        for v in [side!, main!, chat!, term!] { root.addSubview(v) }
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1500, height: 940),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
             backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.title = "Agent Box"
-        window.contentView = main
+        window.backgroundColor = chromeColor
+        window.minSize = NSSize(width: 900, height: 560)
+        window.contentView = root
+        window.delegate = self
         window.setFrameAutosaveName("AgentBoxWindow")
         if window.frame.width < 600 { window.center() }
         window.makeKeyAndOrderFront(nil)
-        DispatchQueue.main.async {
-            let w = main.subviews[0].frame.width
-            if w < 120 || w > 600 { main.setPosition(320, ofDividerAt: 0) }
-            let h = self.rightSplit.subviews[1].frame.height
-            if h < 80 || h > self.rightSplit.frame.height - 120 {
-                self.rightSplit.setPosition(self.rightSplit.frame.height * 0.68, ofDividerAt: 0)
-            }
-        }
+        layout()
 
         chat.load(URLRequest(url: URL(string: "https://claude.ai/code")!))
-        term.loadHTMLString(placeholder("Select a worktree to open its terminal."), baseURL: nil)
+        chat.isHidden = true
+        term.isHidden = true
         loadLocal()
 
         // Keep the box's copy of the Mac's sidebar, dispatcher state, skills, and
@@ -128,71 +148,87 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
         }
     }
 
-    func stack(fixed: NSView, height: CGFloat, flexible: NSView) -> NSView {
-        let v = NSView()
-        for sub in [fixed, flexible] {
-            sub.translatesAutoresizingMaskIntoConstraints = false
-            v.addSubview(sub)
+    // MARK: layout
+
+    func layout(animated: Bool = false) {
+        let b = root.bounds
+        let sw: CGFloat = sidebarShown ? sidebarWidth : 0
+        let apply = {
+            self.side.frame = CGRect(x: 0, y: 0, width: sidebarWidth, height: b.height)
+            self.side.alphaValue = self.sidebarShown ? 1 : 0
+            self.main.frame = CGRect(x: sw, y: 0, width: b.width - sw, height: b.height)
+            self.place()
         }
-        NSLayoutConstraint.activate([
-            fixed.topAnchor.constraint(equalTo: v.topAnchor),
-            fixed.leadingAnchor.constraint(equalTo: v.leadingAnchor),
-            fixed.trailingAnchor.constraint(equalTo: v.trailingAnchor),
-            fixed.heightAnchor.constraint(equalToConstant: height),
-            flexible.topAnchor.constraint(equalTo: fixed.bottomAnchor),
-            flexible.leadingAnchor.constraint(equalTo: v.leadingAnchor),
-            flexible.trailingAnchor.constraint(equalTo: v.trailingAnchor),
-            flexible.bottomAnchor.constraint(equalTo: v.bottomAnchor),
-        ])
-        return v
-    }
-
-    func loadLocal() {
-        dash.load(URLRequest(url: URL(string: "http://127.0.0.1:\(dashPort)/")!))
-        header.load(URLRequest(url: URL(string: "http://127.0.0.1:\(dashPort)/chrome?part=header")!))
-        bar.load(URLRequest(url: URL(string: "http://127.0.0.1:\(dashPort)/chrome?part=bar")!))
-    }
-
-    // Debugging aid: AGENTBOX_SNAPSHOT_DIR=<dir> writes each pane as a PNG.
-    func snapshot(to dir: String) {
-        for (name, view) in [("dash", dash!), ("header", header!), ("chat", chat!), ("bar", bar!), ("term", term!)] {
-            view.takeSnapshot(with: nil) { image, _ in
-                guard let image, let tiff = image.tiffRepresentation,
-                      let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
-                try? png.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.2
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                ctx.allowsImplicitAnimation = true
+                apply()
             }
+        } else {
+            apply()
+        }
+        positionTrafficLights()
+    }
+
+    func place() {
+        let o = main.frame.origin
+        chat.frame = chatHole.offsetBy(dx: o.x, dy: o.y)
+        term.frame = termHole.offsetBy(dx: o.x, dy: o.y)
+    }
+
+    // Center the traffic lights in the 44 pt title band, as super.engineering does.
+    func positionTrafficLights() {
+        guard let close = window.standardWindowButton(.closeButton), let bar = close.superview else { return }
+        var x: CGFloat = 20
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let btn = window.standardWindowButton(kind) else { continue }
+            let y = bar.isFlipped ? 22 - btn.frame.height / 2 : bar.frame.height - 22 - btn.frame.height / 2
+            btn.setFrameOrigin(NSPoint(x: x, y: y))
+            x += 20
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        tunnel.stop()
+    func windowDidResize(_ notification: Notification) { layout() }
+    func windowDidEndLiveResize(_ notification: Notification) { positionTrafficLights() }
+    func windowDidBecomeKey(_ notification: Notification) { positionTrafficLights() }
+    func windowDidExitFullScreen(_ notification: Notification) { layout() }
+
+    @objc func toggleSidebar() {
+        sidebarShown.toggle()
+        main.evaluateJavaScript("window.setSidebarHidden && setSidebarHidden(\(!sidebarShown))")
+        layout(animated: true)
     }
 
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        window.makeKeyAndOrderFront(nil)
-        return true
-    }
+    // MARK: web views
 
-    func makeWeb(bridged: Bool) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        if bridged { config.userContentController.add(self, name: "agentbox") }
-        config.websiteDataStore = .default()
-        let w = WKWebView(frame: .zero, configuration: config)
-        w.uiDelegate = self
-        w.navigationDelegate = self
-        w.allowsBackForwardNavigationGestures = true
+    func makeChrome() -> ChromeWebView {
+        let w = makeWeb(ChromeWebView.self, bridged: true)
+        w.underPageBackgroundColor = chromeColor
         return w
     }
 
-    func placeholder(_ text: String) -> String {
-        "<html><body style='margin:0;display:flex;align-items:center;justify-content:center;height:100vh;"
-            + "font:13px -apple-system;color:#888;background:#161614'>\(text)</body></html>"
+    func makeWeb<T: WKWebView>(_ kind: T.Type, bridged: Bool) -> T {
+        let config = WKWebViewConfiguration()
+        if bridged { config.userContentController.add(self, name: "agentbox") }
+        config.websiteDataStore = .default()
+        let w = T(frame: .zero, configuration: config)
+        w.uiDelegate = self
+        w.navigationDelegate = self
+        w.underPageBackgroundColor = cardColor
+        return w
+    }
+
+    func loadLocal() {
+        side.load(URLRequest(url: URL(string: "http://127.0.0.1:\(dashPort)/")!))
+        main.load(URLRequest(url: URL(string: "http://127.0.0.1:\(dashPort)/main")!))
     }
 
     // The tunnel takes a moment to come up; retry the local pages until it does.
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        if webView === dash || webView === header || webView === bar {
-            let url = webView.url ?? URL(string: "http://127.0.0.1:\(dashPort)/")!
+        if webView === side || webView === main {
+            let url = URL(string: webView === side ? "http://127.0.0.1:\(dashPort)/" : "http://127.0.0.1:\(dashPort)/main")!
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { webView.load(URLRequest(url: url)) }
         } else if webView === term, let s = selectedTerm {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.attachTerminal(s) }
@@ -202,6 +238,18 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
     func attachTerminal(_ session: String) {
         selectedTerm = session
         term.load(URLRequest(url: URL(string: "http://127.0.0.1:\(ttyPort)/?arg=\(session)")!))
+    }
+
+    // Debugging aid: AGENTBOX_SNAPSHOT_DIR=<dir> writes each view as a PNG.
+    func snapshot(to dir: String) {
+        let views: [(String, WKWebView)] = [("side", side), ("main", main), ("chat", chat), ("term", term)]
+        for (name, view) in views {
+            view.takeSnapshot(with: nil) { image, _ in
+                guard let image, let tiff = image.tiffRepresentation,
+                      let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+                try? png.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+            }
+        }
     }
 
     // Links meant for a new window, and app URLs (cursor://, vscode://), go to macOS.
@@ -235,54 +283,77 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
         decisionHandler(.allow)
     }
 
+    // MARK: messages from the pages
+
     func js(_ obj: Any) -> String {
         (try? JSONSerialization.data(withJSONObject: obj)).flatMap { String(data: $0, encoding: .utf8) } ?? "null"
     }
 
+    func rect(_ v: Any?) -> CGRect {
+        guard let d = v as? [String: Any] else { return .zero }
+        func n(_ k: String) -> CGFloat { CGFloat((d[k] as? NSNumber)?.doubleValue ?? 0) }
+        return CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h"))
+    }
+
     func show(chat c: [String: Any]?) {
         if let u = c?["rc_url"] as? String, let url = URL(string: u) {
-            chat.load(URLRequest(url: url))
-        } else if let sel = current {
-            let mac = (sel["host"] as? String) == "mac"
-            chat.loadHTMLString(placeholder(mac ? "This worktree's chat runs in super.engineering."
-                : "No chat in this worktree yet. Press + above to start one."), baseURL: nil)
+            chat.isHidden = false
+            if chat.url?.absoluteString != u { chat.load(URLRequest(url: url)) }
+        } else {
+            chat.isHidden = true
         }
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         switch type {
+        case "layout":
+            chatHole = rect(body["chat"])
+            termHole = rect(body["term"])
+            main.dragBand = rect(body["toolbar"]).maxY
+            main.hits = (body["hits"] as? [Any] ?? []).map(rect)
+            place()
         case "select":
             guard let sel = body["sel"] as? [String: Any] else { return }
             current = sel
             let first = (sel["chats"] as? [[String: Any]])?.first
-            for v in [header!, bar!] { v.evaluateJavaScript("setSel(\(js(sel)), \(js(first?["id"] ?? NSNull())))") }
+            main.evaluateJavaScript("setSel(\(js(sel)), \(js(first?["id"] ?? NSNull())))")
             show(chat: first)
             if let t = sel["term"] as? String {
-                attachTerminal(t)
+                term.isHidden = false
+                if t != selectedTerm { attachTerminal(t) }
             } else {
                 selectedTerm = nil
-                term.loadHTMLString(placeholder((sel["host"] as? String) == "mac"
-                    ? "Mac worktrees open in your IDE or Terminal." : "No terminal."), baseURL: nil)
+                term.isHidden = true
             }
         case "tab":
-            let c = body["chat"] as? [String: Any]
-            show(chat: c)
-            if let sel = current { bar.evaluateJavaScript("setSel(\(js(sel)), \(js(c?["id"] ?? NSNull())))") }
+            show(chat: body["chat"] as? [String: Any])
         case "newchat":
-            dash.evaluateJavaScript("openNewChat(\(js(body["dir"] ?? "")))")
-            window.makeFirstResponder(dash)
+            side.evaluateJavaScript("openNewChat(\(js(body["dir"] ?? "")))")
+            window.makeFirstResponder(side)
+        case "toggleSidebar":
+            toggleSidebar()
         case "open":
             if let u = body["url"] as? String, let url = URL(string: u) { NSWorkspace.shared.open(url) }
+        case "send":
+            if let id = body["chat"] as? String, let text = body["text"] as? String { sendToChat(id, text) }
         case "status":
             updateStatus(body["needs"] as? Int ?? 0)
         case "run":
             if let args = body["args"] as? [String], let id = body["reqId"] as? String {
-                runLocal(args, reqId: id, reply: message.webView ?? bar)
+                runLocal(args, reqId: id, reply: message.webView ?? main)
             }
         default:
             break
         }
+    }
+
+    func sendToChat(_ id: String, _ text: String) {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(dashPort)/api/chats/send")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = js(["id": id, "text": text]).data(using: .utf8)
+        URLSession.shared.dataTask(with: req).resume()
     }
 
     // Runs one of agent-box's own scripts on the Mac (swap, test locally).
@@ -299,11 +370,10 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
         p.standardError = out
         p.terminationHandler = { proc in
             let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let payload = (try? JSONSerialization.data(withJSONObject: ["reqId": reqId, "code": proc.terminationStatus, "output": text]))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            let payload = self.js(["reqId": reqId, "code": proc.terminationStatus, "output": text])
             DispatchQueue.main.async {
                 reply.evaluateJavaScript("window.agentboxResult && window.agentboxResult(\(payload))")
-                self.dash.evaluateJavaScript("window.refreshSidebar && window.refreshSidebar()")
+                self.side.evaluateJavaScript("window.refreshSidebar && window.refreshSidebar()")
             }
         }
         do { try p.run() } catch {
@@ -321,6 +391,8 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
         p.standardError = FileHandle.nullDevice
         try? p.run()
     }
+
+    // MARK: status, menus, hot key
 
     func updateStatus(_ needs: Int) {
         statusItem.button?.title = needs > 0 ? "✋\(needs)" : "◇"
@@ -347,9 +419,13 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
         window.makeKeyAndOrderFront(nil)
     }
 
-    @objc func toggleTerminal() {
-        let t = rightSplit.subviews[1]
-        rightSplit.setPosition(t.frame.height < 2 ? rightSplit.frame.height * 0.72 : rightSplit.frame.height, ofDividerAt: 0)
+    func applicationWillTerminate(_ notification: Notification) {
+        tunnel.stop()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        window.makeKeyAndOrderFront(nil)
+        return true
     }
 
     @objc func reloadAll() {
@@ -358,7 +434,7 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
         if let s = selectedTerm { attachTerminal(s) }
     }
 
-    @objc func focusDash() { window.makeFirstResponder(dash) }
+    @objc func focusSide() { window.makeFirstResponder(side) }
     @objc func focusChat() { window.makeFirstResponder(chat) }
     @objc func focusTerm() { window.makeFirstResponder(term) }
 
@@ -384,10 +460,10 @@ final class Shell: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKUI
 
         let viewItem = NSMenuItem()
         let view = NSMenu(title: "View")
-        view.addItem(withTitle: "Sidebar", action: #selector(focusDash), keyEquivalent: "1")
+        view.addItem(withTitle: "Toggle Sidebar", action: #selector(toggleSidebar), keyEquivalent: "\\")
+        view.addItem(withTitle: "Sidebar", action: #selector(focusSide), keyEquivalent: "1")
         view.addItem(withTitle: "Chat", action: #selector(focusChat), keyEquivalent: "2")
         view.addItem(withTitle: "Terminal", action: #selector(focusTerm), keyEquivalent: "3")
-        view.addItem(withTitle: "Toggle Terminal", action: #selector(toggleTerminal), keyEquivalent: "j")
         view.addItem(withTitle: "Reload", action: #selector(reloadAll), keyEquivalent: "r")
         view.items.forEach { $0.target = self }
         viewItem.submenu = view

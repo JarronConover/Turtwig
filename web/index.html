@@ -5,69 +5,78 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent Box</title>
 <style>
+  /* Measured from super.engineering at 1x (points). */
   :root {
-    --bg: #1a1a1a; --panel: #202020; --ink: #e8e8e6; --muted: #8d8d89; --faint: #5d5d5a; --line: #2c2c2c;
-    --hover: #242424; --sel: #232733; --sel-line: #3a4252; --accent: #4f8cff; --warn: #e5534b; --merge: #a371f7;
-    --ok: #3fb950; --orange: #e3a03b;
-  }
-  @media (prefers-color-scheme: light) {
-    :root:not([data-theme="dark"]) {
-      --bg: #f5f5f4; --panel: #ffffff; --ink: #1c1c1b; --muted: #6b6b67; --faint: #a3a39f; --line: #e3e3e0;
-      --hover: #ececea; --sel: #e6ecf8; --sel-line: #b9c7e3;
-    }
+    --bg: #212122; --panel: #2a2a2d; --ink: #f5f5f7; --row: #f3f3f5; --muted: #898a8e; --age: #a8a8ad; --faint: #6c6c70;
+    --line: #323235; --hover: #28282b; --sel: #272c35; --sel-line: #485262; --accent: #488efc; --warn: #d8566c;
+    --merge: #8b5cf6; --orange: #f0a43a;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--ink); overflow: hidden; display: flex; flex-direction: column;
-         font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-user-select: none; user-select: none; }
-  #list { flex: 1; overflow-y: auto; padding: 8px 6px 12px; }
-  .ws { font-weight: 650; font-size: 13.5px; padding: 8px 8px 6px; display: flex; align-items: center; gap: 6px; }
-  .ws .host { font-weight: 500; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
-  .label { color: var(--muted); font-size: 12px; padding: 12px 8px 4px; display: flex; align-items: center; gap: 4px; cursor: default; }
-  .label.toggle { cursor: pointer; }
-  .label .chev { font-size: 11px; color: var(--faint); }
-  .row { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: 6px;
-         border: 1px solid transparent; cursor: default; }
+         font: 14px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; -webkit-font-smoothing: antialiased;
+         -webkit-user-select: none; user-select: none; cursor: default; }
+  #titlebar { flex: none; height: 44px; position: relative; }
+  #toggle { position: absolute; left: 90px; top: 14px; width: 24px; height: 18px; display: grid; place-items: center; color: #8e8e92; border-radius: 5px; }
+  #toggle:hover { background: var(--hover); color: var(--ink); }
+  #list { flex: 1; overflow-y: auto; padding: 0 6px 10px; }
+  #list::-webkit-scrollbar { width: 0; }
+  .ws { font-weight: 600; font-size: 15px; color: var(--ink); padding: 6px 8px 0; height: 30px; display: flex; align-items: center; }
+  .label { color: var(--muted); font-size: 13px; height: 34px; padding: 12px 8px 0; display: flex; align-items: center; gap: 5px; }
+  .label.toggle:hover { color: #a9a9ad; }
+  .label .chev { display: inline-block; font-size: 12px; color: var(--muted); transform: translateY(-.5px); }
+  .row { position: relative; display: flex; align-items: center; height: 33px; padding: 0 12px 0 8px; border-radius: 8px;
+         border: 1px solid transparent; }
   .row:hover { background: var(--hover); }
-  .row.sel { background: var(--sel); border-color: var(--sel-line); }
-  .row.proj { height: 32px; font-weight: 500; }
-  .row.child { padding-left: 28px; }
-  .badge { flex: none; width: 18px; height: 18px; border-radius: 4px; display: grid; place-items: center;
-           font-size: 10.5px; font-weight: 650; color: #fff; }
-  .row.proj .badge { width: 20px; height: 20px; font-size: 11px; }
-  .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .star { color: var(--faint); font-size: 11px; margin-left: 4px; }
-  .meta { flex: none; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
-  .age { min-width: 22px; text-align: right; }
-  .add { flex: none; color: var(--muted); width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; font-size: 15px; }
-  .add:hover { background: var(--line); color: var(--ink); }
-  svg.ic { width: 12px; height: 12px; display: block; }
-  .spin { animation: spin 1s linear infinite; }
+  .row.sel, .row.sel:hover { background: var(--sel); border-color: var(--sel-line); }
+  .row.proj { height: 37px; margin-top: 1px; }
+  .row.proj .title { font-size: 14px; margin-left: 8px; }
+  .row.child { padding-left: 27px; }
+  .row.item .title { margin-left: 8px; }
+  .badge { flex: none; width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center;
+           font-size: 9.5px; font-weight: 500; }
+  .row.proj .badge { width: 22px; height: 22px; border-radius: 5px; font-size: 13px; }
+  .emoji { flex: none; width: 16px; margin-left: 8px; font-size: 14px; text-align: center; }
+  .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--row); }
+  .star { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .meta { flex: none; display: flex; align-items: center; gap: 9px; margin-left: 8px; }
+  .age { color: var(--age); font-size: 12.5px; min-width: 22px; text-align: right; font-variant-numeric: tabular-nums; }
+  .add { flex: none; color: #949498; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 5px; margin-right: -4px; }
+  .add:hover { background: #303033; color: var(--ink); }
+  svg.ic { width: 14px; height: 14px; display: block; }
+  .spin { animation: spin .9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  footer { flex: none; display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-top: 1px solid var(--line); }
-  footer button { background: none; border: 0; color: var(--muted); width: 26px; height: 26px; border-radius: 5px; font-size: 14px; cursor: pointer; }
-  footer button:hover { background: var(--hover); color: var(--ink); }
-  footer .grow { flex: 1; }
-  #updated { color: var(--faint); font-size: 11px; }
-  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink);
-           padding: 16px; width: min(420px, calc(100vw - 32px)); -webkit-user-select: text; user-select: text; }
-  dialog::backdrop { background: rgba(0,0,0,.4); }
-  dialog label { display: block; margin: 8px 0 3px; color: var(--muted); font-size: 12px; }
+  footer { flex: none; height: 46px; display: flex; align-items: center; padding: 0 14px 0 18px; gap: 4px; }
+  .fbtn { width: 26px; height: 26px; display: grid; place-items: center; color: #8e8e92; border-radius: 6px; }
+  .fbtn:hover { background: var(--hover); color: var(--ink); }
+  .wsw { display: flex; align-items: center; gap: 2px; margin-left: auto; margin-right: auto; }
+  .wsdot { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; }
+  .wsdot i { width: 7px; height: 7px; border-radius: 50%; background: #6c6c70; display: block; }
+  .wsdot.on { background: #2c2c2f; }
+  .wsdot.on i { background: #e8e8ea; }
+  dialog { border: 1px solid #3a3a3e; border-radius: 12px; background: var(--panel); color: var(--ink);
+           padding: 16px; width: min(420px, calc(100vw - 32px)); -webkit-user-select: text; user-select: text; font-size: 13px;
+           box-shadow: 0 18px 50px rgba(0,0,0,.5); }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  dialog strong { font-weight: 600; font-size: 14px; }
+  dialog label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
   dialog input, dialog textarea, dialog select { width: 100%; font: inherit; padding: 6px 8px; color: var(--ink);
-           background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
-  dialog .bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-  dialog button { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; }
+           background: #1e1e1f; border: 1px solid var(--line); border-radius: 7px; outline: none; }
+  dialog input:focus, dialog textarea:focus { border-color: var(--accent); }
+  dialog .bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  dialog button { font: inherit; color: var(--ink); background: #1e1e1f; border: 1px solid var(--line); border-radius: 7px; padding: 5px 12px; }
   dialog button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .empty { color: var(--faint); padding: 6px 8px 6px 28px; font-size: 12px; }
+  .empty { color: var(--faint); padding: 6px 8px 6px 28px; font-size: 12.5px; }
 </style>
 </head>
 <body>
+<div id="titlebar" data-drag><div id="toggle" title="Hide sidebar"><svg width="15" height="13" viewBox="0 0 15 13"><rect x=".75" y=".75" width="13.5" height="11.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 1v11" stroke="currentColor" stroke-width="1.3"/></svg></div></div>
 <div id="list"></div>
 <footer>
-  <button id="settings-btn" title="Settings">⚙︎</button>
-  <span class="grow"></span>
-  <span id="updated"></span>
-  <button id="new-btn" title="New chat on the box">+</button>
+  <div class="fbtn" id="settings-btn" title="Settings"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 5.6a2.4 2.4 0 1 0 0 4.8 2.4 2.4 0 0 0 0-4.8z" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M6.8 1.5h2.4l.4 1.8 1.4.8 1.8-.6 1.2 2-1.4 1.3v1.6l1.4 1.3-1.2 2-1.8-.6-1.4.8-.4 1.8H6.8l-.4-1.8-1.4-.8-1.8.6-1.2-2 1.4-1.3V7.2L2 5.9l1.2-2 1.8.6 1.4-.8z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg></div>
+  <div class="fbtn" id="newdir-btn" title="New chat on the box"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M1.8 3.5h4.3l1.4 1.5h6.7v8H1.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 7.3v3.4M6.3 9h3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></div>
+  <div class="wsw" id="wsw"></div>
+  <span id="updated" hidden></span>
 </footer>
 
 <dialog id="new-dlg">
@@ -117,13 +126,15 @@ function age(ts) {
   if (s < 86400 * 7) return Math.floor(s / 86400) + "d";
   return Math.floor(s / (86400 * 7)) + "w";
 }
-const badge = (it) => `<span class="badge" style="background:hsl(${it.hue ?? 210} 32% 38%)">${esc(it.letter || "R")}</span>`;
+const badge = (it) => `<span class="badge" style="background:hsl(${it.hue ?? 210} 24% 26%);color:hsl(${it.hue ?? 210} 25% 76%)">${esc(it.letter || "R")}</span>`;
 
 const IC = {
+  up: `<svg class="ic" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6.5" fill="#c7c7cc"/><path d="M7 10V4.3M4.6 6.6L7 4.2l2.4 2.4" fill="none" stroke="#2a2a2c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  down: `<svg class="ic" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6.5" fill="#c7c7cc"/><path d="M7 4v5.7M4.6 7.4L7 9.8l2.4-2.4" fill="none" stroke="#2a2a2c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   spin: `<svg class="ic spin" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="1.6"/><path d="M6 1.5a4.5 4.5 0 0 1 4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
   dot: `<svg class="ic" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="currentColor" fill-opacity=".22"/><circle cx="6" cy="6" r="2.6" fill="currentColor"/></svg>`,
-  fail: `<svg class="ic" viewBox="0 0 12 12" style="color:var(--warn)"><circle cx="6" cy="6" r="5.5" fill="currentColor"/><path d="M4 4l4 4M8 4l-4 4" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg>`,
-  merged: `<svg class="ic" viewBox="0 0 12 12" style="color:var(--merge)"><circle cx="3" cy="2.5" r="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="3" cy="9.5" r="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="9" cy="6" r="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M3 3.9v4.2M3 4c0 2 2 2 4.6 2" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`,
+  fail: `<svg class="ic" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6.5" fill="#d8566c"/><path d="M5.2 5.2l3.6 3.6M8.8 5.2L5.2 8.8" stroke="#3a1c22" stroke-width="1.4" stroke-linecap="round"/></svg>`,
+  merged: `<svg class="ic" viewBox="0 0 12 12" style="color:var(--merge);width:13px;height:13px"><circle cx="3" cy="2.5" r="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="3" cy="9.5" r="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="9" cy="6" r="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M3 3.9v4.2M3 4c0 2 2 2 4.6 2" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`,
   pending: `<svg class="ic" viewBox="0 0 12 12" style="color:var(--orange)"><path d="M6 1.2l5 9.3H1z" fill="currentColor"/></svg>`,
   chat: `<svg class="ic" viewBox="0 0 12 12"><path d="M2 2.5h8v5.5H5l-3 2z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>`,
 };
@@ -135,15 +146,22 @@ function status(it) {
   if (it.attention === "input" || it.agent_status === "waiting") return IC.chat;
   if (it.attention || it.agent_status === "review") return IC.dot;
   if (pr.checks && pr.checks.status === "pending") return IC.pending;
+  const local = it.local || {};
+  if (local.uncommitted || local.unpushed) return IC.up;
+  if (local.behind_target) return IC.down;
   return "";
 }
 
 function row(it, host, cls) {
   const key = `${host}:${it.path}`;
   items[key] = { ...it, host };
+  const label = it.title || it.branch || it.worktree || "";
+  const m = /^(\p{Extended_Pictographic}\uFE0F?)\s*(.*)$/u.exec(label);
+  const emoji = cls === "item" && m ? `<span class="emoji">${esc(m[1])}</span>` : "";
+  const text = cls === "item" && m ? m[2] : label;
   return `<div class="row ${cls} ${selected === key ? "sel" : ""}" data-key="${esc(key)}">
-    ${cls === "child" ? "" : badge(it)}
-    <span class="title">${esc(it.title || it.branch || it.worktree)}${it.is_primary ? '<span class="star">★</span>' : ""}</span>
+    ${cls === "child" ? "" : badge(it)}${emoji}
+    <span class="title">${esc(text)}${it.is_primary ? '<span class="star">★</span>' : ""}</span>
     <span class="meta">${status(it)}<span class="age">${age(it.age)}</span></span></div>`;
 }
 
@@ -152,17 +170,17 @@ function render() {
   items = {};
   const out = [];
   for (const h of data.hosts) {
-    out.push(`<div class="ws">${h.host === "box" ? "Agent box" : "Mac"}<span class="host">${h.host === "box" ? "remote" : "super.engineering"}</span></div>`);
+    out.push(`<div class="ws" id="ws-${h.host}">${h.host === "box" ? "Agent box" : "Mac"}</div>`);
     out.push(`<div class="label">Projects</div>`);
     for (const p of h.projects) {
       out.push(`<div class="row proj">${badge({ hue: p.hue, letter: p.name[0].toUpperCase() })}<span class="title">${esc(p.name)}</span>
-        ${h.host === "box" ? `<span class="add" data-new="${esc(p.items.find((i) => i.is_primary)?.path || "")}" title="New chat in ${esc(p.name)}">+</span>` : ""}</div>`);
+        <span class="add" ${h.host === "box" ? `data-new="${esc(p.items.find((i) => i.is_primary)?.path || "")}"` : ""} title="New chat in ${esc(p.name)}"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span></div>`);
       for (const it of p.items) out.push(row({ ...it, letter: p.name[0].toUpperCase(), hue: p.hue }, h.host, "child"));
     }
     for (const s of h.sections) {
       const key = `${h.host}:${s.id}`;
       const isCol = touched.has(key) ? collapsed.has(key) : s.collapsed;
-      out.push(`<div class="label toggle" data-toggle="${esc(key)}" data-default="${s.collapsed}">${esc(s.name)}${isCol ? ' <span class="chev">›</span>' : ""}</div>`);
+      out.push(`<div class="label toggle" data-toggle="${esc(key)}" data-default="${s.collapsed}">${esc(s.name)}${isCol ? '<span class="chev">›</span>' : ""}</div>`);
       if (!isCol) {
         for (const it of s.items) out.push(row(it, h.host, "item"));
         if (!s.items.length) out.push(`<div class="empty">No worktrees</div>`);
@@ -170,6 +188,7 @@ function render() {
     }
   }
   $("#list").innerHTML = out.join("");
+  $("#wsw").innerHTML = data.hosts.map((h, i) => `<div class="wsdot ${i === 0 ? "on" : ""}" data-ws="${h.host}" title="${h.host === "box" ? "Agent box" : "Mac"}"><i></i></div>`).join("");
   $("#updated").textContent = new Date(data.generated_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   let needs = 0;
   for (const h of data.hosts) for (const s of h.sections) for (const it of s.items) if (it.attention) needs++;
@@ -235,7 +254,14 @@ $("#list").addEventListener("click", (e) => {
   }
   select(t.dataset.key);
 });
-$("#new-btn").addEventListener("click", () => window.openNewChat(""));
+$("#newdir-btn").addEventListener("click", () => window.openNewChat(""));
+$("#wsw").addEventListener("click", (e) => {
+  const d = e.target.closest("[data-ws]");
+  if (!d) return;
+  document.querySelectorAll(".wsdot").forEach((x) => x.classList.toggle("on", x === d));
+  document.getElementById("ws-" + d.dataset.ws)?.scrollIntoView({ block: "start" });
+});
+$("#toggle").addEventListener("click", () => native && native.postMessage({ type: "toggleSidebar" }));
 $("#new-dlg").addEventListener("close", async () => {
   if ($("#new-dlg").returnValue !== "ok") return;
   const body = Object.fromEntries(new FormData($("#new-form")));

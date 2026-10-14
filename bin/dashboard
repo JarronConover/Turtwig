@@ -24,7 +24,6 @@ STATE_ROOTS = [HOME / ".local" / "state" / "redo", HOME / ".agent-box" / "mac-st
 PROJECTS = HOME / ".claude" / "projects"
 CHAT = ROOT / "bin" / "chat"
 SC = ROOT / "shim" / "sc"
-MAC_SIDEBAR = HOME / ".agent-box" / "mac-state" / "sidebar.json"
 sys.path.insert(0, str(ROOT / "lib"))
 import sidebar as sidebar_lib  # noqa: E402
 
@@ -171,7 +170,8 @@ def box_sidebar():
 
 
 def sidebar():
-    """Both hosts' sidebars, with each box worktree's chats attached."""
+    """The box's sidebar, with each worktree's chats attached (including chats
+    moved to the Mac, which keep their place)."""
     cs = chats()
     by_dir = {}
     for c in cs:
@@ -190,13 +190,6 @@ def sidebar():
                        for c in it["chats"]):
                     it["agent_status"] = "working"
         hosts.append(box)
-    mac = read_json(MAC_SIDEBAR)
-    if mac:
-        for group in mac["projects"] + mac["sections"]:
-            for it in group["items"]:
-                it["chats"] = [c for c in cs if c.get("host") == "mac"
-                               and os.path.realpath(c.get("dir") or "") == it["path"]]
-        hosts.append(mac)
     return {"generated_at": iso(datetime.datetime.now().timestamp()), "hosts": hosts,
             "ssh_host": os.environ.get("AGENT_BOX_SSH_HOST", "coder.tj-agents")}
 
@@ -231,8 +224,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, sidebar())
         if self.path in ("/", "/index.html"):
             return self.send(200, (ROOT / "web" / "index.html").read_bytes(), "text/html; charset=utf-8")
-        if self.path.startswith("/chrome"):
-            return self.send(200, (ROOT / "web" / "chrome.html").read_bytes(), "text/html; charset=utf-8")
+        if self.path == "/main":
+            return self.send(200, (ROOT / "web" / "main.html").read_bytes(), "text/html; charset=utf-8")
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
