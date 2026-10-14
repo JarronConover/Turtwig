@@ -1,0 +1,95 @@
+// Built-in defaults: super.engineering's look. Your settings file overrides any part of this.
+{
+  "connection": {
+    "ssh_host": "coder.tj-agents",
+    "daemon": "~/agent-box/rust/target/release/agent-boxd",
+    "retry_seconds": 3
+  },
+  "theme": {
+    "window": "#212122",
+    "card": "#1e1e1f",
+    "line": "#323235",
+    "text": "#f5f5f7",
+    "text_muted": "#898a8e",
+    "text_faint": "#6c6c70",
+    "age": "#a8a8ad",
+    "accent": "#488efc",
+    "hover": "#28282b",
+    "selection": "#272c35",
+    "selection_border": "#485262",
+    "warning": "#f0a43a",
+    "danger": "#d8566c",
+    "merged": "#8b5cf6",
+    "success": "#3fb950",
+    "font_family": ".SystemUIFont",
+    "mono_font_family": "Menlo",
+    "font_size": 14,
+    "card_radius": 13,
+    "row_radius": 8
+  },
+  "animation": { "enabled": true, "duration_ms": 140, "sidebar_ms": 200, "spinner_ms": 900 },
+  "layout": {
+    "type": "row",
+    "children": [
+      { "type": "sidebar", "style": { "width": 339, "id": "sidebar", "resizable": true, "min_width": 220 } },
+      {
+        "type": "column",
+        "style": { "grow": 1, "padding": [0, 14, 0, 0] },
+        "children": [
+          { "type": "toolbar", "style": { "height": 44 } },
+          {
+            "type": "card",
+            "style": { "grow": 0.7, "id": "chat-card", "resizable": true, "min_height": 160 },
+            "children": [{ "type": "chat_tabs", "style": { "height": 40 } }, { "type": "chat", "style": { "grow": 1 } }]
+          },
+          { "type": "branch_bar", "style": { "height": 54 } },
+          {
+            "type": "card",
+            "style": { "grow": 0.3, "min_height": 100 },
+            "children": [{ "type": "terminal_tabs", "style": { "height": 46 } }, { "type": "terminal", "style": { "grow": 1 } }]
+          }
+        ]
+      }
+    ]
+  },
+  "sidebar": {
+    "workspace_title": "Agent box",
+    "show_projects": true,
+    "show_sections": true,
+    "show_empty_sections": true,
+    "show_age": true,
+    "show_status": true,
+    "show_badges": true,
+    "sort": "none",
+    "row_height": 33,
+    "project_row_height": 37,
+    "title_size": 15,
+    "label_size": 13,
+    "row_text_size": 14
+  },
+  "chat": {
+    "show_thinking": false,
+    "collapse_tool_calls": true,
+    "show_tool_results": false,
+    "text_size": 14,
+    "max_width": 860,
+    "enter_sends": true
+  },
+  "terminal": { "font_size": 13, "line_height": 1.25, "padding": [14, 6] },
+  "keys": [
+    { "key": "cmd-k", "action": "palette" },
+    { "key": "cmd-shift-p", "action": "palette" },
+    { "key": "cmd-\\", "action": "toggle_sidebar" },
+    { "key": "cmd-,", "action": "open_settings" },
+    { "key": "cmd-n", "action": "new_chat" },
+    { "key": "cmd-j", "action": "toggle_terminal" },
+    { "key": "cmd-r", "action": "reconnect" },
+    { "key": "cmd-]", "action": "next_worktree" },
+    { "key": "cmd-[", "action": "previous_worktree" }
+  ],
+  "actions": [
+    { "name": "Open in Cursor", "run": "open 'cursor://vscode-remote/ssh-remote+{ssh_host}{path}'" },
+    { "name": "Open in VS Code", "run": "open 'vscode://vscode-remote/ssh-remote+{ssh_host}{path}'" },
+    { "name": "Open MR in browser", "run": "open '{mr_url}'" }
+  ]
+}
