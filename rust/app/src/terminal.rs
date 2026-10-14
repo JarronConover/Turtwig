@@ -67,10 +67,6 @@ impl TerminalView {
         }
     }
 
-    pub fn focus_handle(&self) -> &FocusHandle {
-        &self.focus
-    }
-
     /** Opens the PTY on the box once the first layout has a real size. */
     fn open(&mut self, cx: &mut Context<Self>) {
         if self.term_id.is_some() {

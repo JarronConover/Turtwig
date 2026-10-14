@@ -94,6 +94,18 @@ impl Workspace {
             }
         });
         let watch = Self::watch_settings(window, cx);
+        // Keeps the box's copy of skills, memory, and Cursor config current while the app is open.
+        let env_push = cx.spawn(async move |_, cx| loop {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let _ = cx
+                .background_spawn(async move {
+                    std::process::Command::new(format!("{home}/dev/agent-box/bin/env-push"))
+                        .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+                        .output()
+                })
+                .await;
+            cx.background_executor().timer(Duration::from_secs(60)).await;
+        });
         let sizes = load_sizes();
         Self {
             settings,
@@ -118,7 +130,7 @@ impl Workspace {
             chat_scroll: ScrollHandle::new(),
             sidebar_scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
-            _tasks: vec![listen, watch],
+            _tasks: vec![listen, watch, env_push],
             _subscriptions: vec![],
         }
     }
@@ -391,6 +403,138 @@ impl Workspace {
         });
     }
 
+    fn name_dialog(&mut self, title: &str, value: &str, window: &mut Window, cx: &mut Context<Self>, done: impl Fn(&mut Workspace, String, &mut Context<Workspace>) + 'static) {
+        use gpui_kit::component::input::{Input, InputState};
+        use gpui_kit::component::WindowExt as _;
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Name").default_value(value.to_string()));
+        let view = cx.entity();
+        let title: SharedString = title.to_string().into();
+        let done = std::rc::Rc::new(done);
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (input, view, done) = (input.clone(), view.clone(), done.clone());
+            dialog.title(title.clone()).child(Input::new(&input)).footer(
+                h_flex().gap_2().justify_end().child(
+                    gpui_kit::component::button::Button::new("ok").label("Save").on_click(move |_, window, cx| {
+                        let v = input.read(cx).value().trim().to_string();
+                        if v.is_empty() {
+                            return;
+                        }
+                        let done = done.clone();
+                        view.update(cx, |ws, cx| done(ws, v, cx));
+                        window.close_dialog(cx);
+                    }),
+                ),
+            )
+        });
+    }
+
+    fn new_section(&mut self, assign: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.name_dialog("New section", "", window, cx, move |ws, name, cx| {
+            let remote = ws.remote.clone();
+            let assign = assign.clone();
+            cx.spawn(async move |this, cx| {
+                if remote.call(Call::SectionCreate { name: name.clone() }).await.is_ok() {
+                    if let Some(path) = assign {
+                        let id = this.update(cx, |ws, _| ws.model.sections.iter().find(|s| s.name == name).map(|s| s.id.clone())).ok().flatten();
+                        let id = match id {
+                            Some(id) => Some(id),
+                            None => {
+                                cx.background_executor().timer(Duration::from_millis(600)).await;
+                                this.update(cx, |ws, _| ws.model.sections.iter().find(|s| s.name == name).map(|s| s.id.clone())).ok().flatten()
+                            }
+                        };
+                        if let Some(id) = id {
+                            let _ = remote.call(Call::SectionAssign { path, section: Some(id) }).await;
+                        }
+                    }
+                }
+            })
+            .detach();
+        });
+    }
+
+    /** Runs one of agent-box's own scripts on the Mac (moving chats, testing a branch locally). */
+    fn run_local(&mut self, args: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        let home = std::env::var("HOME").unwrap_or_default();
+        let tool = format!("{home}/dev/agent-box/bin/{}", args[0]);
+        let rest = args[1..].to_vec();
+        window.push_notification("Working…", cx);
+        cx.spawn_in(window, async move |_, cx| {
+            let out = cx
+                .background_spawn(async move {
+                    std::process::Command::new(tool)
+                        .args(rest)
+                        .env("PATH", format!("{home}/.local/bin:{home}/dev/redo-monorepo-worktrees/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"))
+                        .output()
+                })
+                .await;
+            let msg = match out {
+                Ok(o) => {
+                    let text = String::from_utf8_lossy(if o.status.success() { &o.stdout } else { &o.stderr }).trim().to_string();
+                    text.lines().last().unwrap_or(if o.status.success() { "Done" } else { "Failed" }).to_string()
+                }
+                Err(e) => e.to_string(),
+            };
+            cx.update(|window, cx| window.push_notification(msg, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn palette(&mut self, _: &Palette, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::command::{Command, CommandItem, CommandState};
+        use gpui_kit::component::WindowExt as _;
+        type Run = std::rc::Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
+        let mut entries: Vec<(String, Run)> = vec![
+            ("New chat".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| { let d = ws.selected.clone(); ws.new_chat_dialog(d, w, cx) })),
+            ("New section".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| ws.new_section(None, w, cx))),
+            ("Toggle sidebar".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| ws.toggle_sidebar(&ToggleSidebar, w, cx))),
+            ("Toggle terminal".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| ws.toggle_terminal(&ToggleTerminal, w, cx))),
+            ("Open settings".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| ws.open_settings(&OpenSettings, w, cx))),
+            ("Reload settings".into(), std::rc::Rc::new(|ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| ws.reload_settings(cx))),
+        ];
+        let (path, branch, mr_url) = self
+            .current_worktree()
+            .map(|w| (w.path.clone(), w.branch.clone().unwrap_or_default(), w.mr.as_ref().map(|m| m.url.clone()).unwrap_or_default()))
+            .unwrap_or_default();
+        let host = self.model.ssh_host.clone();
+        for a in self.settings.actions.clone() {
+            let cmd = a.run.replace("{path}", &path).replace("{branch}", &branch).replace("{ssh_host}", &host).replace("{mr_url}", &mr_url);
+            entries.push((a.name.clone(), std::rc::Rc::new(move |_: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>| {
+                let _ = std::process::Command::new("/bin/sh").arg("-c").arg(&cmd).spawn();
+            })));
+        }
+        for w in self.all_worktrees().into_iter().cloned().collect::<Vec<_>>() {
+            let p = w.path.clone();
+            entries.push((format!("Go to {}", w.title), std::rc::Rc::new(move |ws: &mut Workspace, win: &mut Window, cx: &mut Context<Workspace>| ws.select(p.clone(), win, cx))));
+        }
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        let view = cx.entity();
+        let entries = std::rc::Rc::new(entries);
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (state, view, entries) = (state.clone(), view.clone(), entries.clone());
+            dialog.close_button(false).p_0().content(move |content, _, _| {
+                let (view, entries) = (view.clone(), entries.clone());
+                content.child(
+                    Command::new(&state)
+                        .bordered(false)
+                        .placeholder("Type a command, a worktree, or an action…")
+                        .items(entries.iter().map(|(label, _)| CommandItem::new().label(label.clone())).collect::<Vec<_>>())
+                        .on_confirm(move |index, window, cx| {
+                            if let Some((_, run)) = entries.get(index.row) {
+                                let run = run.clone();
+                                window.close_dialog(cx);
+                                let v = view.clone();
+                                window.defer(cx, move |window, cx| {
+                                    v.update(cx, |ws, cx| run(ws, window, cx));
+                                });
+                            }
+                        }),
+                )
+            })
+        });
+    }
+
     // ---------- layout ----------
 
     fn styled(&self, mut d: Div, s: &Style) -> Div {
@@ -622,6 +766,10 @@ impl Workspace {
                         ws.call(Call::SectionAssign { path: p.clone(), section: None }, cx)
                     })));
                 }
+                let p = path_for_menu.clone();
+                m = m.item(PopupMenuItem::new("New section…").on_click(window.listener_for(&view, move |ws: &mut Workspace, _, window, cx| {
+                    ws.new_section(Some(p.clone()), window, cx)
+                })));
                 m = m.separator();
                 let p = path_for_menu.clone();
                 m = m.item(PopupMenuItem::new("New chat here").on_click(window.listener_for(&view, move |ws: &mut Workspace, _, window, cx| {
@@ -644,7 +792,7 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn sidebar(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.settings.theme.clone();
         let sb = self.settings.sidebar.clone();
         let mut list = v_flex().px(px(6.)).pb(px(10.));
@@ -726,6 +874,7 @@ impl Workspace {
                     .px(px(18.))
                     .gap(px(4.))
                     .child(self.footer_button("settings", IconName::Settings, cx.listener(|ws, _, w, cx| ws.open_settings(&OpenSettings, w, cx))))
+                    .child(self.footer_button("new-section", IconName::Folder, cx.listener(|ws, _, w, cx| ws.new_section(None, w, cx))))
                     .child(self.footer_button("new-chat", IconName::Plus, cx.listener(|ws, _, w, cx| ws.new_chat_dialog(None, w, cx))))
                     .child(div().flex_1())
                     .when_some(self.settings_error.clone(), |d, e| {
@@ -771,12 +920,28 @@ impl Workspace {
             if collapsed {
                 d = d.child(Icon::new(IconName::ChevronRight).xsmall());
             }
-            d = d.cursor_pointer().on_click(cx.listener(move |ws, _, _, cx| {
+            let section_id = key.trim_start_matches("section:").to_string();
+            let name = text.to_string();
+            let view = cx.entity();
+            let d = d.cursor_pointer().on_click(cx.listener(move |ws, _, _, cx| {
                 if !ws.collapsed.remove(&key) {
                     ws.collapsed.insert(key.clone());
                 }
                 cx.notify();
             }));
+            return d
+                .context_menu(move |menu, window, _| {
+                    let (id1, id2, n) = (section_id.clone(), section_id.clone(), name.clone());
+                    menu.item(PopupMenuItem::new("Rename…").on_click(window.listener_for(&view, move |ws: &mut Workspace, _, window, cx| {
+                        let id = id1.clone();
+                        ws.name_dialog("Rename section", &n, window, cx, move |ws, new, cx| ws.call(Call::SectionRename { id: id.clone(), name: new }, cx));
+                    })))
+                    .separator()
+                    .item(PopupMenuItem::new("Delete section").on_click(window.listener_for(&view, move |ws: &mut Workspace, _, _, cx| {
+                        ws.call(Call::SectionDelete { id: id2.clone() }, cx)
+                    })))
+                })
+                .into_any_element();
         }
         d.into_any_element()
     }
@@ -1040,6 +1205,20 @@ impl Workspace {
                 })));
             }
         }
+        if !w.is_primary {
+            if let Some(b) = w.branch.clone() {
+                bar = bar.child(self.pill("test-local", "Test on Mac").on_click(cx.listener(move |ws, _, window, cx| {
+                    ws.run_local(vec!["chat".into(), "test-local".into(), "--branch".into(), b.clone()], window, cx)
+                })));
+            }
+        }
+        if let Some(c) = &chat {
+            let (id, to) = (c.id.clone(), if c.host == "box" { "mac" } else { "box" });
+            let label = if to == "mac" { "Move chat to Mac" } else { "Move chat to box" };
+            bar = bar.child(self.pill("move", label).on_click(cx.listener(move |ws, _, window, cx| {
+                ws.run_local(vec!["chat".into(), "move".into(), id.clone(), "--to".into(), to.into()], window, cx)
+            })));
+        }
         let start = self.sizes.get("chat-card").copied();
         bar.on_mouse_down(MouseButton::Left, cx.listener(move |ws, e: &MouseDownEvent, _, cx| {
             ws.resizing = Some(Resize { id: "chat-card".into(), vertical: true, start: f32::from(e.position.y), start_size: start.unwrap_or(-1.) });
@@ -1083,6 +1262,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::reload))
+            .on_action(cx.listener(Self::palette))
             .on_action(cx.listener(|ws, _: &NewChat, w, cx| {
                 let dir = ws.selected.clone();
                 ws.new_chat_dialog(dir, w, cx)
