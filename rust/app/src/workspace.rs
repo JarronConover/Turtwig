@@ -1027,6 +1027,10 @@ impl Workspace {
             let chat = paste_chat.clone();
             paste_view.update(cx, |ws, cx| ws.attach(chat, files, window, cx)).is_ok()
         });
+        let drop_bg = style::color(&Value::from("@accent"), &self.settings.theme).map(|mut c| {
+            c.a = 0.15;
+            c
+        }).unwrap_or(transparent_black());
         let chips = if props.get("attachments").and_then(Value::as_bool) == Some(false) { None } else { self.attachments_view(Some(chat.clone()), props, cx) };
         Some(
             div()
@@ -1036,6 +1040,8 @@ impl Workspace {
                 .gap(px(6.))
                 .children(chips)
                 .child(textarea)
+                .rounded(px(6.))
+                .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_bg))
                 .on_drop(move |paths: &ExternalPaths, window, cx| {
                     let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
                     let chat = chat.clone();
@@ -1057,6 +1063,8 @@ impl Workspace {
         let (view, chat) = (cx.entity().downgrade(), chat_id.to_string());
         Some(
             style::apply(div().id(SharedString::from(format!("drop:{chat_id}"))).absolute().inset(px(8.)).flex().flex_col().items_center().justify_center(), &st, &theme)
+                .opacity(0.)
+                .drag_over::<ExternalPaths>(|s, _, _, _| s.opacity(1.))
                 .child(gpui_kit::component::Icon::empty().path("icons/paperclip.svg").size(px(22.)).text_color(accent))
                 .child(format!("Drop to attach to {label}"))
                 .on_drop(move |paths: &ExternalPaths, window, cx| {

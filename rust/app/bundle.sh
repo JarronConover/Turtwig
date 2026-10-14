@@ -15,7 +15,7 @@ cat > "$app/Contents/Info.plist" << 'PLIST'
 <dict>
   <key>CFBundleName</key><string>Agent Box</string>
   <key>CFBundleDisplayName</key><string>Agent Box</string>
-  <key>CFBundleIdentifier</key><string>com.tj.agentbox</string>
+  <key>CFBundleIdentifier</key><string>com.tj.agent-box</string>
   <key>CFBundleExecutable</key><string>AgentBox</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>2.0</string>
@@ -24,5 +24,7 @@ cat > "$app/Contents/Info.plist" << 'PLIST'
 </dict>
 </plist>
 PLIST
-codesign --force --sign - "$app" > /dev/null 2>&1
+# A real (even self-signed) signature lets macOS show its notifications and Dock badge; ad-hoc can't.
+identity=$(security find-identity -p codesigning 2> /dev/null | awk -F'"' '/Agent Box Local Signing/ {print $2; exit}')
+codesign --force --sign "${identity:--}" "$app" > /dev/null 2>&1
 echo "installed $app"

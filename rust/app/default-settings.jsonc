@@ -693,7 +693,7 @@
     "image": { "max_width": 360, "max_height": 240, "radius": 8, "margin": [8, 0, 0, 0] },
     "file": { "margin": [8, 0, 0, 0], "padding": [4, 8], "radius": 6, "background": "@pill", "font_size": 12.5, "color": "@age" },
     "attachments": { "gap": 8, "padding": [2, 2, 4, 2] },
-    "drop_overlay": { "radius": 10, "border": 2, "border_color": "@accent", "background": "#488efc24", "color": "@text", "font_size": 14, "gap": 8 },
+    "drop_overlay": { "radius": 10, "border": 2, "border_color": "@accent", "background": "#1b2333f0", "color": "@text", "font_size": 14, "gap": 8 },
     "attachment": { "radius": 8, "border": 1, "border_color": "@line", "background": "@pill" },
     "assistant": { "font_size": 14 },
     "thinking": { "font_size": 13, "italic": true, "color": "@text_muted" },
