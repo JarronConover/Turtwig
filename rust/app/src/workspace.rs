@@ -217,6 +217,28 @@ impl Workspace {
         self.pending_script.push(json!({"type": "event", "name": "start", "payload": null}));
     }
 
+    /** Runs queued script messages, events, and actions now, so the app keeps working while its window
+    is hidden and not rendering (agents drive it then too). */
+    pub(crate) fn flush(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for _ in 0..8 {
+            if self.pending_script.is_empty() && self.pending_events.is_empty() && self.pending_actions.is_empty() {
+                break;
+            }
+            for m in std::mem::take(&mut self.pending_script) {
+                self.script_deliver(m, window, cx);
+            }
+            for e in std::mem::take(&mut self.pending_events) {
+                self.fire_event(&e, vec![], window, cx);
+            }
+            for a in std::mem::take(&mut self.pending_actions) {
+                self.run_action(&a, window, cx);
+            }
+        }
+        let ctx = self.context();
+        self.inspect_at = None;
+        self.write_inspect(&ctx, window, cx);
+    }
+
     pub(crate) fn script_deliver(&mut self, message: Value, window: &mut Window, cx: &mut Context<Self>) {
         let ctx = crate::ui::expr::to_json(&self.context()).to_string();
         let Some(scripts) = self.scripts.as_mut() else { return };
@@ -411,13 +433,14 @@ impl Workspace {
                     reload |= !r;
                     run |= r;
                 }
-                let ok = this.update(cx, |ws, cx| {
+                let ok = this.update_in(cx, |ws, window, cx| {
                     if reload {
                         ws.reload_settings(cx);
                     }
                     if run {
                         ws.run_inbox(cx);
                     }
+                    ws.flush(window, cx);
                 });
                 if ok.is_err() {
                     break;
@@ -602,6 +625,7 @@ impl Workspace {
             }
             Incoming::Event(_) => {}
         }
+        self.flush(window, cx);
         cx.notify();
     }
 
@@ -1201,15 +1225,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.register_terminals(cx);
-        for m in std::mem::take(&mut self.pending_script) {
-            self.script_deliver(m, window, cx);
-        }
-        for e in std::mem::take(&mut self.pending_events) {
-            self.fire_event(&e, vec![], window, cx);
-        }
-        for a in std::mem::take(&mut self.pending_actions) {
-            self.run_action(&a, window, cx);
-        }
+        self.flush(window, cx);
         self.render_generation += 1;
         self.clickables.clear();
         let generation = self.render_generation;
