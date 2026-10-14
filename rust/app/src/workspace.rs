@@ -213,6 +213,7 @@ impl Workspace {
     /** (Re)starts the scripts: a fresh JS context, so edits take effect at once and old timers stop. */
     pub(crate) fn load_scripts(&mut self) {
         self.script_timers.clear();
+        self.script_data.clear();
         self.scripts = crate::script::Scripts::load(&self.settings.scripts);
         self.pending_script.push(json!({"type": "event", "name": "start", "payload": null}));
     }
