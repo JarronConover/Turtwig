@@ -64,6 +64,9 @@ pub struct Workspace {
     term_by_id: HashMap<u64, Entity<TerminalView>>,
     expanded_tools: HashSet<String>,
     images: HashMap<String, Option<std::sync::Arc<Image>>>,
+    pub(crate) diffs: HashMap<String, crate::ui::diff_view::DiffData>,
+    pub(crate) diff_collapsed: HashSet<String>,
+    pub(crate) diff_scroll: UniformListScrollHandle,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -145,6 +148,9 @@ impl Workspace {
             term_by_id: HashMap::new(),
             expanded_tools: HashSet::new(),
             images: HashMap::new(),
+            diffs: HashMap::new(),
+            diff_collapsed: HashSet::new(),
+            diff_scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             _tasks: vec![listen, watch, env_push, designer_listen],
             _subscriptions: vec![],
@@ -323,6 +329,7 @@ impl Workspace {
             Incoming::Event(Event::Model(m)) => {
                 self.model = m;
                 self.pending_motion = true;
+                self.mark_diffs_stale();
                 if let Some(id) = self.pending_select.clone() {
                     if let Some(path) = self.all_worktrees().iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone()) {
                         self.active_chat.insert(path.clone(), id);
@@ -416,6 +423,7 @@ impl Workspace {
             })
             .collect();
         let selected_w = self.current_worktree().map(|w| self.worktree_json(w, Value::Null));
+        let selected_diff = self.selected.as_deref().map(|p| self.diff_summary(p)).unwrap_or(Value::Null);
         let selected_c = self.current_chat().map(|c| self.chat_json(c));
         let chats_here: Vec<Value> = self.current_worktree().map(|w| self.chats_of(w).into_iter().map(|c| self.chat_json(c)).collect()).unwrap_or_default();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
@@ -424,7 +432,7 @@ impl Workspace {
             "sections": sections,
             "worktrees": worktrees,
             "chats": self.model.chats.iter().map(|c| self.chat_json(c)).collect::<Vec<_>>(),
-            "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here},
+            "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here, "diff": selected_diff},
             "state": self.state,
             "theme": self.settings.theme,
             "app": {
@@ -997,6 +1005,10 @@ impl Render for Workspace {
                 m.trigger = generation;
             }
             m.prune();
+        }
+        if let Some(p) = self.selected.clone() {
+            let base = self.diff_base();
+            self.ensure_diff(&p, &base, cx);
         }
         let ctx = self.context();
         let body = self.render_view("main", &ctx, window, cx);

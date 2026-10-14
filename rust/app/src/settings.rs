@@ -26,6 +26,9 @@ pub struct Settings {
     /** Layout glides, enter animations, and style easing (see SETTINGS.md, Motion). */
     #[serde(default)]
     pub motion: Value,
+    /** Look of the built-in diff view. */
+    #[serde(default)]
+    pub diff: Value,
     pub terminal: TerminalSettings,
 }
 

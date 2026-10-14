@@ -31,6 +31,12 @@
     "claude": "#d97757",
     "tab_border": "#3b4350",
     "tab_bg": "#22262e",
+    "diff_add": "#3fb950",
+    "diff_del": "#e5534b",
+    "diff_add_bg": "#1b2e21",
+    "diff_del_bg": "#351d22",
+    "diff_hunk_bg": "#21252c",
+    "diff_file_bg": "#29292b",
     "warning": "#f0a43a",
     "danger": "#d8566c",
     "merged": "#8b5cf6",
@@ -53,7 +59,9 @@
     "sidebar_open": true,
     "terminal_open": true,
     "sidebar_width": 339,
-    "terminal_height": 300
+    "terminal_height": 300,
+    "bottom_tab": "terminal",
+    "diff_base": "uncommitted"
   },
 
   "views": {
@@ -501,6 +509,17 @@
             { "type": "text", "props": { "text": "{{ .selected.worktree.branch // \"detached\" }}" }, "style": { "font_size": 13 } },
             { "type": "spacer" },
             {
+              "if": ".selected.diff.files > 0",
+              "id": "changes-pill",
+              "type": "Pill",
+              "props": {
+                "icon": "file-diff",
+                "text": "{{ .selected.diff.files }} file{{ if .selected.diff.files == 1 then \"\" else \"s\" end }} +{{ .selected.diff.added }} −{{ .selected.diff.removed }}",
+                "tooltip": "Show the changes ({{ .selected.diff.base_label }})",
+                "do": [{ "do": "state.set", "key": "terminal_open", "value": true }, { "do": "state.set", "key": "bottom_tab", "value": "changes" }]
+              }
+            },
+            {
               "if": ".selected.worktree.uncommitted > 0",
               "type": "text",
               "props": { "text": "{{ .selected.worktree.uncommitted }} uncommitted change{{ if .selected.worktree.uncommitted == 1 then \"\" else \"s\" end }}" },
@@ -524,24 +543,70 @@
     },
 
     "TerminalCard": {
-      "about": "The terminal for the selected worktree. Height: state.terminal_height.",
+      "about": "The bottom card: Terminal and Changes tabs (state.bottom_tab). Height: state.terminal_height.",
       "type": "column",
       "style": { "height": "{{ .state.terminal_height }}", "shrink": 0, "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" },
       "animate": { "from": { "opacity": 0, "y": 10 }, "duration": 160 },
       "children": [
         {
           "type": "row",
-          "style": { "height": 46, "shrink": 0, "padding": [0, 18], "gap": 4, "align": "center" },
+          "style": { "height": 46, "shrink": 0, "padding": [0, 18], "gap": 6, "align": "center" },
           "children": [
+            { "type": "BottomTab", "id": "tab-terminal", "props": { "tab": "terminal", "text": "Terminal", "icon": "square-terminal" } },
             {
+              "type": "BottomTab", "id": "tab-changes",
+              "props": { "tab": "changes", "icon": "file-diff", "text": "Changes{{ if .selected.diff.files > 0 then \" \" + (.selected.diff.files | tostring) else \"\" end }}" }
+            },
+            { "type": "spacer" },
+            {
+              "if": ".state.bottom_tab == \"changes\"",
               "type": "row",
-              "style": { "height": 26, "padding": [0, 11], "align": "center", "radius": 13, "border": 1, "border_color": "@tab_border", "background": "@tab_bg", "font_size": 13 },
-              "children": ["Terminal"]
+              "style": { "gap": 6, "align": "center" },
+              "children": [
+                { "if": ".selected.diff.loading", "type": "spinner", "props": { "size": "xsmall", "color": "@age" } },
+                { "type": "Segment", "props": { "key": "diff_base", "value": "uncommitted", "text": "Uncommitted", "tooltip": "Changes not yet committed" } },
+                { "type": "Segment", "props": { "key": "diff_base", "value": "branch", "text": "Whole branch", "tooltip": "Everything on this branch since it left main, committed or not" } },
+                { "type": "IconButton", "props": { "icon": "chevrons-down-up", "tooltip": "Collapse all files", "do": "diff.collapse_all" } },
+                { "type": "IconButton", "props": { "icon": "chevrons-up-down", "tooltip": "Expand all files", "do": "diff.expand_all" } },
+                { "type": "IconButton", "props": { "icon": "refresh-cw", "tooltip": "Refresh", "do": "diff.refresh" } }
+              ]
             }
           ]
         },
-        { "type": "terminal", "style": { "grow": 1, "min_height": 0 } }
+        { "if": ".state.bottom_tab != \"changes\"", "type": "terminal", "style": { "grow": 1, "min_height": 0 } },
+        { "if": ".state.bottom_tab == \"changes\"", "type": "diff", "style": { "grow": 1, "min_height": 0, "border_top": 1, "border_color": "@line" } }
       ]
+    },
+
+    "BottomTab": {
+      "about": "A tab in the bottom card. props: tab (the state.bottom_tab value it selects), text, icon.",
+      "type": "row",
+      "style": {
+        "height": 26, "padding": [0, 11], "gap": 6, "align": "center", "radius": 13, "border": 1, "font_size": 13, "cursor": "pointer",
+        "border_color": "{{ if .state.bottom_tab == .props.tab then \"@tab_border\" else \"transparent\" end }}",
+        "background": "{{ if .state.bottom_tab == .props.tab then \"@tab_bg\" else \"transparent\" end }}",
+        "color": "{{ if .state.bottom_tab == .props.tab then \"@text\" else \"@age\" end }}",
+        "hover": { "color": "@text" }
+      },
+      "on": { "click": { "do": "state.set", "key": "bottom_tab", "value": "{{ .props.tab }}" } },
+      "children": [
+        { "if": ".props.icon", "type": "icon", "props": { "name": "{{ .props.icon }}", "size": 13 } },
+        { "type": "text", "props": { "text": "{{ .props.text }}" } }
+      ]
+    },
+
+    "Segment": {
+      "about": "One option of a segmented control bound to a state key. props: key, value, text, tooltip.",
+      "type": "row",
+      "style": {
+        "height": 24, "padding": [0, 9], "align": "center", "radius": 6, "font_size": 12, "cursor": "pointer",
+        "background": "{{ if .state[.props.key] == .props.value then \"@selection\" else \"transparent\" end }}",
+        "color": "{{ if .state[.props.key] == .props.value then \"@text\" else \"@age\" end }}",
+        "hover": { "color": "@text" }
+      },
+      "tooltip": "{{ .props.tooltip // \"\" }}",
+      "on": { "click": { "do": "state.set", "key": "{{ .props.key }}", "value": "{{ .props.value }}" } },
+      "children": [{ "type": "text", "props": { "text": "{{ .props.text }}" } }]
     }
   },
 
@@ -603,6 +668,14 @@
     "empty": { "color": "@text_muted", "width": "full", "padding": [0, 32], "text_align": "center", "line_height": 1.5 },
     "waiting": { "padding": 12, "radius": 10, "border": 1, "border_color": "@warning", "background": "@waiting_bg", "font_size": 13 },
     "waiting_option": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "background": "@pill", "hover": { "background": "@pill_hover" }, "font_size": 12.5, "align": "center" }
+  },
+
+  "diff": {
+    "font_size": 12,
+    "open_url": "cursor://vscode-remote/ssh-remote+{host}{path}:{line}",
+    "file_list": { "width": 260, "shrink": 0, "height": "full", "border_right": 1, "border_color": "@line", "padding": [6, 0] },
+    "file_row": { "padding": [4, 12], "gap": 6, "font_size": 12.5 },
+    "empty": { "color": "@text_muted" }
   },
 
   "terminal": {

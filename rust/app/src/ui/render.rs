@@ -49,6 +49,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("composer", "The built-in message box for a chat. `props.chat`, `props.placeholder`."),
     ("waiting", "The built-in card for a chat waiting on a permission or question, with its answer buttons. `props.chat`."),
     ("terminal", "The built-in terminal for a worktree. `props.path` (default the selected worktree). Look: settings `terminal`."),
+    ("diff", "The built-in diff of a worktree: a file list beside the changes. `props.path` (default the selected worktree), `props.base` (default `state.diff_base`: uncommitted | branch). Click a file to jump, a file header to collapse, a line number to open it in the editor. Look: settings `diff`."),
     ("resize_handle", "A drag handle that sets a numeric state value. `props.state` (key), `props.axis` x|y, `props.min`, `props.max`, `props.invert` (bool, for handles on the far edge)."),
     ("<Component>", "Any name under `components`; its `props` are available inside as `.props`."),
 ];
@@ -218,6 +219,7 @@ impl Workspace {
                 let path = props.get("path").and_then(Value::as_str).map(str::to_string).or_else(|| self.selected.clone());
                 path.and_then(|p| self.terminals.get(&p).cloned()).map(|t| div().size_full().child(t).into_any_element()).into_iter().collect()
             }
+            "diff" => vec![self.diff_view(&props, window, cx)],
             "resize_handle" => vec![],
             "scroll" => vec![],
             _ => vec![],

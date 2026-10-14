@@ -350,6 +350,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let id = find_item_id(&ws, &path).ok_or("no such worktree")?;
             sc_tool(&["worktree", "delete", &id], None)
         }
+        Call::WorktreeDiff { path, base } => crate::diff::worktree_diff(&path, base.as_deref()),
         Call::TermOpen { session, cwd, cols, rows } => {
             let session = match (session, cwd) {
                 (Some(s), _) => s,

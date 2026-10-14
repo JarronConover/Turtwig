@@ -44,6 +44,8 @@ pub enum Call {
     SectionDelete { id: String },
     SectionAssign { path: String, section: Option<String> },
     WorktreeDelete { path: String },
+    /** `{diff, base, from, truncated}`: unified diff text; `base` "uncommitted" (default) or "branch". */
+    WorktreeDiff { path: String, base: Option<String> },
     /** Attach to a tmux session: a chat's, or the shell of `cwd` when `session` is None. */
     TermOpen { session: Option<String>, cwd: Option<String>, cols: u16, rows: u16 },
     TermInput { term_id: u64, data: String },

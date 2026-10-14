@@ -27,6 +27,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("worktree.test_local", "{branch}: check the branch out on the Mac with the box's latest work"),
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
     ("palette.open", "the command palette"),
+    ("diff.refresh", "reload the selected worktree's diff now"),
+    ("diff.collapse_all / diff.expand_all", "collapse or expand every file in the diff"),
     ("designer.send", "{text}: ask the designer (a local agent that edits these settings live) for a change"),
     ("designer.reset", "end the designer conversation and start fresh"),
     ("settings.undo", "put the settings file back as it was before the last designer request (repeatable)"),
@@ -206,6 +208,17 @@ impl Workspace {
                 });
             }
             "palette.open" => self.open_palette(window, cx),
+            "diff.refresh" => {
+                for d in self.diffs.values_mut() {
+                    d.stale = true;
+                    d.fetched = d.fetched.map(|t| t - std::time::Duration::from_secs(10));
+                }
+            }
+            "diff.collapse_all" => {
+                let paths: Vec<String> = self.diffs.values().flat_map(|d| d.files.iter().map(|f| f.path.clone())).collect();
+                self.diff_collapsed.extend(paths);
+            }
+            "diff.expand_all" => self.diff_collapsed.clear(),
             "designer.send" => {
                 if let Some(t) = s("text") {
                     self.designer_send(t, cx);

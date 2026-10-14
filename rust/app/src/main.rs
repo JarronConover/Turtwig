@@ -1,4 +1,5 @@
 mod designer;
+mod diff;
 mod remote;
 mod settings;
 mod terminal;

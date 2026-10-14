@@ -2,6 +2,7 @@
 `run` serves the app's protocol on a unix socket, `connect` relays stdio to it, `hook` logs Claude Code hooks. */
 
 mod db;
+mod diff;
 mod model;
 mod server;
 mod term;
