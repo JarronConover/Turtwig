@@ -1,3 +1,4 @@
+mod designer;
 mod remote;
 mod settings;
 mod terminal;

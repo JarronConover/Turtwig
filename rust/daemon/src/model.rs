@@ -152,6 +152,17 @@ pub fn state_for_event(event: &str) -> Option<&'static str> {
     }
 }
 
+/** A Notification that blocks on the user (a permission or question), not the idle reminder. */
+pub fn needs_user(payload: &Value) -> bool {
+    let kind = payload.get("notification_type").and_then(Value::as_str).unwrap_or("");
+    let message = payload.get("message").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "permission_prompt" | "elicitation_dialog" => true,
+        "" => !message.starts_with("Claude is waiting for your input"),
+        _ => false,
+    }
+}
+
 fn pane_waiting(session: &str) -> bool {
     static WAITING: OnceLock<Regex> = OnceLock::new();
     let re = WAITING

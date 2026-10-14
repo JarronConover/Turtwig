@@ -46,7 +46,12 @@ pub struct Workspace {
     user_state: Map<String, Value>,
     pub(crate) exprs: Exprs,
     pub(crate) transitions: HashMap<String, Transition>,
-    pub(crate) entered: HashMap<String, (std::time::Instant, u64)>,
+    pub(crate) entered: HashMap<String, (std::time::Instant, u64, Value)>,
+    pub(crate) motion: std::rc::Rc<std::cell::RefCell<crate::ui::motion::MotionStore>>,
+    pub(crate) pending_motion: bool,
+    pub(crate) designer: crate::designer::Designer,
+    designer_tx: flume::Sender<crate::designer::Out>,
+    problems_written: String,
     pub(crate) render_generation: u64,
     pub(crate) scroll_handles: HashMap<String, ScrollHandle>,
     pub(crate) drag: Option<Drag>,
@@ -94,10 +99,20 @@ impl Workspace {
                 .await;
             cx.background_executor().timer(Duration::from_secs(60)).await;
         });
+        let (designer_tx, designer_rx) = flume::unbounded();
+        let designer_listen = cx.spawn(async move |this, cx| {
+            while let Ok(out) = designer_rx.recv_async().await {
+                if this.update(cx, |ws, cx| ws.on_designer(out, cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut transcripts: HashMap<String, Transcript> = HashMap::new();
+        transcripts.entry(crate::designer::CHAT_ID.into()).or_default().append(0, &crate::designer::past_entries());
         let user_state = load_state();
         let mut state = settings.state.clone();
         state.extend(user_state.clone());
-        Self {
+        let ws = Self {
             _remote_guard: guard,
             settings,
             settings_error,
@@ -112,21 +127,82 @@ impl Workspace {
             exprs: Exprs::default(),
             transitions: HashMap::new(),
             entered: HashMap::new(),
+            motion: Default::default(),
+            pending_motion: false,
+            designer: Default::default(),
+            designer_tx,
+            problems_written: String::new(),
             render_generation: 0,
             scroll_handles: HashMap::new(),
             drag: None,
             pending_actions: vec![],
             pending_select: None,
-            transcripts: HashMap::new(),
+            transcripts,
             watching: HashSet::new(),
             composers: HashMap::new(),
             terminals: HashMap::new(),
             term_by_id: HashMap::new(),
             expanded_tools: HashSet::new(),
             focus: cx.focus_handle(),
-            _tasks: vec![listen, watch, env_push],
+            _tasks: vec![listen, watch, env_push, designer_listen],
             _subscriptions: vec![],
+        };
+        ws.configure_motion();
+        ws
+    }
+
+    fn configure_motion(&self) {
+        let m = &self.settings.motion;
+        let mut store = self.motion.borrow_mut();
+        store.enabled = m.get("enabled").and_then(Value::as_bool) != Some(false) && self.settings.theme.get("animations").and_then(Value::as_bool) != Some(false);
+        store.duration_ms = m.get("move").and_then(|x| x.get("duration")).and_then(Value::as_f64).unwrap_or(280.) as f32;
+        store.easing = crate::ui::motion::Easing::parse(m.get("move").and_then(|x| x.get("easing")).and_then(Value::as_str));
+    }
+
+    fn on_designer(&mut self, out: crate::designer::Out, cx: &mut Context<Self>) {
+        use crate::designer::{Out, CHAT_ID};
+        let t = self.transcripts.entry(CHAT_ID.into()).or_default();
+        match out {
+            Out::Entry(e) => {
+                let from = t.lines;
+                t.append(from, &[e]);
+            }
+            Out::Done { error } => {
+                self.designer.working = false;
+                if let Some(text) = error {
+                    let from = t.lines;
+                    t.append(from, &[json!({"type": "system", "level": "error", "content": text})]);
+                }
+            }
+            Out::Exited => self.designer.reset_process(),
         }
+        if let Some(h) = self.scroll_handles.get("designer") {
+            h.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn designer_send(&mut self, text: String, cx: &mut Context<Self>) {
+        use crate::designer::CHAT_ID;
+        crate::designer::snapshot();
+        let t = self.transcripts.entry(CHAT_ID.into()).or_default();
+        let from = t.lines;
+        t.append(from, &[json!({"type": "user", "message": {"role": "user", "content": text}})]);
+        if let Err(e) = self.designer.send(&text, self.designer_tx.clone()) {
+            let t = self.transcripts.entry(CHAT_ID.into()).or_default();
+            let from = t.lines;
+            t.append(from, &[json!({"type": "system", "level": "error", "content": e})]);
+        }
+        if let Some(h) = self.scroll_handles.get("designer") {
+            h.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn designer_reset(&mut self, cx: &mut Context<Self>) {
+        self.designer.reset();
+        self.transcripts.remove(crate::designer::CHAT_ID);
+        cx.notify();
     }
 
     fn watch_settings(window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
@@ -136,8 +212,12 @@ impl Workspace {
         let dir = settings::dir();
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(ev) = res {
-                if ev.paths.iter().any(|p| p.file_name().map(|n| n.to_owned()) == name) {
-                    let _ = tx.send(());
+                for p in &ev.paths {
+                    if p.file_name().map(|n| n.to_owned()) == name {
+                        let _ = tx.send(false);
+                    } else if p.file_name().and_then(|n| n.to_str()) == Some("run.json") {
+                        let _ = tx.send(true);
+                    }
                 }
             }
         });
@@ -147,15 +227,39 @@ impl Workspace {
             if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
                 return;
             }
-            while rx.recv_async().await.is_ok() {
+            while let Ok(first) = rx.recv_async().await {
                 cx.background_executor().timer(Duration::from_millis(80)).await;
-                while rx.try_recv().is_ok() {}
-                if this.update(cx, |ws, cx| ws.reload_settings(cx)).is_err() {
+                let (mut reload, mut run) = (!first, first);
+                while let Ok(r) = rx.try_recv() {
+                    reload |= !r;
+                    run |= r;
+                }
+                let ok = this.update(cx, |ws, cx| {
+                    if reload {
+                        ws.reload_settings(cx);
+                    }
+                    if run {
+                        ws.run_inbox(cx);
+                    }
+                });
+                if ok.is_err() {
                     break;
                 }
             }
             drop(watcher);
         })
+    }
+
+    /** `run.json` in the settings folder: actions written there run once, then the file is removed. */
+    fn run_inbox(&mut self, cx: &mut Context<Self>) {
+        let p = settings::dir().join("run.json");
+        let Ok(text) = std::fs::read_to_string(&p) else { return };
+        let _ = std::fs::remove_file(&p);
+        match serde_json_lenient::from_str::<Value>(&text) {
+            Ok(v) => self.pending_actions.push(v),
+            Err(e) => self.exprs.note(format!("run.json: {e}")),
+        }
+        cx.notify();
     }
 
     pub(crate) fn reload_settings(&mut self, cx: &mut Context<Self>) {
@@ -166,10 +270,23 @@ impl Workspace {
                 self.settings = s;
                 self.settings_error = None;
                 self.exprs = Exprs::default();
+                self.configure_motion();
+                self.pending_motion = true;
             }
             Err(e) => self.settings_error = Some(format!("{e:#}")),
         }
         cx.notify();
+    }
+
+    /** problems.txt lets an agent that just edited settings see what broke. */
+    fn write_problems(&mut self) {
+        let mut lines: Vec<String> = self.settings_error.iter().cloned().collect();
+        lines.extend(self.exprs.errors.borrow().iter().cloned());
+        let text = if lines.is_empty() { "No problems.\n".to_string() } else { lines.join("\n") + "\n" };
+        if text != self.problems_written {
+            let _ = std::fs::write(settings::dir().join("problems.txt"), &text);
+            self.problems_written = text;
+        }
     }
 
     pub(crate) fn set_state(&mut self, key: String, value: Value) {
@@ -203,6 +320,7 @@ impl Workspace {
             }
             Incoming::Event(Event::Model(m)) => {
                 self.model = m;
+                self.pending_motion = true;
                 if let Some(id) = self.pending_select.clone() {
                     if let Some(path) = self.all_worktrees().iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone()) {
                         self.active_chat.insert(path.clone(), id);
@@ -315,6 +433,11 @@ impl Workspace {
                 "errors": self.exprs.errors.borrow().clone(),
             },
             "now": now,
+            "designer": {
+                "working": self.designer.working,
+                "activity": if self.designer.working { self.transcripts.get(crate::designer::CHAT_ID).map(|t| t.activity()).unwrap_or_default() } else { String::new() },
+                "has_messages": self.transcripts.get(crate::designer::CHAT_ID).map(|t| !t.items.is_empty()).unwrap_or(false),
+            },
         }))
     }
 
@@ -353,6 +476,8 @@ impl Workspace {
         if let Value::Object(o) = &mut v {
             o.insert("active".into(), Value::Bool(self.current_chat().map(|x| x.id == c.id).unwrap_or(false)));
             o.insert("age_text".into(), Value::String(age_text(c.last_activity)));
+            let activity = self.transcripts.get(&c.id).filter(|_| c.state == "working").map(|t| t.activity()).unwrap_or_default();
+            o.insert("activity".into(), Value::String(activity));
         }
         v
     }
@@ -388,24 +513,7 @@ impl Workspace {
                 })
                 .detach();
             }
-            if !self.composers.contains_key(&chat.id) {
-                let placeholder = self.settings.chat.get("placeholder").and_then(Value::as_str).unwrap_or("Message the agent…").to_string();
-                let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(placeholder));
-                let id = chat.id.clone();
-                self._subscriptions.push(cx.subscribe_in(&state, window, move |ws, state, ev: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { secondary, .. } = ev {
-                        let enter_sends = ws.settings.chat.get("enter_sends").and_then(Value::as_bool).unwrap_or(true);
-                        if *secondary != enter_sends {
-                            let text = state.read(cx).value().trim().to_string();
-                            if !text.is_empty() {
-                                ws.remote.send(Call::ChatSend { chat_id: id.clone(), text });
-                                state.update(cx, |s, cx| s.set_value("", window, cx));
-                            }
-                        }
-                    }
-                }));
-                self.composers.insert(chat.id.clone(), state);
-            }
+            self.ensure_composer(&chat.id, window, cx);
         }
         if !self.terminals.contains_key(&w.path) && self.connected {
             let remote = self.remote.clone();
@@ -414,6 +522,35 @@ impl Workspace {
             let view = cx.new(|cx| TerminalView::new(remote, None, Some(path.clone()), &ts, cx));
             self.terminals.insert(w.path.clone(), view);
         }
+    }
+
+    pub(crate) fn ensure_composer(&mut self, chat_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composers.contains_key(chat_id) {
+            return;
+        }
+        let designer = chat_id == crate::designer::CHAT_ID;
+        let key = if designer { "designer_placeholder" } else { "placeholder" };
+        let fallback = if designer { "Describe a change to the app…" } else { "Message the agent…" };
+        let placeholder = self.settings.chat.get(key).and_then(Value::as_str).unwrap_or(fallback).to_string();
+        let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(placeholder));
+        let id = chat_id.to_string();
+        self._subscriptions.push(cx.subscribe_in(&state, window, move |ws, state, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { secondary, .. } = ev {
+                let enter_sends = ws.settings.chat.get("enter_sends").and_then(Value::as_bool).unwrap_or(true);
+                if *secondary != enter_sends {
+                    let text = state.read(cx).value().trim().to_string();
+                    if !text.is_empty() {
+                        if id == crate::designer::CHAT_ID {
+                            ws.designer_send(text, cx);
+                        } else {
+                            ws.remote.send(Call::ChatSend { chat_id: id.clone(), text });
+                        }
+                        state.update(cx, |s, cx| s.set_value("", window, cx));
+                    }
+                }
+            }
+        }));
+        self.composers.insert(chat_id.to_string(), state);
     }
 
     fn register_terminals(&mut self, cx: &mut Context<Self>) {
@@ -656,16 +793,17 @@ impl Workspace {
             Some(Value::Object(o)) => o.clone(),
             _ => Map::new(),
         };
-        let Some(chat) = chat.and_then(|id| self.chat(&id).cloned()) else {
+        let designer = chat.as_deref() == Some(crate::designer::CHAT_ID);
+        let items = chat.as_ref().and_then(|id| self.transcripts.get(id)).map(|t| t.items.clone()).unwrap_or_default();
+        let Some(chat_id) = chat.filter(|id| self.chat(id).is_some() || (designer && !items.is_empty())) else {
             let empty = props.get("empty").map(value_text).unwrap_or_else(|| "No chat here yet.".into());
-            return style::apply(div().size_full().flex().items_center().justify_center(), &st("empty"), &theme).child(empty).into_any_element();
+            return div().size_full().flex().items_center().justify_center().child(style::apply(div(), &st("empty"), &theme).child(empty)).into_any_element();
         };
-        let items = self.transcripts.get(&chat.id).map(|t| t.items.clone()).unwrap_or_default();
         let show_thinking = cs.get("show_thinking").and_then(Value::as_bool).unwrap_or(false);
         let collapse = cs.get("collapse_tool_calls").and_then(Value::as_bool).unwrap_or(true);
         let mut list = style::apply(v_flex(), &st("list"), &theme);
         for (i, item) in items.iter().enumerate() {
-            let key = format!("{}:{i}", chat.id);
+            let key = format!("{chat_id}:{i}");
             let el: Option<AnyElement> = match item {
                 Item::User { text } => Some(style::apply(div(), &st("user"), &theme).child(text.clone()).into_any_element()),
                 Item::Assistant { text } => {
@@ -706,9 +844,9 @@ impl Workspace {
                 list = list.child(el);
             }
         }
-        let handle = self.scroll_handles.entry("transcript".into()).or_default().clone();
+        let handle = self.scroll_handles.entry(if designer { "designer" } else { "transcript" }.into()).or_default().clone();
         div()
-            .id(SharedString::from(format!("transcript:{}", chat.id)))
+            .id(SharedString::from(format!("transcript:{chat_id}")))
             .size_full()
             .flex()
             .flex_col()
@@ -718,8 +856,12 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(crate) fn composer_view(&mut self, chat: Option<String>, _: &Map<String, Value>, _: &mut Window, _: &mut Context<Self>) -> Option<AnyElement> {
-        let c = self.composers.get(&chat?)?.clone();
+    pub(crate) fn composer_view(&mut self, chat: Option<String>, _: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chat = chat?;
+        if chat == crate::designer::CHAT_ID {
+            self.ensure_composer(&chat, window, cx);
+        }
+        let c = self.composers.get(&chat)?.clone();
         Some(Textarea::new(&c).appearance(false).into_any_element())
     }
 
@@ -774,9 +916,19 @@ impl Render for Workspace {
         }
         self.render_generation += 1;
         let generation = self.render_generation;
-        self.entered.retain(|_, (_, seen)| *seen + 2 >= generation);
+        self.entered.retain(|_, (_, seen, _)| *seen + 2 >= generation);
+        self.transitions.retain(|_, t| t.seen + 2 >= generation);
+        {
+            let mut m = self.motion.borrow_mut();
+            m.frame = generation;
+            if std::mem::take(&mut self.pending_motion) {
+                m.trigger = generation;
+            }
+            m.prune();
+        }
         let ctx = self.context();
         let body = self.render_view("main", &ctx, window, cx);
+        self.write_problems();
         let theme = self.settings.theme.clone();
         let bg = style::color(&Value::from("@window"), &theme).unwrap_or(parse_color("#212122"));
         let fg = style::color(&Value::from("@text"), &theme).unwrap_or(parse_color("#f5f5f7"));

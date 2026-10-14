@@ -23,6 +23,9 @@ pub struct Settings {
     /** Extra command palette entries: `{"label", "do", "if"}`. */
     pub commands: Vec<Value>,
     pub chat: Value,
+    /** Layout glides, enter animations, and style easing (see SETTINGS.md, Motion). */
+    #[serde(default)]
+    pub motion: Value,
     pub terminal: TerminalSettings,
 }
 

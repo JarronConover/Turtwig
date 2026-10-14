@@ -23,6 +23,17 @@ pub struct Transcript {
 }
 
 impl Transcript {
+    /** A short line on what the agent is doing now, from the newest item: "Reading settings.jsonc". */
+    pub fn activity(&self) -> String {
+        match self.items.last() {
+            Some(Item::Tool { name, summary, result: None, .. }) => format!("{} {summary}", verb(name)),
+            Some(Item::Tool { .. }) | Some(Item::User { .. }) => "Thinking".into(),
+            Some(Item::Thinking { .. }) => "Thinking".into(),
+            Some(Item::Assistant { .. }) => "Writing".into(),
+            _ => String::new(),
+        }
+    }
+
     pub fn append(&mut self, from: usize, entries: &[Value]) {
         if from != self.lines {
             if from < self.lines {
@@ -123,6 +134,19 @@ impl Transcript {
                 *is_error = b["is_error"].as_bool().unwrap_or(false);
             }
         }
+    }
+}
+
+fn verb(tool: &str) -> &str {
+    match tool {
+        "Read" => "Reading",
+        "Write" | "Edit" | "NotebookEdit" => "Editing",
+        "Bash" => "Running",
+        "Grep" | "Glob" => "Searching for",
+        "WebFetch" => "Fetching",
+        "WebSearch" => "Searching the web for",
+        "Agent" | "Task" => "Delegating:",
+        _ => tool,
     }
 }
 

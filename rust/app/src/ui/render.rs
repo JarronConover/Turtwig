@@ -13,20 +13,25 @@ use jaq_json::Val;
 use serde_json::{Map, Value};
 use std::time::{Duration, Instant};
 
+/** A style value easing toward its latest target: numbers use one lane, colors four (RGBA). */
 pub struct Transition {
-    from: f32,
-    to: f32,
+    from: Vec<f32>,
+    to: Vec<f32>,
     start: Instant,
     duration: Duration,
+    pub seen: u64,
 }
 
 impl Transition {
-    fn value(&self) -> (f32, bool) {
+    fn value(&self) -> (Vec<f32>, bool) {
         let t = (self.start.elapsed().as_secs_f32() / self.duration.as_secs_f32().max(0.001)).min(1.);
         let e = 1. - (1. - t).powi(3);
-        (self.from + (self.to - self.from) * e, t < 1.)
+        (self.from.iter().zip(&self.to).map(|(a, b)| a + (b - a) * e).collect(), t < 1.)
     }
 }
+
+/** Style keys that ease by themselves when `motion.style` is on. */
+const AUTO_KEYS: &[&str] = &["background", "color", "border_color", "opacity", "radius", "width", "height", "font_size", "top", "left", "right", "bottom", "gap"];
 
 pub const NODE_TYPES: &[(&str, &str)] = &[
     ("box", "A container. `style.direction` sets row or column (default column)."),
@@ -101,11 +106,17 @@ impl Workspace {
             let props = self.exprs.resolve(obj.get("props").unwrap_or(&Value::Null), ctx);
             let c = with(ctx, vec![("props".into(), to_val(&props))]);
             let mut comp = comp;
-            if let (Some(Value::Object(extra)), Value::Object(base)) = (obj.get("style"), &mut comp) {
-                let st = base.entry("style").or_insert(Value::Object(Map::new()));
-                if let Value::Object(st) = st {
-                    for (k, v) in extra {
-                        st.insert(k.clone(), v.clone());
+            if let Value::Object(base) = &mut comp {
+                if let Some(Value::Object(extra)) = obj.get("style") {
+                    if let Value::Object(st) = base.entry("style").or_insert(Value::Object(Map::new())) {
+                        for (k, v) in extra {
+                            st.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                for k in ["id", "animate", "motion", "transition", "tooltip", "on", "menu"] {
+                    if let Some(v) = obj.get(k) {
+                        base.insert(k.into(), v.clone());
                     }
                 }
             }
@@ -122,9 +133,12 @@ impl Workspace {
         if st.get("hidden").and_then(Value::as_bool) == Some(true) {
             return vec![];
         }
-        self.apply_transitions(obj, &mut st, path, window);
         let theme = self.settings.theme.clone();
-        let id = obj.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| path.to_string());
+        let id = match obj.get("id").and_then(Value::as_str) {
+            Some(own) => format!("{own}{}", loop_keys(path)),
+            None => path.to_string(),
+        };
+        self.apply_transitions(obj, &mut st, &id, window);
         self.apply_enter(obj, &mut st, &id, window);
 
         let children = |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| -> Vec<AnyElement> {
@@ -312,7 +326,8 @@ impl Workspace {
         } else {
             el.into_any_element()
         };
-        vec![el]
+        let moves = self.motion.borrow().enabled && obj.get("motion").and_then(Value::as_bool) != Some(false);
+        vec![if moves { crate::ui::motion::Motion::new(id, el, self.motion.clone()).into_any_element() } else { el }]
     }
 
     /** Menu entries with `if` applied and `for` expanded: (label, action, is_separator). */
@@ -349,27 +364,41 @@ impl Workspace {
         out
     }
 
-    /** `animate`: when a node appears (it wasn't in the previous render), it fades and slides in from
-    `from` over `duration` ms, by easing its own opacity and offset; no wrapper, so layout is untouched. */
+    /** Enter animation: `animate` plays whenever the node appears; `motion.enter` plays for nodes that
+    appear because of a change (a setting saved, a toggle), never on plain re-renders. */
     fn apply_enter(&mut self, obj: &Map<String, Value>, st: &mut Map<String, Value>, id: &str, window: &mut Window) {
-        let Some(Value::Object(a)) = obj.get("animate") else { return };
-        if self.settings.theme.get("animations").and_then(Value::as_bool) == Some(false) {
+        if !self.motion.borrow().enabled || obj.get("motion").and_then(Value::as_bool) == Some(false) {
             return;
         }
         let generation = self.render_generation;
-        let entry = self.entered.entry(id.to_string()).or_insert((Instant::now(), generation));
-        if entry.1 + 1 < generation {
-            entry.0 = Instant::now();
-        }
-        entry.1 = generation;
-        let ms = a.get("duration").and_then(Value::as_u64).unwrap_or(160).max(1) as f32;
-        let t = (entry.0.elapsed().as_secs_f32() * 1000. / ms).min(1.);
+        let running = self.entered.get(id).filter(|(_, seen, _)| *seen + 1 >= generation).map(|(start, _, spec)| (*start, spec.clone()));
+        let (start, spec) = match running {
+            Some(r) => r,
+            None => {
+                let m = self.motion.borrow();
+                let appears = !m.was_visible(id);
+                let by_change = m.frame == m.trigger && m.has_history();
+                drop(m);
+                let spec = match obj.get("animate") {
+                    Some(a @ Value::Object(_)) => Some(a.clone()),
+                    _ if by_change => self.settings.motion.get("enter").filter(|e| e.is_object()).cloned(),
+                    _ => None,
+                };
+                match spec {
+                    Some(spec) if appears => (Instant::now(), spec),
+                    _ => return,
+                }
+            }
+        };
+        self.entered.insert(id.to_string(), (start, generation, spec.clone()));
+        let ms = spec.get("duration").and_then(Value::as_u64).unwrap_or(200).max(1) as f32;
+        let t = (start.elapsed().as_secs_f32() * 1000. / ms).min(1.);
         if t >= 1. {
             return;
         }
         window.request_animation_frame();
         let e = 1. - (1. - t).powi(4);
-        let from = a.get("from").cloned().unwrap_or(Value::Null);
+        let from = spec.get("from").cloned().unwrap_or(Value::Null);
         let f = |k: &str| from.get(k).and_then(Value::as_f64).map(|x| x as f32);
         if let Some(o) = f("opacity") {
             let base = st.get("opacity").and_then(Value::as_f64).unwrap_or(1.) as f32;
@@ -383,36 +412,82 @@ impl Workspace {
         }
     }
 
-    /** `transition`: numeric style keys listed there ease from their old value to the new one. */
-    fn apply_transitions(&mut self, obj: &Map<String, Value>, st: &mut Map<String, Value>, path: &str, window: &mut Window) {
-        let Some(Value::Object(tr)) = obj.get("transition") else { return };
-        let enabled = self.settings.theme.get("animations").and_then(Value::as_bool) != Some(false);
-        for (prop, ms) in tr {
-            let Some(target) = st.get(prop).and_then(Value::as_f64).map(|x| x as f32) else { continue };
-            let key = format!("{path}#{prop}");
-            let ms = ms.as_u64().unwrap_or(200);
-            let shown = match self.transitions.get(&key) {
-                Some(t) if (t.to - target).abs() < 0.01 => {
+    /** `transition` (and `motion.style` for common keys): numbers and colors ease from their old value
+    to the new one. Dragging and first appearances snap. */
+    fn apply_transitions(&mut self, obj: &Map<String, Value>, st: &mut Map<String, Value>, id: &str, window: &mut Window) {
+        let enabled = self.motion.borrow().enabled && obj.get("motion").and_then(Value::as_bool) != Some(false);
+        let mut keys: Vec<(String, u64)> = match obj.get("transition") {
+            Some(Value::Object(tr)) => tr.iter().map(|(k, ms)| (k.clone(), ms.as_u64().unwrap_or(200))).collect(),
+            _ => vec![],
+        };
+        if let Some(ms) = self.settings.motion.get("style").and_then(|s| s.get("duration")).and_then(Value::as_u64) {
+            for k in AUTO_KEYS {
+                if st.contains_key(*k) && !keys.iter().any(|(x, _)| x == k) {
+                    keys.push((k.to_string(), ms));
+                }
+            }
+        }
+        let generation = self.render_generation;
+        let snap = !enabled || self.drag.is_some();
+        for (prop, ms) in keys {
+            let Some(v) = st.get(&prop) else { continue };
+            let (target, color) = match v {
+                Value::Number(n) => (vec![n.as_f64().unwrap_or(0.) as f32], false),
+                Value::String(_) => match style::color(v, &self.settings.theme) {
+                    Some(c) => {
+                        let r = Rgba::from(c);
+                        (vec![r.r, r.g, r.b, r.a], true)
+                    }
+                    None => continue,
+                },
+                _ => continue,
+            };
+            let key = format!("{id}#{prop}");
+            let shown = match self.transitions.get_mut(&key) {
+                Some(t) if t.seen + 1 >= generation && !snap => {
+                    t.seen = generation;
+                    if t.to.len() == target.len() && t.to.iter().zip(&target).any(|(a, b)| (a - b).abs() > 0.001) {
+                        let (now, _) = t.value();
+                        *t = Transition { from: now, to: target, start: Instant::now(), duration: Duration::from_millis(ms), seen: generation };
+                    }
                     let (v, running) = t.value();
                     if running {
                         window.request_animation_frame();
                     }
                     v
                 }
-                Some(t) if enabled => {
-                    let (v, _) = t.value();
-                    self.transitions.insert(key.clone(), Transition { from: v, to: target, start: Instant::now(), duration: Duration::from_millis(ms) });
-                    window.request_animation_frame();
-                    v
-                }
                 _ => {
-                    self.transitions.insert(key.clone(), Transition { from: target, to: target, start: Instant::now(), duration: Duration::ZERO });
+                    self.transitions.insert(key, Transition { from: target.clone(), to: target.clone(), start: Instant::now(), duration: Duration::ZERO, seen: generation });
                     target
                 }
             };
-            st.insert(prop.clone(), Value::from(shown as f64));
+            let value = if color {
+                let b = |x: f32| (x.clamp(0., 1.) * 255.).round() as u8;
+                Value::String(format!("#{:02x}{:02x}{:02x}{:02x}", b(shown[0]), b(shown[1]), b(shown[2]), b(shown[3])))
+            } else {
+                Value::from(shown[0] as f64)
+            };
+            st.insert(prop, value);
         }
     }
+}
+
+/** The `[key]` segments of a path, so an `id` inside a `for` stays unique per item. */
+fn loop_keys(path: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for ch in path.chars() {
+        if ch == '[' {
+            depth += 1;
+        }
+        if depth > 0 {
+            out.push(ch);
+        }
+        if ch == ']' {
+            depth -= 1;
+        }
+    }
+    out
 }
 
 pub fn value_text(v: &Value) -> String {

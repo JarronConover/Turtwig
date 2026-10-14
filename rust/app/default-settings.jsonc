@@ -37,7 +37,19 @@
     "success": "#3fb950"
   },
 
+  // How things move. move: nodes glide to new positions after a change (give a node an `id` so it
+  // glides even when moved to a different parent). enter: how nodes that appear after a change come
+  // in. style: colors and sizes ease. Set "enabled": false to turn all motion off.
+  "motion": {
+    "enabled": true,
+    "move": { "duration": 320, "easing": "spring" },
+    "enter": { "from": { "opacity": 0, "y": 8 }, "duration": 260 },
+    "style": { "duration": 180 }
+  },
+
   "state": {
+    "designer_open": false,
+    "designer_width": 420,
     "sidebar_open": true,
     "terminal_open": true,
     "sidebar_width": 339,
@@ -49,8 +61,9 @@
       "type": "row",
       "style": { "width": "full", "height": "full" },
       "children": [
-        { "type": "Sidebar", "if": ".state.sidebar_open" },
-        { "type": "MainArea", "style": { "grow": 1 } }
+        { "type": "Sidebar", "id": "sidebar", "if": ".state.sidebar_open" },
+        { "type": "MainArea", "id": "main-area", "style": { "grow": 1 } },
+        { "type": "DesignerPanel", "id": "designer", "if": ".state.designer_open" }
       ]
     }
   },
@@ -70,7 +83,8 @@
               "type": "row",
               "style": { "height": 44, "shrink": 0, "padding": [0, 0, 0, 88], "align": "center" },
               "children": [
-                { "type": "IconButton", "props": { "icon": "panel-left", "tooltip": "Hide sidebar  ⌘\\", "do": { "do": "state.toggle", "key": "sidebar_open" } } },
+                { "type": "IconButton", "id": "sidebar-toggle", "props": { "icon": "panel-left", "tooltip": "Hide sidebar  ⌘\\", "do": { "do": "state.toggle", "key": "sidebar_open" } } },
+                { "type": "DesignerButton", "id": "designer-button" },
                 { "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } }
               ]
             },
@@ -152,6 +166,87 @@
           "type": "resize_handle",
           "props": { "state": "sidebar_width", "axis": "x", "min": 220, "max": 700 },
           "style": { "position": "absolute", "top": 0, "right": -3, "width": 6, "height": "full" }
+        }
+      ]
+    },
+
+    "DesignerButton": {
+      "about": "The painter's palette: opens the designer, a chat with an agent that redesigns this app live.",
+      "type": "box",
+      "style": {
+        "width": 26, "height": 26, "shrink": 0, "radius": 6, "align": "center", "justify": "center", "cursor": "pointer",
+        "background": "{{ if .state.designer_open then \"@selection\" else \"transparent\" end }}",
+        "hover": { "background": "@hover" }, "active": { "opacity": 0.7 }
+      },
+      "tooltip": "Redesign the app with an agent  ⌘⇧D",
+      "on": { "click": { "do": "state.toggle", "key": "designer_open" } },
+      "children": [
+        { "type": "icon", "props": { "name": "palette", "size": 15, "color": "{{ if .state.designer_open then \"@accent\" else \"@text_muted\" end }}", "spin": "{{ .designer.working }}" } }
+      ]
+    },
+
+    "DesignerPanel": {
+      "about": "The designer chat on the right: ask for any change and watch it happen. Resizable (state.designer_width).",
+      "type": "stack",
+      "style": { "width": "{{ .state.designer_width }}", "height": "full", "shrink": 0, "padding": [0, 14, 14, 0] },
+      "animate": { "from": { "opacity": 0, "x": 28 }, "duration": 220 },
+      "children": [
+        {
+          "type": "column",
+          "style": { "width": "full", "height": "full" },
+          "children": [
+            {
+              "type": "row",
+              "style": { "height": 44, "shrink": 0, "gap": 8, "align": "center", "padding": [0, 4] },
+              "on": { "mouse_down": "window.move", "double_click": "window.zoom" },
+              "children": [
+                { "type": "icon", "props": { "name": "palette", "size": 15, "color": "@accent" } },
+                { "type": "text", "props": { "text": "Designer" }, "style": { "font_size": 13, "font_weight": "semibold" } },
+                { "if": ".designer.working", "type": "spinner", "props": { "size": "xsmall", "color": "@age" } },
+                { "type": "spacer" },
+                { "type": "IconButton", "props": { "icon": "undo-2", "tooltip": "Undo the last change", "do": "settings.undo" } },
+                { "type": "IconButton", "props": { "icon": "square-pen", "tooltip": "New designer conversation", "do": "designer.reset" } },
+                { "type": "IconButton", "props": { "icon": "x", "tooltip": "Close", "do": { "do": "state.set", "key": "designer_open", "value": false } } }
+              ]
+            },
+            {
+              "type": "column",
+              "style": { "grow": 1, "min_height": 0, "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" },
+              "children": [
+                {
+                  "type": "transcript",
+                  "props": { "chat": "designer", "empty": "Ask for any change and watch it happen: move the terminal beside the chat, show worktrees as cards, add a button that…" },
+                  "style": { "grow": 1, "min_height": 0, "padding": [0, 4] }
+                },
+                {
+                  "if": ".designer.working",
+                  "id": "designer-progress",
+                  "type": "row",
+                  "style": { "gap": 8, "align": "center", "padding": [0, 16, 6, 16], "font_size": 12.5, "color": "@text_muted" },
+                  "children": [
+                    { "type": "spinner", "props": { "size": "xsmall", "color": "@accent" } },
+                    { "type": "text", "props": { "text": "{{ if .designer.activity == \"\" then \"Working\" else .designer.activity end }}…" }, "style": { "truncate": true } }
+                  ]
+                },
+                {
+                  "type": "box",
+                  "style": { "shrink": 0, "padding": [4, 12, 12, 12] },
+                  "children": [
+                    {
+                      "type": "box",
+                      "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6 },
+                      "children": [{ "type": "composer", "props": { "chat": "designer" } }]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "resize_handle",
+          "props": { "state": "designer_width", "axis": "x", "invert": true, "min": 300, "max": 900 },
+          "style": { "position": "absolute", "top": 0, "left": -3, "width": 6, "height": "full" }
         }
       ]
     },
@@ -265,10 +360,10 @@
       "type": "column",
       "style": { "height": "full", "min_width": 0, "padding": [0, 14, 14, 0] },
       "children": [
-        { "type": "Toolbar" },
-        { "type": "ChatCard", "style": { "grow": 1, "min_height": 160 } },
-        { "type": "BranchBar" },
-        { "if": ".state.terminal_open", "type": "TerminalCard" }
+        { "type": "Toolbar", "id": "toolbar" },
+        { "type": "ChatCard", "id": "chat-card", "style": { "grow": 1, "min_height": 160 } },
+        { "type": "BranchBar", "id": "branch-bar" },
+        { "if": ".state.terminal_open", "type": "TerminalCard", "id": "terminal-card" }
       ]
     },
 
@@ -277,7 +372,8 @@
       "type": "row",
       "style": { "height": 44, "shrink": 0, "gap": 8, "align": "center", "padding": [0, 0, 0, "{{ if .state.sidebar_open then 23 else 88 end }}"] },
       "children": [
-        { "if": ".state.sidebar_open | not", "type": "IconButton", "props": { "icon": "panel-left", "size": 24, "tooltip": "Show sidebar  ⌘\\", "do": { "do": "state.toggle", "key": "sidebar_open" } }, "style": { "margin": [0, 8, 0, 0] } },
+        { "if": ".state.sidebar_open | not", "type": "IconButton", "id": "sidebar-toggle", "props": { "icon": "panel-left", "size": 24, "tooltip": "Show sidebar  ⌘\\", "do": { "do": "state.toggle", "key": "sidebar_open" } } },
+        { "if": ".state.sidebar_open | not", "type": "DesignerButton", "id": "designer-button", "style": { "margin": [0, 8, 0, 0] } },
         { "type": "box", "style": { "width": 6, "height": 6, "radius": 3, "background": "{{ if .selected.chat.alive then \"@success\" else \"@text_faint\" end }}" } },
         {
           "if": ".selected.worktree",
@@ -319,6 +415,16 @@
               "type": "transcript",
               "props": { "empty": "{{ if .selected.worktree then \"No chat in this worktree yet. Press + above to start one.\" else \"Select a worktree\" end }}" },
               "style": { "grow": 1, "min_height": 0 }
+            },
+            {
+              "if": ".selected.chat.state == \"working\"",
+              "id": "chat-progress",
+              "type": "row",
+              "style": { "gap": 8, "align": "center", "padding": [0, 28, 8, 28], "width": "full", "max_width": 916, "self": "center", "font_size": 12.5, "color": "@text_muted" },
+              "children": [
+                { "type": "spinner", "props": { "size": "xsmall", "color": "@claude" } },
+                { "type": "text", "props": { "text": "{{ if .selected.chat.activity == \"\" then \"Working\" else .selected.chat.activity end }}…" }, "style": { "truncate": true } }
+              ]
             },
             { "type": "waiting", "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" } },
             {
@@ -445,6 +551,7 @@
     { "key": "cmd-\\", "do": { "do": "state.toggle", "key": "sidebar_open" } },
     { "key": "cmd-j", "do": { "do": "state.toggle", "key": "terminal_open" } },
     { "key": "cmd-,", "do": "settings.open" },
+    { "key": "cmd-shift-d", "do": { "do": "state.toggle", "key": "designer_open" } },
     { "key": "cmd-n", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
     { "key": "cmd-]", "do": { "do": "select", "offset": 1 } },
     { "key": "cmd-[", "do": { "do": "select", "offset": -1 } },
@@ -452,7 +559,8 @@
   ],
 
   "commands": [
-    { "label": "Customize Agent Box with an agent…", "do": { "do": "prompt", "title": "What should change? (an agent edits your settings)", "then": { "do": "settings.agent", "request": "{{ .input }}" } } },
+    { "label": "Redesign the app (open the designer)", "do": { "do": "state.set", "key": "designer_open", "value": true } },
+    { "label": "Undo the last design change", "do": "settings.undo" },
     { "label": "New chat here", "if": ".selected.worktree", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
     { "label": "New orchestrator chat in redo", "do": { "do": "chat.new", "repo": "redo", "kind": "orchestrator" } },
     { "label": "New feature chat in redo…", "do": { "do": "prompt", "title": "Branch name", "then": { "do": "chat.new", "repo": "redo", "kind": "feature", "branch": "{{ .input }}" } } },
@@ -480,6 +588,7 @@
     "collapse_tool_calls": true,
     "enter_sends": true,
     "placeholder": "Message the agent…",
+    "designer_placeholder": "Describe a change to the app…",
     "list": { "gap": 14, "padding": [18, 28], "width": "full", "max_width": 860, "self": "center" },
     "user": { "padding": 10, "radius": 8, "background": "@user_bubble", "border": 1, "border_color": "@line", "font_size": 14 },
     "assistant": { "font_size": 14 },
@@ -489,7 +598,7 @@
     "tool_summary": { "font_size": 13, "color": "@text_muted" },
     "tool_detail": { "margin": [0, 0, 0, 15], "padding": 10, "radius": 6, "background": "@code_bg", "font_family": "@font_mono", "font_size": 12, "color": "@age" },
     "notice": { "font_size": 12.5, "color": "@danger" },
-    "empty": { "color": "@text_muted" },
+    "empty": { "color": "@text_muted", "width": "full", "padding": [0, 32], "text_align": "center", "line_height": 1.5 },
     "waiting": { "padding": 12, "radius": 10, "border": 1, "border_color": "@warning", "background": "@waiting_bg", "font_size": 13 },
     "waiting_option": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "background": "@pill", "hover": { "background": "@pill_hover" }, "font_size": 12.5, "align": "center" }
   },

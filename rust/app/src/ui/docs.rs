@@ -17,7 +17,13 @@ full at the end of this file. Change anything by overriding it in your settings 
   (⌘, or the gear) or with any editor; the app reloads on save.
 - It is merged over the defaults: objects merge key by key, `null` removes a default key, other arrays
   replace the default, except `keys` (merged by `key`) and `commands` (merged by `label`).
-- Problems (bad JSON, failing expressions, unknown actions) show at the top of the settings panel.
+- Problems (bad JSON, failing expressions, unknown actions) show at the top of the settings panel and
+  are written to `problems.txt` next to the settings file (it says `No problems.` when all is well).
+  Agents: read it after each save.
+- The designer (the palette button at the top left, ⌘⇧D) is a chat with an agent that edits this file
+  while you watch. Each request first snapshots the file into `history/`; `settings.undo` restores.
+- Scripts and agents can drive the app: write an action (or a list of actions) to `run.json` next to
+  the settings file; the app runs it once and deletes the file.
 - UI state (selection, toggles, sizes) persists in `ui-state.json` next to the settings file.
 
 ## Top-level keys
@@ -30,6 +36,7 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `state` | UI state and starting values. Read as `.state.key`; change with `state.set` / `state.toggle` / `state.cycle`. |
 | `keys` | `[{"key": "cmd-k", "do": <action>, "if": <jq>}]`. Key names: `cmd`, `ctrl`, `alt`, `shift` + `-` + key (`cmd-shift-p`, `ctrl-\``, `cmd-\\`). |
 | `commands` | Command palette entries: `[{"label", "do", "if"}]`. Worktrees are added automatically. |
+| `motion` | How things move: `move` (glide to new positions), `enter` (how new nodes come in), `style` (colors and sizes ease), `enabled`. See Motion. |
 | `chat` | Look of the built-in transcript, composer, and waiting card: style objects per part. |
 | `terminal` | Terminal font, size, padding, colors. |
 | `connection` | The box: `ssh_host`, `daemon` path, `retry_seconds`. |
@@ -52,7 +59,8 @@ A node is an object (or a string, shorthand for a text node, or an array of node
   "menu": [ {"label": "Rename", "do": {"do": "section.rename", "id": "{{ .s.id }}"}}, {"separator": true} ],
   "tooltip": "{{ .w.branch }}",
   "animate": { "from": {"opacity": 0, "y": 6}, "duration": 160 },   // plays when the node first appears
-  "transition": { "width": 200 },     // numeric style keys ease to their new value (ms)
+  "transition": { "width": 200 },     // these style keys (numbers or colors) ease to their new value (ms)
+  "motion": false,                    // opt this node out of gliding, enter animation, and style easing
   "children": [ ... ]
 }
 ```
@@ -60,6 +68,25 @@ A node is an object (or a string, shorthand for a text node, or an array of node
 Any string anywhere in `props`, `style`, `on`, `menu`, or `tooltip` may contain `{{ jq }}` templates.
 A string that is exactly one template yields the raw value (a number, bool, object), so
 `"width": "{{ .state.sidebar_width }}"` is a number.
+
+## Motion
+
+Changes animate instead of jumping:
+
+- **Glide (`motion.move`):** when a change (a settings save, an action, new data) moves a node, it
+  slides from its old position to its new one: `{"duration": 320, "easing": "spring" | "ease_out" | "linear"}`.
+  Identity is the node's `id`, or its position in the tree when it has none. **Give a node an `id`
+  and keep it when moving the node somewhere else**, so it glides there instead of disappearing and
+  reappearing. Inside a `for`, ids are made unique per item automatically. An `id` on a component
+  instance (`{"type": "Sidebar", "id": "sidebar"}`) applies to the component.
+- **Enter (`motion.enter`):** nodes that appear because of a change come in with
+  `{"from": {"opacity": 0, "x": 0, "y": 8}, "duration": 260}`. A node's own `animate` overrides this
+  and plays every time the node appears, not only after changes.
+- **Style (`motion.style`):** `{"duration": 180}` eases colors, opacity, radius, sizes, gaps, and
+  offsets whenever they change (a theme edit, hover-free state changes). `transition` on a node sets
+  per-key durations.
+- Scrolling, window resizing, and dragging a resize handle never animate.
+- `"motion": {"enabled": false}` turns everything off; `"motion": false` on a node opts it out.
 
 ## Expressions (jq)
 
@@ -81,7 +108,8 @@ Examples:
 | `.projects[]` | `{name, repo, hue, letter, items: [worktree]}`: repos with their worktrees outside any section |
 | `.sections[]` | `{id, name, collapsed, items: [worktree]}` |
 | `.worktrees[]` | every worktree: `{id, path, branch, title, emoji, label, project, repo, hue, letter, is_primary, uncommitted, unpushed, behind, mr: {number, url, state, checks} \| null, age, age_text, status, section: {id, name} \| null, selected, chats: [chat]}`. `status` is one of working, waiting, merged, failing, pending, dirty, behind, idle. |
-| `.chats[]` | every chat: `{id, name, kind, host, status, dir, branch, rc_url, alive, state, waiting_on, last_activity, age_text, active, tmux}`. `state` is idle, working, waiting, or stopped; `host` is box or mac. |
+| `.chats[]` | every chat: `{id, name, kind, host, status, dir, branch, rc_url, alive, state, waiting_on, last_activity, age_text, active, tmux}`. `state` is idle, working, waiting, or stopped; `host` is box or mac; `activity` is a short line on what a working agent is doing now ("Reading settings.jsonc", "Thinking", "Writing"), empty otherwise (filled for chats whose transcript is open). |
+| `.designer` | `{working, activity, has_messages}` for the designer chat |
 | `.selected.worktree` | the selected worktree (or null) |
 | `.selected.chat` | its active chat (or null) |
 | `.selected.chats` | all chats in the selected worktree |
@@ -94,6 +122,9 @@ Examples:
 
 const RECIPES: &str = r##"
 ## Recipes
+
+**Move the terminal beside the chat:** override `components.MainArea` so the chat card and the
+terminal card share a `row`; keep their ids (`chat-card`, `terminal-card`) so they glide into place.
 
 **Hide the terminal by default:** `{"state": {"terminal_open": false}}`
 

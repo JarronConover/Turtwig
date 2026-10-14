@@ -25,6 +25,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("worktree.test_local", "{branch}: check the branch out on the Mac with the box's latest work"),
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
     ("palette.open", "the command palette"),
+    ("designer.send", "{text}: ask the designer (a local agent that edits these settings live) for a change"),
+    ("designer.reset", "end the designer conversation and start fresh"),
+    ("settings.undo", "put the settings file back as it was before the last designer request (repeatable)"),
     ("settings.open / settings.reload / settings.docs", "edit, reload, or read the settings reference"),
     ("notify", "{text}: a notification"),
     ("open", "{url}: open a URL or app link"),
@@ -186,6 +189,18 @@ impl Workspace {
                 });
             }
             "palette.open" => self.open_palette(window, cx),
+            "designer.send" => {
+                if let Some(t) = s("text") {
+                    self.designer_send(t, cx);
+                }
+            }
+            "designer.reset" => self.designer_reset(cx),
+            "settings.undo" => {
+                use gpui_kit::component::WindowExt as _;
+                if !crate::designer::undo() {
+                    window.push_notification("Nothing to undo", cx);
+                }
+            }
             "settings.open" => self.open_settings(window, cx),
             "settings.reload" => self.reload_settings(cx),
             "settings.docs" => {
@@ -220,6 +235,7 @@ impl Workspace {
             "app.quit" => cx.quit(),
             other => self.exprs.note(format!("unknown action `{other}`")),
         }
+        self.pending_motion = true;
         cx.notify();
     }
 }
