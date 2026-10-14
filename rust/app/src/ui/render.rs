@@ -310,20 +310,33 @@ impl Workspace {
             if let Some(spec) = on.get("drop_item") {
                 let drop_key = obj.get("drop_key").map(|k| value_text(&self.exprs.resolve(k, ctx))).unwrap_or_else(|| id.clone());
                 let zones = self.exprs.resolve(obj.get("drop_zones").unwrap_or(&Value::Null), ctx);
-                let (k2, z2) = (drop_key.clone(), zones.clone());
+                let specs: std::rc::Rc<Vec<(Vec<String>, Value, Option<String>)>> = std::rc::Rc::new(
+                    match spec {
+                        Value::Array(list) => list.clone(),
+                        one => vec![one.clone()],
+                    }
+                    .iter()
+                    .map(|s| {
+                        let action = self.exprs.resolve_action(s.get("do").unwrap_or(&Value::Null), ctx);
+                        (accepted(Some(s)), action, s.get("valid").and_then(Value::as_str).map(str::to_string))
+                    })
+                    .collect(),
+                );
+                let (k2, z2, specs2, ctx2) = (drop_key.clone(), zones.clone(), specs.clone(), ctx.clone());
                 el = el.on_drag_move::<DragItem>(cx.listener(move |ws, e: &DragMoveEvent<DragItem>, _, cx| {
-                    let kind = e.drag(cx).kind.clone();
+                    let item = e.drag(cx).clone();
                     let mine = ws.drop_hint.as_ref().is_some_and(|h| h.key == k2);
-                    if !e.bounds.contains(&e.event.position) {
+                    let clear = |ws: &mut Workspace, cx: &mut Context<Workspace>| {
                         if mine {
                             ws.drop_hint = None;
                             cx.notify();
                         }
-                        return;
-                    }
+                    };
+                    let spec = specs2.iter().find(|(accept, _, _)| accept.is_empty() || accept.contains(&item.kind));
+                    let Some((_, _, valid)) = spec.filter(|_| e.bounds.contains(&e.event.position)) else { return clear(ws, cx) };
                     let mode = match &z2 {
                         Value::String(m) => m.clone(),
-                        Value::Object(by_kind) => by_kind.get(&kind).map(value_text).unwrap_or_else(|| "inside".into()),
+                        Value::Object(by_kind) => by_kind.get(&item.kind).map(value_text).unwrap_or_else(|| "inside".into()),
                         _ => "inside".into(),
                     };
                     let rel = (f32::from(e.event.position.y - e.bounds.origin.y) / f32::from(e.bounds.size.height).max(1.)).clamp(0., 1.);
@@ -332,23 +345,25 @@ impl Workspace {
                         "edges+inside" => if rel < 0.25 { "before" } else if rel > 0.75 { "after" } else { "inside" },
                         _ => "inside",
                     };
-                    let hint = DropHint { key: k2.clone(), zone: zone.into(), kind };
+                    if let Some(code) = valid {
+                        let c = with(&ctx2, vec![("dragged".into(), to_val(&item.value)), ("zone".into(), to_val(&Value::from(zone)))]);
+                        if !ws.exprs.truthy(code, &c) {
+                            return clear(ws, cx);
+                        }
+                    }
+                    let hint = DropHint { key: k2.clone(), zone: zone.into(), kind: item.kind.clone() };
                     if ws.drop_hint.as_ref() != Some(&hint) {
                         ws.drop_hint = Some(hint);
                         cx.notify();
                     }
                 }));
-                let specs: Vec<(Vec<String>, Value)> = match spec {
-                    Value::Array(list) => list.iter().map(|s| (accepted(Some(s)), self.exprs.resolve_action(s.get("do").unwrap_or(&Value::Null), ctx))).collect(),
-                    one => vec![(accepted(Some(one)), self.exprs.resolve_action(one.get("do").unwrap_or(one), ctx))],
-                };
                 el = el.on_drop(cx.listener(move |ws, item: &DragItem, window, cx| {
-                    let Some((_, action)) = specs.iter().find(|(accept, _)| accept.is_empty() || accept.contains(&item.kind)) else { return };
+                    let Some((_, action, _)) = specs.iter().find(|(accept, _, _)| accept.is_empty() || accept.contains(&item.kind)) else { return };
+                    let Some(hint) = ws.drop_hint.take().filter(|h| h.key == drop_key) else { return };
                     let mut action = action.clone();
-                    let zone = ws.drop_hint.take().filter(|h| h.key == drop_key).map(|h| h.zone).unwrap_or_else(|| "inside".into());
                     if let Value::Object(o) = &mut action {
                         o.insert("dragged".into(), item.value.clone());
-                        o.insert("zone".into(), Value::String(zone));
+                        o.insert("zone".into(), Value::String(hint.zone));
                     }
                     ws.run_action(&action, window, cx);
                     cx.stop_propagation();

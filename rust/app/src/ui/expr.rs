@@ -167,4 +167,29 @@ mod tests {
         assert_eq!(to_json(&e.first("if false then 1 elif true then 2 else 3 end", &ctx)), json!(2));
         assert!(e.errors.borrow().is_empty());
     }
+
+    #[test]
+    fn drop_validity_expressions_evaluate() {
+        let e = Exprs::default();
+        let ctx = to_val(&json!({
+            "projects": [{"repo": "redo", "items": [{"path": "a"}, {"path": "b"}, {"path": "c"}]}, {"repo": "data", "items": [{"path": "d"}]}],
+            "sections": [],
+            "worktrees": [{"path": "a", "repo": "redo", "section": null}, {"path": "b", "repo": "redo", "section": null}, {"path": "c", "repo": "redo", "section": null}, {"path": "d", "repo": "data", "section": null}],
+        }));
+        let valid = ".dragged as $d | .props.w as $t | .zone as $z | (if $t.section then [.sections[] | select(.id == $t.section.id) | .items[].path] else [.projects[] | select(.repo == $t.repo) | .items[].path] end) as $list | ($list | index($t.path)) as $ti | ($list | index($d)) as $di | $d != $t.path and ($t.section != null or ([.worktrees[] | select(.path == $d)][0].repo == $t.repo)) and ($di == null or ($z == \"before\" and $di != $ti - 1) or ($z == \"after\" and $di != $ti + 1))";
+        let check = |dragged: &str, target: &str, repo: &str, zone: &str| {
+            let c = with(&ctx, vec![
+                ("dragged".into(), to_val(&json!(dragged))),
+                ("zone".into(), to_val(&json!(zone))),
+                ("props".into(), to_val(&json!({"w": {"path": target, "repo": repo, "section": null}}))),
+            ]);
+            e.truthy(valid, &c)
+        };
+        assert!(check("a", "c", "redo", "before"));
+        assert!(!check("a", "b", "redo", "before"), "a is already right above b");
+        assert!(!check("a", "a", "redo", "after"), "onto itself");
+        assert!(!check("a", "d", "data", "before"), "another project's row");
+        assert!(check("c", "a", "redo", "before"));
+        assert!(e.errors.borrow().is_empty(), "{:?}", e.errors.borrow());
+    }
 }
