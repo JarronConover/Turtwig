@@ -4,6 +4,7 @@ own output on the Mac, the agent-box shim's on the box."""
 
 import os
 import re
+import subprocess
 from pathlib import Path
 
 PROJECTS = Path.home() / ".claude" / "projects"
@@ -12,12 +13,20 @@ ITEM_KEYS = ("id", "title", "branch", "path", "worktree", "is_primary", "agent_s
 
 
 def last_activity(path):
-    """Newest Claude transcript for this worktree, as a unix time."""
-    d = PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(path))
-    try:
-        return max(p.stat().st_mtime for p in d.glob("*.jsonl"))
-    except (OSError, ValueError):
-        return None
+    """Newest Claude transcript for this worktree, as a unix time. Sessions can
+    record the path as given, resolved, or under super.engineering's new name
+    for its storage (~/.super.engineering links to ~/.superconductor)."""
+    paths = {path, os.path.realpath(path)}
+    paths |= {p.replace("/.superconductor/", "/.super.engineering/") for p in list(paths)}
+    times = []
+    for p in paths:
+        d = PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", p)
+        times += [f.stat().st_mtime for f in d.glob("*.jsonl")] if d.is_dir() else []
+    if times:
+        return max(times)
+    # No chat of its own (a dispatcher leg): the last commit there.
+    r = subprocess.run(["git", "-C", path, "log", "-1", "--format=%ct"], capture_output=True, text=True)
+    return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
 
 
 def walk(o):
