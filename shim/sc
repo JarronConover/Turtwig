@@ -114,7 +114,7 @@ def items(store):
         for path, branch, primary in worktrees(repo):
             meta = store.data["worktrees"].get(real(path), {})
             out.append({
-                "id": item_id(path, primary), "project_id": repo, "project_name": repo,
+                "id": item_id(path, primary), "project_id": repo, "project_name": REPOS[repo].name,
                 "worktree": "main" if primary else Path(path).name,
                 "title": meta.get("label") or branch or Path(path).name,
                 "path": path, "branch": branch, "is_primary": primary, "selected": False, "visible": True,
