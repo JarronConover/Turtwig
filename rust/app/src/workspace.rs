@@ -64,6 +64,8 @@ pub struct Workspace {
     expanded_tools: HashSet<String>,
     collapsed: HashSet<String>,
     sidebar_visible: bool,
+    /** A chat just created; selected as soon as the model lists it. */
+    pending_select: Option<String>,
     terminal_visible: bool,
     sizes: HashMap<String, f32>,
     resizing: Option<Resize>,
@@ -126,6 +128,7 @@ impl Workspace {
             expanded_tools: HashSet::new(),
             collapsed: HashSet::new(),
             sidebar_visible: true,
+            pending_select: None,
             terminal_visible: true,
             sizes,
             resizing: None,
@@ -199,6 +202,15 @@ impl Workspace {
             }
             Incoming::Event(Event::Model(m)) => {
                 self.model = m;
+                if let Some(id) = self.pending_select.clone() {
+                    let found = self.model.chats.iter().find(|c| c.id == id).and_then(|c| c.dir.clone());
+                    if let Some(dir) = found {
+                        let path = self.all_worktrees().iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone()).unwrap_or(dir);
+                        self.active_chat.insert(path.clone(), id);
+                        self.selected = Some(path);
+                        self.pending_select = None;
+                    }
+                }
                 if self.selected.as_ref().map_or(true, |p| self.worktree(p).is_none()) {
                     self.selected = self.all_worktrees().first().map(|w| w.path.clone());
                 }
@@ -333,9 +345,40 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_settings(&mut self, _: &OpenSettings, _: &mut Window, _: &mut Context<Self>) {
+    /** The settings file in an editor sheet; Save writes it and the change applies at once. */
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::input::{Editor, EditorState};
+        use gpui_kit::component::{Placement, WindowExt as _};
         let _ = settings::write_schema();
-        let _ = std::process::Command::new("open").arg("-t").arg(settings::path()).spawn();
+        let text = std::fs::read_to_string(settings::path()).unwrap_or_default();
+        let editor = cx.new(|cx| EditorState::new(window, cx).language("json").default_value(text));
+        let view = cx.entity();
+        window.open_sheet_at(Placement::Right, cx, move |sheet, _, cx| {
+            let (editor, view) = (editor.clone(), view.clone());
+            let error = view.read(cx).settings_error.clone();
+            sheet
+                .title("Settings")
+                .size(px(720.))
+                .child(
+                    v_flex()
+                        .size_full()
+                        .gap_2()
+                        .child(div().text_size(px(12.)).text_color(rgb(0x898a8e)).child(
+                            "Your overrides, merged over the built-in defaults. The full reference is in SETTINGS.md next to this file.",
+                        ))
+                        .when_some(error, |d, e| d.child(div().text_size(px(12.)).text_color(rgb(0xd8566c)).child(e)))
+                        .child(div().flex_1().min_h_0().child(Editor::new(&editor).h_full())),
+                )
+                .footer(
+                    h_flex().gap_2().justify_end().child(
+                        gpui_kit::component::button::Button::new("save-settings").label("Save").on_click(move |_, _, cx| {
+                            let text = editor.read(cx).value().to_string();
+                            let _ = std::fs::write(settings::path(), text);
+                            view.update(cx, |ws, cx| ws.reload_settings(cx));
+                        }),
+                    ),
+                )
+        });
     }
 
     fn reload(&mut self, _: &ReloadSettings, _: &mut Window, cx: &mut Context<Self>) {
@@ -350,6 +393,43 @@ impl Workspace {
         let i = self.selected.as_ref().and_then(|s| paths.iter().position(|p| p == s)).unwrap_or(0) as isize;
         let next = (i + delta).rem_euclid(paths.len() as isize) as usize;
         self.select(paths[next].clone(), window, cx);
+    }
+
+    /** Starts a chat right away: in `dir` (an existing worktree), or with a fresh worktree of its own in `repo`. */
+    fn new_chat_now(&mut self, dir: Option<String>, repo: Option<String>, cx: &mut Context<Self>) {
+        let fresh_worktree = dir.is_none();
+        let call = Call::ChatNew {
+            name: "New chat".into(),
+            kind: if fresh_worktree { "orchestrator".into() } else { "primary".into() },
+            branch: None,
+            base: None,
+            dir: dir.clone(),
+            repo,
+            prompt: None,
+            model: None,
+        };
+        let remote = self.remote.clone();
+        self.status = "Starting a chat…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = remote.call(call).await;
+            this.update(cx, |ws, cx| {
+                match res {
+                    Ok(v) => {
+                        let out = v["stdout"].as_str().unwrap_or("");
+                        let mut parts = out.split_whitespace();
+                        if let Some(id) = parts.next() {
+                            ws.pending_select = Some(id.to_string());
+                        }
+                        ws.status = "Connected".into();
+                    }
+                    Err(e) => ws.status = format!("Couldn't start the chat: {e}").into(),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn new_chat_dialog(&mut self, dir: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -488,7 +568,8 @@ impl Workspace {
         use gpui_kit::component::WindowExt as _;
         type Run = std::rc::Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
         let mut entries: Vec<(String, Run)> = vec![
-            ("New chat".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| { let d = ws.selected.clone(); ws.new_chat_dialog(d, w, cx) })),
+            ("New chat".into(), std::rc::Rc::new(|ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| { let d = ws.selected.clone(); ws.new_chat_now(d, None, cx) })),
+            ("New chat with a branch…".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| { let d = ws.selected.clone(); ws.new_chat_dialog(d, w, cx) })),
             ("New section".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| ws.new_section(None, w, cx))),
             ("Toggle sidebar".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| ws.toggle_sidebar(&ToggleSidebar, w, cx))),
             ("Toggle terminal".into(), std::rc::Rc::new(|ws: &mut Workspace, w: &mut Window, cx: &mut Context<Workspace>| ws.toggle_terminal(&ToggleTerminal, w, cx))),
@@ -774,8 +855,8 @@ impl Workspace {
                 })));
                 m = m.separator();
                 let p = path_for_menu.clone();
-                m = m.item(PopupMenuItem::new("New chat here").on_click(window.listener_for(&view, move |ws: &mut Workspace, _, window, cx| {
-                    ws.new_chat_dialog(Some(p.clone()), window, cx)
+                m = m.item(PopupMenuItem::new("New chat here").on_click(window.listener_for(&view, move |ws: &mut Workspace, _, _, cx| {
+                    ws.new_chat_now(Some(p.clone()), None, cx)
                 })));
                 for (cid, cname) in chats.iter() {
                     let cid = cid.clone();
@@ -804,7 +885,7 @@ impl Workspace {
         if sb.show_projects {
             list = list.child(self.label("Projects", None, cx));
             for p in self.model.projects.clone() {
-                let primary = p.items.iter().find(|i| i.is_primary).map(|i| i.path.clone());
+                let repo_key = p.repo.clone();
                 list = list.child(
                     h_flex()
                         .id(SharedString::from(format!("proj:{}", p.name)))
@@ -823,7 +904,7 @@ impl Workspace {
                                 .justify_center()
                                 .hover(|s| s.bg(parse_color(&t.hover)))
                                 .child(Icon::new(IconName::Plus).xsmall().text_color(parse_color(&t.text_muted)))
-                                .on_click(cx.listener(move |ws, _, window, cx| ws.new_chat_dialog(primary.clone(), window, cx))),
+                                .on_click(cx.listener(move |ws, _, _, cx| ws.new_chat_now(None, Some(repo_key.clone()), cx))),
                         ),
                 );
                 for w in &p.items {
@@ -877,7 +958,7 @@ impl Workspace {
                     .gap(px(4.))
                     .child(self.footer_button("settings", IconName::Settings, cx.listener(|ws, _, w, cx| ws.open_settings(&OpenSettings, w, cx))))
                     .child(self.footer_button("new-section", IconName::Folder, cx.listener(|ws, _, w, cx| ws.new_section(None, w, cx))))
-                    .child(self.footer_button("new-chat", IconName::Plus, cx.listener(|ws, _, w, cx| ws.new_chat_dialog(None, w, cx))))
+                    .child(self.footer_button("new-chat", IconName::Plus, cx.listener(|ws, _, _, cx| { let d = ws.selected.clone(); ws.new_chat_now(d, None, cx) })))
                     .child(div().flex_1())
                     .when_some(self.settings_error.clone(), |d, e| {
                         d.child(div().id("settings-error").text_size(px(11.)).text_color(parse_color(&t.danger)).child("settings error").tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(e.clone()).build(w, cx)))
@@ -972,7 +1053,22 @@ impl Workspace {
         let ssh_host = self.model.ssh_host.clone();
         let mut bar = h_flex()
             .gap(px(8.))
-            .pl(px(if self.sidebar_visible { 23. } else { 104. }))
+            .pl(px(if self.sidebar_visible { 23. } else { 88. }))
+            .when(!self.sidebar_visible, |d| {
+                d.child(
+                    div()
+                        .id("show-sidebar")
+                        .size(px(24.))
+                        .mr(px(8.))
+                        .rounded(px(5.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| s.bg(parse_color(&t.hover)))
+                        .child(Icon::new(IconName::PanelLeft).small().text_color(parse_color(&t.text_muted)))
+                        .on_click(cx.listener(|ws, _, w, cx| ws.toggle_sidebar(&ToggleSidebar, w, cx))),
+                )
+            })
             .child(div().size(px(6.)).rounded_full().bg(if chat.as_ref().map(|c| c.alive).unwrap_or(false) { parse_color(&t.success) } else { parse_color(&t.text_faint) }));
         if let Some(w) = &w {
             let letter = w.project.chars().next().unwrap_or('R').to_ascii_uppercase().to_string();
@@ -1042,7 +1138,7 @@ impl Workspace {
                 .text_color(parse_color(&t.text_muted))
                 .hover(|s| s.text_color(parse_color(&t.text)))
                 .child(Icon::new(IconName::Plus).xsmall())
-                .on_click(cx.listener(move |ws, _, window, cx| ws.new_chat_dialog(Some(dir.clone()), window, cx))),
+                .on_click(cx.listener(move |ws, _, _, cx| ws.new_chat_now(Some(dir.clone()), None, cx))),
         )
     }
 
@@ -1265,9 +1361,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::reload))
             .on_action(cx.listener(Self::palette))
-            .on_action(cx.listener(|ws, _: &NewChat, w, cx| {
+            .on_action(cx.listener(|ws, _: &NewChat, _, cx| {
                 let dir = ws.selected.clone();
-                ws.new_chat_dialog(dir, w, cx)
+                ws.new_chat_now(dir, None, cx)
             }))
             .on_action(cx.listener(|ws, _: &NextWorktree, w, cx| ws.step_worktree(1, w, cx)))
             .on_action(cx.listener(|ws, _: &PreviousWorktree, w, cx| ws.step_worktree(-1, w, cx)))
