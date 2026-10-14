@@ -16,11 +16,11 @@ use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-actions!(agent_box, [Palette, ToggleSidebar, OpenSettings, NewChat, ToggleTerminal, Reconnect, NextWorktree, PreviousWorktree, ReloadSettings]);
+actions!(agent_box, [Quit, Palette, ToggleSidebar, OpenSettings, NewChat, ToggleTerminal, Reconnect, NextWorktree, PreviousWorktree, ReloadSettings]);
 
 pub fn bind_keys(settings: &Settings, cx: &mut App) {
     cx.clear_key_bindings();
-    let mut bindings = Vec::new();
+    let mut bindings = vec![KeyBinding::new("cmd-q", Quit, None)];
     for k in &settings.keys {
         let b = match k.action.as_str() {
             "palette" => KeyBinding::new(&k.key, Palette, None),
@@ -47,6 +47,7 @@ struct Resize {
 }
 
 pub struct Workspace {
+    _remote_guard: crate::remote::RemoteGuard,
     settings: Settings,
     settings_error: Option<String>,
     remote: Remote,
@@ -81,7 +82,7 @@ impl Workspace {
         };
         let _ = settings::write_schema();
         bind_keys(&settings, cx);
-        let (remote, incoming) = Remote::start(
+        let (remote, incoming, remote_guard) = Remote::start(
             settings.connection.ssh_host.clone(),
             settings.connection.daemon.clone(),
             Duration::from_secs(settings.connection.retry_seconds),
@@ -108,6 +109,7 @@ impl Workspace {
         });
         let sizes = load_sizes();
         Self {
+            _remote_guard: remote_guard,
             settings,
             settings_error,
             remote,

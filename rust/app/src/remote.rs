@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,6 +19,15 @@ pub enum Incoming {
 
 type Pending = Arc<Mutex<HashMap<u64, flume::Sender<Result<Value>>>>>;
 
+/** Closes the connection for good when dropped (the window that owned it closed). */
+pub struct RemoteGuard(Arc<AtomicBool>);
+
+impl Drop for RemoteGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 #[derive(Clone)]
 pub struct Remote {
     out: flume::Sender<String>,
@@ -27,20 +36,25 @@ pub struct Remote {
 }
 
 impl Remote {
-    pub fn start(ssh_host: String, daemon: String, retry: Duration) -> (Remote, flume::Receiver<Incoming>) {
+    pub fn start(ssh_host: String, daemon: String, retry: Duration) -> (Remote, flume::Receiver<Incoming>, RemoteGuard) {
+        let alive = Arc::new(AtomicBool::new(true));
         let (out_tx, out_rx) = flume::unbounded::<String>();
         let (in_tx, in_rx) = flume::unbounded::<Incoming>();
         let pending: Pending = Arc::default();
         let remote = Remote { out: out_tx, pending: pending.clone(), next_id: Arc::new(AtomicU64::new(1)) };
+        let flag = alive.clone();
         std::thread::spawn(move || loop {
-            let err = session(&ssh_host, &daemon, &out_rx, &in_tx, &pending);
+            if !flag.load(Ordering::Relaxed) {
+                break;
+            }
+            let err = session(&ssh_host, &daemon, &out_rx, &in_tx, &pending, &flag);
             for (_, waiter) in pending.lock().unwrap().drain() {
                 let _ = waiter.send(Err(anyhow!("disconnected")));
             }
             let _ = in_tx.send(Incoming::Disconnected(err.to_string()));
             std::thread::sleep(retry);
         });
-        (remote, in_rx)
+        (remote, in_rx, RemoteGuard(alive))
     }
 
     pub async fn call(&self, call: Call) -> Result<Value> {
@@ -64,6 +78,7 @@ fn session(
     out_rx: &flume::Receiver<String>,
     in_tx: &flume::Sender<Incoming>,
     pending: &Pending,
+    alive: &Arc<AtomicBool>,
 ) -> anyhow::Error {
     let child = Command::new("/usr/bin/ssh")
         .args(["-T", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", host, &format!("{daemon} connect")])
@@ -77,6 +92,14 @@ fn session(
         Err(e) => return e.into(),
     };
     let mut stdin = child.stdin.take().unwrap();
+    let pid = child.id();
+    let watch = alive.clone();
+    std::thread::spawn(move || {
+        while watch.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+    });
     let stdout = child.stdout.take().unwrap();
     while out_rx.try_recv().is_ok() {}
     let _ = in_tx.send(Incoming::Connected);
