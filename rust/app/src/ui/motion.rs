@@ -53,6 +53,8 @@ pub struct MotionStore {
     pub enabled: bool,
     viewport: Size<Pixels>,
     snap_frame: u64,
+    /** Where nodes with their own `id` ended up this frame, for `inspect.json`. */
+    pub bounds: HashMap<String, [f32; 4]>,
 }
 
 impl Default for MotionStore {
@@ -67,6 +69,7 @@ impl Default for MotionStore {
             enabled: true,
             viewport: Size::default(),
             snap_frame: 0,
+            bounds: HashMap::new(),
         }
     }
 }
@@ -84,6 +87,8 @@ impl MotionStore {
     pub fn prune(&mut self) {
         let frame = self.frame;
         self.entries.retain(|_, e| e.seen + 2 >= frame);
+        let live: std::collections::HashSet<&String> = self.entries.keys().collect();
+        self.bounds.retain(|k, _| live.contains(k));
     }
 
     fn offset(&mut self, key: &str, origin: Point<Pixels>, window: &mut Window) -> Point<f32> {
@@ -161,6 +166,10 @@ impl Element for Motion {
 
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
         let off = self.store.borrow_mut().offset(&self.key, bounds.origin, window);
+        if !self.key.contains('/') {
+            let b = [f32::from(bounds.origin.x), f32::from(bounds.origin.y), f32::from(bounds.size.width), f32::from(bounds.size.height)];
+            self.store.borrow_mut().bounds.insert(self.key.clone(), b);
+        }
         let actual = point(f32::from(bounds.origin.x) + off.x, f32::from(bounds.origin.y) + off.y);
         self.store.borrow_mut().stack.push(actual);
         window.with_element_offset(point(px(off.x), px(off.y)), |window| {

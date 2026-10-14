@@ -31,6 +31,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
     ("palette.open", "the command palette"),
     ("steps.expand_all / steps.collapse_all", "{chat?}: open or close every step line in a chat's transcript"),
+    ("app.snapshot", "capture the window to snapshot.png in the settings folder (for agents to look at)"),
     ("drop.preview", "{key, zone: before|inside|after, kind?}: show a drop target's indicator without dragging (for styling); cleared by the next drag"),
     ("diff.refresh", "reload the selected worktree's diff now"),
     ("diff.collapse_all / diff.expand_all", "collapse or expand every file in the diff"),
@@ -92,8 +93,12 @@ impl Workspace {
                     self.run_action(a, window, cx);
                 }
             }
-            Value::String(name) => self.dispatch(name, &serde_json::Map::new(), window, cx),
+            Value::String(name) => {
+                self.log_action(action);
+                self.dispatch(name, &serde_json::Map::new(), window, cx)
+            }
             Value::Object(o) => {
+                self.log_action(action);
                 let name = o.get("do").and_then(Value::as_str).unwrap_or("").to_string();
                 self.dispatch(&name, o, window, cx);
             }
@@ -313,6 +318,7 @@ impl Workspace {
                     }
                 }
             }
+            "app.snapshot" => self.snapshot(window, cx),
             "drop.preview" => {
                 self.drop_hint = s("key").map(|key| crate::ui::render::DropHint { key, zone: s("zone").unwrap_or("inside".into()), kind: s("kind").unwrap_or_default() });
                 self.drop_preview = true;

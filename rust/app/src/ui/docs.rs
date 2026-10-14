@@ -24,6 +24,12 @@ full at the end of this file. Change anything by overriding it in your settings 
   while you watch. Each request first snapshots the file into `history/`; `settings.undo` restores.
 - Scripts and agents can drive the app: write an action (or a list of actions) to `run.json` next to
   the settings file; the app runs it once and deletes the file.
+- And see it: `inspect.json` (kept current) holds the live context, the window, and where every node
+  with an `id` is drawn; `activity.log` lists every action run (clicks, keys, agents) with a timestamp;
+  the `app.snapshot` action writes `snapshot.png`. From a shell, `abx` wraps all of this
+  (`abx state`, `abx layout`, `abx do`, `abx shot`, `abx log`, `abx problems`).
+- The built-in defaults are read live from `default-settings.jsonc` in the source checkout when it
+  exists, so editing them hot-reloads too; only changes to the app's Rust code need a restart.
 - UI state (selection, toggles, sizes) persists in `ui-state.json` next to the settings file.
 
 ## Top-level keys
@@ -227,7 +233,7 @@ pub fn write_reference() {
     }
     md.push_str(RECIPES);
     md.push_str("\n## The complete default settings\n\n```jsonc\n");
-    md.push_str(settings::DEFAULTS);
+    md.push_str(&settings::defaults_text());
     md.push_str("\n```\n");
     let _ = std::fs::write(dir.join("SETTINGS.md"), md);
     let _ = std::fs::write(dir.join("settings.schema.json"), serde_json::to_string_pretty(&schema()).unwrap_or_default());

@@ -142,6 +142,13 @@ pub fn set_badge(label: Option<&str>) {
     tile.display();
 }
 
+/** The main window's number, for `screencapture -l`. */
+pub fn window_number() -> Option<i64> {
+    let mtm = MainThreadMarker::new()?;
+    let windows = NSApplication::sharedApplication(mtm).windows();
+    windows.iter().find(|w| w.isVisible()).map(|w| w.windowNumber() as i64)
+}
+
 pub fn bounce() {
     let Some(mtm) = MainThreadMarker::new() else { return };
     NSApplication::sharedApplication(mtm).requestUserAttention(NSRequestUserAttentionType::InformationalRequest);

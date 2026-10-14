@@ -72,14 +72,28 @@ pub fn path() -> PathBuf {
     dir().join("settings.jsonc")
 }
 
+/** A defaults file read live instead of the built-in copy: `AGENT_BOX_DEFAULTS`, or the source checkout's
+`default-settings.jsonc` when it exists. Editing it reloads the app like any settings change. */
+pub fn live_defaults_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("AGENT_BOX_DEFAULTS") {
+        return Some(PathBuf::from(p));
+    }
+    let p = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("dev/agent-box/rust/app/default-settings.jsonc");
+    p.exists().then_some(p)
+}
+
+pub fn defaults_text() -> String {
+    live_defaults_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| DEFAULTS.to_string())
+}
+
 pub fn defaults_value() -> Value {
-    serde_json_lenient::from_str(DEFAULTS).expect("built-in settings parse")
+    serde_json_lenient::from_str(&defaults_text()).or_else(|_| serde_json_lenient::from_str(DEFAULTS)).expect("built-in settings parse")
 }
 
 /** The user's file over the defaults. Objects merge key by key; `keys` merge by `key` and `commands`
 by `label`; any other array replaces the default; `null` removes a default. */
 pub fn load() -> Result<Settings> {
-    let mut base = defaults_value();
+    let mut base: Value = serde_json_lenient::from_str(&defaults_text()).context("parsing the default settings")?;
     let p = path();
     if p.exists() {
         let text = std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;

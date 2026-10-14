@@ -130,7 +130,7 @@
                           },
                           {
                             "accept": "project",
-                            "valid": ".dragged as $d | [.projects[].repo] as $r | ($r | index(.p.repo)) as $ti | ($r | index($d)) as $di | $d != .p.repo and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
+                            "valid": ".dragged as $d | .p.repo as $t | [.projects[].repo] as $r | ($r | index($t)) as $ti | ($r | index($d)) as $di | $d != $t and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
                             "do": { "do": "project.move", "target": "{{ .p.repo }}" }
                           }
                         ]
@@ -174,7 +174,7 @@
                           },
                           {
                             "accept": "section",
-                            "valid": ".dragged as $d | [.sections[].id] as $r | ($r | index(.s.id)) as $ti | ($r | index($d)) as $di | $d != .s.id and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
+                            "valid": ".dragged as $d | .s.id as $t | [.sections[].id] as $r | ($r | index($t)) as $ti | ($r | index($d)) as $di | $d != $t and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
                             "do": { "do": "section.move", "target": "{{ .s.id }}" }
                           }
                         ]

@@ -70,6 +70,9 @@ pub struct Workspace {
     pub(crate) dragging: bool,
     pub(crate) drop_hint: Option<crate::ui::render::DropHint>,
     pub(crate) drop_preview: bool,
+    pub(crate) inspect_at: Option<std::time::Instant>,
+    pub(crate) inspect_digest: u64,
+    pub(crate) activity: Vec<String>,
     pub(crate) focused: bool,
     pending_events: Vec<String>,
     pub(crate) notify_count: u64,
@@ -177,6 +180,9 @@ impl Workspace {
             dragging: false,
             drop_hint: None,
             drop_preview: false,
+            inspect_at: None,
+            inspect_digest: 0,
+            activity: vec![],
             focused: true,
             pending_events: vec![],
             notify_count: 0,
@@ -251,10 +257,13 @@ impl Workspace {
         let (tx, rx) = flume::unbounded();
         let name = settings::path().file_name().map(|n| n.to_owned());
         let dir = settings::dir();
+        let defaults = settings::live_defaults_path();
+        let defaults_name = defaults.as_ref().and_then(|p| p.file_name()).map(|n| n.to_owned());
+        let defaults_dir = defaults.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf());
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(ev) = res {
                 for p in &ev.paths {
-                    if p.file_name().map(|n| n.to_owned()) == name {
+                    if p.file_name().map(|n| n.to_owned()) == name || (defaults_name.is_some() && p.file_name().map(|n| n.to_owned()) == defaults_name) {
                         let _ = tx.send(false);
                     } else if p.file_name().and_then(|n| n.to_str()) == Some("run.json") {
                         let _ = tx.send(true);
@@ -267,6 +276,9 @@ impl Workspace {
             let _ = std::fs::create_dir_all(&dir);
             if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
                 return;
+            }
+            if let Some(d) = &defaults_dir {
+                let _ = watcher.watch(d, RecursiveMode::NonRecursive);
             }
             while let Ok(first) = rx.recv_async().await {
                 cx.background_executor().timer(Duration::from_millis(80)).await;
@@ -304,6 +316,7 @@ impl Workspace {
     }
 
     pub(crate) fn reload_settings(&mut self, cx: &mut Context<Self>) {
+        crate::ui::docs::write_reference();
         match settings::load() {
             Ok(s) => {
                 self.state = s.state.clone();
@@ -1087,6 +1100,7 @@ impl Render for Workspace {
         self.focused = window.is_window_active();
         let ctx = self.context();
         let body = self.render_view("main", &ctx, window, cx);
+        self.write_inspect(&ctx, window);
         self.write_problems();
         let theme = self.settings.theme.clone();
         let bg = style::color(&Value::from("@window"), &theme).unwrap_or(parse_color("#212122"));

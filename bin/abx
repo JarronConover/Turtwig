@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""abx: look at and drive the running Agent Box app from a shell (for agents and for debugging).
+
+  abx state [PATH]        the app's live state (inspect.json); PATH like context.selected.chat.name
+  abx layout [ID]         where nodes with ids are drawn (x, y, w, h); filter by id substring
+  abx do ACTION_JSON      run an action (see SETTINGS.md), e.g. abx do '{"do":"state.toggle","key":"sidebar_open"}'
+  abx shot [OUT.png]      capture the window, print the image path
+  abx log [N]             the last N actions run (default 30), by you or anyone
+  abx problems            settings problems, or "No problems."
+  abx settings            print the user settings file path; abx defaults: the live defaults file
+"""
+import json, os, sys, time
+from pathlib import Path
+
+DIR = Path(os.environ.get("AGENT_BOX_SETTINGS_DIR", Path.home() / ".agent-box/state/settings"))
+
+
+def state():
+    return json.loads((DIR / "inspect.json").read_text())
+
+
+def run(action):
+    inbox = DIR / "run.json"
+    inbox.write_text(action)
+    for _ in range(100):
+        if not inbox.exists():
+            return True
+        time.sleep(0.05)
+    print("the app didn't pick up run.json (is it running?)", file=sys.stderr)
+    return False
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "state":
+        v = state()
+        for part in (rest[0].split(".") if rest else []):
+            v = v[int(part)] if isinstance(v, list) else v.get(part)
+        print(json.dumps(v, indent=2))
+    elif cmd == "layout":
+        for n in state()["layout"]:
+            if not rest or rest[0] in n["id"]:
+                print(f'{n["id"]:<48} x={n["x"]:.0f} y={n["y"]:.0f} w={n["w"]:.0f} h={n["h"]:.0f}')
+    elif cmd == "do":
+        json.loads(rest[0])
+        return 0 if run(rest[0]) else 1
+    elif cmd == "shot":
+        out = Path(rest[0]) if rest else DIR / "snapshot.png"
+        number = state().get("window", {}).get("number")
+        if number and os.system(f"/usr/sbin/screencapture -x -o -l{number} '{out}' 2>/dev/null") == 0 and out.exists():
+            print(out)
+            return 0
+        shot = DIR / "snapshot.png"
+        before = shot.stat().st_mtime if shot.exists() else 0
+        if not run('{"do": "app.snapshot"}'):
+            return 1
+        for _ in range(60):
+            if shot.exists() and shot.stat().st_mtime > before:
+                break
+            time.sleep(0.1)
+        out = Path(rest[0]) if rest else shot
+        if out != shot:
+            out.write_bytes(shot.read_bytes())
+        print(out)
+    elif cmd == "log":
+        lines = (DIR / "activity.log").read_text().splitlines() if (DIR / "activity.log").exists() else []
+        print("\n".join(lines[-int(rest[0] if rest else 30):]))
+    elif cmd == "problems":
+        print((DIR / "problems.txt").read_text().strip())
+    elif cmd == "settings":
+        print(DIR / "settings.jsonc")
+    elif cmd == "defaults":
+        print(os.environ.get("AGENT_BOX_DEFAULTS", Path.home() / "dev/agent-box/rust/app/default-settings.jsonc"))
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
