@@ -149,3 +149,22 @@ pub fn with(base: &Val, extra: Vec<(String, Val)>) -> Val {
     }
     Val::obj(map)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn orders_orchestrators_first_and_supports_elif() {
+        let e = Exprs::default();
+        let ctx = to_val(&json!({"s": {"items": [
+            {"path": "a", "chats": [{"kind": "feature"}]},
+            {"path": "o", "chats": [{"kind": "orchestrator"}]}
+        ]}}));
+        let order = "[.s.items[] | select(.chats | any(.kind == \"orchestrator\"))] + [.s.items[] | select(.chats | any(.kind == \"orchestrator\") | not)] | map(.path)";
+        assert_eq!(to_json(&e.first(order, &ctx)), json!(["o", "a"]));
+        assert_eq!(to_json(&e.first("if false then 1 elif true then 2 else 3 end", &ctx)), json!(2));
+        assert!(e.errors.borrow().is_empty());
+    }
+}

@@ -297,6 +297,7 @@ impl Workspace {
     /** problems.txt lets an agent that just edited settings see what broke. */
     fn write_problems(&mut self) {
         let mut lines: Vec<String> = self.settings_error.iter().cloned().collect();
+        lines.extend(self.settings.warnings.iter().cloned());
         lines.extend(self.exprs.errors.borrow().iter().cloned());
         let text = if lines.is_empty() { "No problems.\n".to_string() } else { lines.join("\n") + "\n" };
         if text != self.problems_written {
@@ -449,7 +450,7 @@ impl Workspace {
                 "status": self.status,
                 "ssh_host": self.model.ssh_host,
                 "settings_error": self.settings_error,
-                "errors": self.exprs.errors.borrow().clone(),
+                "errors": self.exprs.errors.borrow().iter().chain(self.settings.warnings.iter()).cloned().collect::<Vec<_>>(),
             },
             "now": now,
             "designer": {

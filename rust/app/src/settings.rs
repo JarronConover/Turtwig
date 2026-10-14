@@ -30,6 +30,9 @@ pub struct Settings {
     #[serde(default)]
     pub diff: Value,
     pub terminal: TerminalSettings,
+    /** Problems applying `patch` (unknown ids and the like), shown with other settings problems. */
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -77,7 +80,13 @@ pub fn load() -> Result<Settings> {
         let user: Value = serde_json_lenient::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
         merge(&mut base, user, "");
     }
-    serde_json::from_value(base).context("settings")
+    let warnings = match base.as_object_mut().and_then(|o| o.remove("patch")) {
+        Some(Value::Array(ops)) => crate::ui::patch::apply(&mut base, &ops),
+        _ => vec![],
+    };
+    let mut s: Settings = serde_json::from_value(base).context("settings")?;
+    s.warnings = warnings;
+    Ok(s)
 }
 
 fn merge(base: &mut Value, over: Value, key: &str) {

@@ -30,6 +30,7 @@ full at the end of this file. Change anything by overriding it in your settings 
 
 | key | what it is |
 | --- | --- |
+| `patch` | Edits to default nodes by `id` (move, set, insert, replace, remove). **Prefer this to copying a component**: a copy freezes it, so later improvements to the defaults stop reaching you. See Patch. |
 | `views` | Root nodes by name. `views.main` is the window. |
 | `components` | Reusable nodes; use one as `{"type": "Name", "props": {...}}` and read props inside as `.props.x`. |
 | `theme` | Named values referenced as `@name` in styles (colors, fonts) and readable as `.theme.name`. `animations: false` turns animation off. |
@@ -40,6 +41,26 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `chat` | Look of the built-in transcript, composer, and waiting card: style objects per part. |
 | `terminal` | Terminal font, size, padding, colors. |
 | `connection` | The box: `ssh_host`, `daemon` path, `retry_seconds`. |
+
+## Patch
+
+Ops run in order after merging, each naming a node by its `id` anywhere in `views` or `components`:
+
+```jsonc
+"patch": [
+  { "id": "designer-button", "move": { "after": "sidebar-drag" } },     // also "before": id, or "into": id with "at": n (negative from the end)
+  { "id": "sidebar-header", "set": { "style": { "padding": [0, 12, 0, 88] } } },  // merged into the node; null removes a key
+  { "id": "chat-progress", "replace": { "type": "row", "children": ["Working…"] } },
+  { "id": "status-pill", "remove": true },
+  { "insert": { "type": "Pill", "props": { "text": "Docs", "do": "settings.docs" } }, "after": "status-pill" }
+]
+```
+
+Nodes with ids in the defaults include `sidebar`, `sidebar-header`, `sidebar-toggle`, `designer-button`,
+`sidebar-drag`, `sidebar-list`, `sidebar-footer`, `main-area`, `toolbar`, `toolbar-drag`, `status-pill`,
+`chat-card`, `transcript`, `chat-progress`, `waiting`, `composer-box`, `branch-bar`, `changes-pill`,
+`terminal-card`, `tab-terminal`, `tab-changes`, and `designer` (search the defaults below for `"id"`).
+Unknown ids are reported in `problems.txt`.
 
 ## Nodes
 

@@ -9,7 +9,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 pub const CHAT_ID: &str = "designer";
 
-const PROMPT: &str = "You are the live designer for the Agent Box app. The user is watching the app while you work: every save of settings.jsonc (in the current folder) reloads the window and animates the change. Before your first change, read SETTINGS.md here; it documents every setting and holds the full defaults. Edit only settings.jsonc and keep the user's existing overrides. Give nodes you add or move a stable `id` and keep it when moving them, so they glide to their new place. After each save, read problems.txt and fix whatever it lists. Reply in one or two plain sentences.";
+const PROMPT: &str = "You are the live designer for the Agent Box app. The user is watching the app while you work: every save of settings.jsonc (in the current folder) reloads the window and animates the change. Before your first change, read SETTINGS.md here; it documents every setting and holds the full defaults. Edit only settings.jsonc and keep the user's existing overrides. Prefer small `patch` ops on default nodes by id (move, set, insert, replace, remove) over copying whole components or views: copies stop picking up improvements to the defaults. Give nodes you add or move a stable `id` and keep it when moving them, so they glide to their new place. After each save, read problems.txt and fix whatever it lists. Reply in one or two plain sentences.";
 
 #[derive(Default)]
 pub struct Designer {

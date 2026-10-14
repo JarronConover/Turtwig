@@ -88,15 +88,17 @@
           "style": { "width": "full", "height": "full" },
           "children": [
             {
+              "id": "sidebar-header",
               "type": "row",
               "style": { "height": 44, "shrink": 0, "padding": [0, 0, 0, 88], "align": "center" },
               "children": [
                 { "type": "IconButton", "id": "sidebar-toggle", "props": { "icon": "panel-left", "tooltip": "Hide sidebar  ⌘\\", "do": { "do": "state.toggle", "key": "sidebar_open" } } },
                 { "type": "DesignerButton", "id": "designer-button" },
-                { "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } }
+                { "id": "sidebar-drag", "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } }
               ]
             },
             {
+              "id": "sidebar-list",
               "type": "scroll",
               "props": { "handle": "sidebar" },
               "style": { "grow": 1, "min_height": 0, "padding": [0, 6, 10, 6] },
@@ -139,14 +141,20 @@
                     },
                     {
                       "if": "(\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end | not",
-                      "for": ".s.items", "as": "w", "key": ".w.path",
-                      "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": true }
+                      "for": "[.s.items[] | select(.chats | any(.kind == \"orchestrator\"))] + [.s.items[] | select(.chats | any(.kind == \"orchestrator\") | not)]",
+                      "as": "w", "key": ".w.path",
+                      "type": "WorktreeRow",
+                      "props": {
+                        "w": "{{ .w }}", "in_section": true,
+                        "child": "{{ (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) }}"
+                      }
                     }
                   ]
                 }
               ]
             },
             {
+              "id": "sidebar-footer",
               "type": "row",
               "style": { "height": 46, "shrink": 0, "padding": [0, 18], "gap": 4, "align": "center" },
               "children": [
@@ -260,10 +268,10 @@
     },
 
     "WorktreeRow": {
-      "about": "One worktree in the sidebar. props: w (a worktree), in_section (bool: sections show the project badge and emoji).",
+      "about": "One worktree in the sidebar. props: w (a worktree), in_section (bool: sections show the project badge and emoji), child (bool: a worker under the section's orchestrator, drawn indented with a tree line).",
       "type": "row",
       "style": {
-        "height": 33, "padding": "{{ if .props.in_section then [0, 12, 0, 8] else [0, 12, 0, 27] end }}",
+        "height": 33, "padding": "{{ if .props.child then [0, 12, 0, 30] elif .props.in_section then [0, 12, 0, 8] else [0, 12, 0, 27] end }}",
         "gap": 8, "align": "center", "radius": 8, "border": 1, "cursor": "pointer",
         "border_color": "{{ if .props.w.selected then \"@selection_border\" else \"transparent\" end }}",
         "background": "{{ if .props.w.selected then \"@selection\" else \"transparent\" end }}",
@@ -283,7 +291,9 @@
         { "if": ".props.w.is_primary | not", "label": "Delete worktree", "do": { "do": "worktree.delete", "path": "{{ .props.w.path }}" } }
       ],
       "children": [
-        { "if": ".props.in_section", "type": "Badge", "props": { "letter": "{{ .props.w.letter }}", "hue": "{{ .props.w.hue }}", "size": 16 } },
+        { "if": ".props.child", "type": "icon", "props": { "name": "corner-down-right", "size": 12, "color": "@text_faint" }, "style": { "margin": [0, -2, 0, -14] } },
+        { "if": ".props.w.chats | any(.kind == \"orchestrator\")", "type": "icon", "props": { "name": "workflow", "size": 14, "color": "@accent" }, "tooltip": "Orchestrator" },
+        { "if": ".props.in_section and (.props.w.chats | any(.kind == \"orchestrator\") | not)", "type": "Badge", "props": { "letter": "{{ .props.w.letter }}", "hue": "{{ .props.w.hue }}", "size": 16 } },
         { "if": ".props.in_section and .props.w.emoji", "type": "text", "props": { "text": "{{ .props.w.emoji }}" }, "style": { "width": 16, "shrink": 0, "font_size": 14 } },
         {
           "type": "row",
@@ -395,8 +405,8 @@
             { "if": ".selected.worktree.uncommitted > 0", "type": "box", "style": { "width": 6, "height": 6, "radius": 3, "background": "@warning" }, "tooltip": "Uncommitted changes" }
           ]
         },
-        { "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } },
-        { "type": "Pill", "props": { "text": "{{ if .app.connected then \"agent box\" else .app.status end }}", "mono": true, "tooltip": "{{ .app.status }}", "do": "palette.open" } },
+        { "id": "toolbar-drag", "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } },
+        { "id": "status-pill", "type": "Pill", "props": { "text": "{{ if .app.connected then \"agent box\" else .app.status end }}", "mono": true, "tooltip": "{{ .app.status }}", "do": "palette.open" } },
         { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "square-terminal", "tooltip": "Open in Cursor", "do": { "do": "open", "url": "cursor://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } } },
         { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "code", "tooltip": "Open in VS Code", "do": { "do": "open", "url": "vscode://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } } },
         { "if": ".selected.worktree.mr", "type": "Pill", "props": { "text": "!{{ .selected.worktree.mr.number }}", "icon": "git-pull-request", "tooltip": "Open the merge request", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } } }
@@ -420,6 +430,7 @@
           "style": { "grow": 1, "min_height": 0 },
           "children": [
             {
+              "id": "transcript",
               "type": "transcript",
               "props": { "empty": "{{ if .selected.worktree then \"No chat in this worktree yet. Press + above to start one.\" else \"Select a worktree\" end }}" },
               "style": { "grow": 1, "min_height": 0 }
@@ -434,9 +445,10 @@
                 { "type": "text", "props": { "text": "{{ if .selected.chat.activity == \"\" then \"Working\" else .selected.chat.activity end }}…" }, "style": { "truncate": true } }
               ]
             },
-            { "type": "waiting", "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" } },
+            { "id": "waiting", "type": "waiting", "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" } },
             {
               "if": ".selected.chat",
+              "id": "composer-box",
               "type": "box",
               "style": { "shrink": 0, "padding": [4, 20, 14, 20], "width": "full", "max_width": 900, "self": "center" },
               "children": [
