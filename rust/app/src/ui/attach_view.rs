@@ -93,7 +93,7 @@ impl Workspace {
 
     /** Paths of the chat's uploaded attachments (clearing them); None while any is still uploading. */
     pub(crate) fn take_attachments(&mut self, chat: &str) -> Option<Vec<String>> {
-        let list = self.attachments.get(chat)?;
+        let Some(list) = self.attachments.get(chat) else { return Some(vec![]) };
         if list.iter().any(|p| p.status == Status::Uploading) {
             return None;
         }

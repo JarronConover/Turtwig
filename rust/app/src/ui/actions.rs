@@ -31,6 +31,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
     ("palette.open", "the command palette"),
     ("steps.expand_all / steps.collapse_all", "{chat?}: open or close every step line in a chat's transcript"),
+    ("ui.click", "{id?, label?}: click a clickable node as if by hand: exact node id, else the first whose id or tooltip contains `label` (inspect.json lists them)"),
+    ("composer.set / composer.type", "{chat?, text}: replace or add to the text in a chat's message box (the designer's is chat `designer`)"),
     ("app.snapshot", "capture the window to snapshot.png in the settings folder (for agents to look at)"),
     ("drop.preview", "{key, zone: before|inside|after, kind?}: show a drop target's indicator without dragging (for styling); cleared by the next drag"),
     ("diff.refresh", "reload the selected worktree's diff now"),
@@ -319,6 +321,33 @@ impl Workspace {
                 }
             }
             "app.snapshot" => self.snapshot(window, cx),
+            "ui.click" => {
+                let (id, label) = (s("id"), s("label").map(|l| l.to_lowercase()));
+                let hit = self
+                    .clickables
+                    .iter()
+                    .find(|(nid, _, _)| id.as_deref() == Some(nid.as_str()))
+                    .or_else(|| {
+                        let l = label.as_deref()?;
+                        self.clickables.iter().find(|(nid, tip, _)| nid.to_lowercase().contains(l) || tip.to_lowercase().contains(l))
+                    })
+                    .map(|(_, _, a)| a.clone());
+                match hit {
+                    Some(action) => self.run_action(&action, window, cx),
+                    None => self.exprs.note(format!("ui.click: nothing clickable matches {}", id.or(label).unwrap_or_default())),
+                }
+            }
+            "composer.set" | "composer.type" => {
+                let target = s("chat").or_else(|| self.current_chat().map(|c| c.id.clone()));
+                if let Some(id) = target {
+                    self.ensure_composer(&id, window, cx);
+                    if let Some(c) = self.composers.get(&id).cloned() {
+                        let text = s("text").unwrap_or_default();
+                        let replace = name == "composer.set";
+                        c.update(cx, |st, cx| if replace { st.set_value(text, window, cx) } else { st.insert(text, window, cx) });
+                    }
+                }
+            }
             "drop.preview" => {
                 self.drop_hint = s("key").map(|key| crate::ui::render::DropHint { key, zone: s("zone").unwrap_or("inside".into()), kind: s("kind").unwrap_or_default() });
                 self.drop_preview = true;

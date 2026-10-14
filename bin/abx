@@ -5,6 +5,9 @@
   abx layout [ID]         where nodes with ids are drawn (x, y, w, h); filter by id substring
   abx do ACTION_JSON      run an action (see SETTINGS.md), e.g. abx do '{"do":"state.toggle","key":"sidebar_open"}'
   abx shot [OUT.png]      capture the window, print the image path
+  abx clickable [TEXT]    what can be clicked now (node id and tooltip)
+  abx click ID|TEXT       click it as if by hand (exact id, else id/tooltip containing TEXT)
+  abx type TEXT [--send] [--chat ID]   put text in the message box (selected chat, or ID / designer)
   abx log [N]             the last N actions run (default 30), by you or anyone
   abx problems            settings problems, or "No problems."
   abx settings            print the user settings file path; abx defaults: the live defaults file
@@ -65,6 +68,22 @@ def main(argv):
         if out != shot:
             out.write_bytes(shot.read_bytes())
         print(out)
+    elif cmd == "clickable":
+        for c in state().get("clickable", []):
+            if not rest or rest[0].lower() in (c["id"] + c["label"]).lower():
+                print(f'{c["id"]:<60} {c["label"]}')
+    elif cmd == "click":
+        target = rest[0]
+        ids = [c["id"] for c in state().get("clickable", [])]
+        action = {"do": "ui.click", "id": target} if target in ids else {"do": "ui.click", "label": target}
+        return 0 if run(json.dumps(action)) else 1
+    elif cmd == "type":
+        chat = rest[rest.index("--chat") + 1] if "--chat" in rest else None
+        words = [w for i, w in enumerate(rest) if w not in ("--send", "--chat") and (i == 0 or rest[i - 1] != "--chat")]
+        actions = [{"do": "composer.type", "text": " ".join(words), **({"chat": chat} if chat else {})}]
+        if "--send" in rest:
+            actions.append({"do": "composer.send", **({"chat": chat} if chat else {})})
+        return 0 if run(json.dumps(actions)) else 1
     elif cmd == "log":
         lines = (DIR / "activity.log").read_text().splitlines() if (DIR / "activity.log").exists() else []
         print("\n".join(lines[-int(rest[0] if rest else 30):]))

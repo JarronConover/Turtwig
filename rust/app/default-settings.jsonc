@@ -139,10 +139,10 @@
                         { "type": "DropLine", "props": { "key": "proj:{{ .p.repo }}" } },
                         { "type": "Badge", "props": { "letter": "{{ .p.letter }}", "hue": "{{ .p.hue }}", "size": 22 } },
                         { "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "grow": 1, "font_size": 14 } },
-                        { "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "repo": "{{ .p.repo }}" } } }
+                        { "id": "project-new-chat", "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "repo": "{{ .p.repo }}" } } }
                       ]
                     },
-                    { "for": ".p.items", "as": "w", "key": ".w.path", "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": false } }
+                    { "for": ".p.items", "as": "w", "key": ".w.path", "id": "wt-row", "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": false } }
                   ]
                 },
                 {
@@ -188,7 +188,7 @@
                     {
                       "if": "(\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end | not",
                       "for": "[.s.items[] | select(.chats | any(.kind == \"orchestrator\"))] + [.s.items[] | select(.chats | any(.kind == \"orchestrator\") | not)]",
-                      "as": "w", "key": ".w.path",
+                      "as": "w", "key": ".w.path", "id": "wt-row",
                       "type": "WorktreeRow",
                       "props": {
                         "w": "{{ .w }}", "in_section": true,
@@ -204,9 +204,9 @@
               "type": "row",
               "style": { "height": 46, "shrink": 0, "padding": [0, 18], "gap": 4, "align": "center" },
               "children": [
-                { "type": "IconButton", "props": { "icon": "settings", "tooltip": "Settings  ⌘,", "do": "settings.open" } },
-                { "type": "IconButton", "props": { "icon": "folder-plus", "tooltip": "New section", "do": "section.new" } },
-                { "type": "IconButton", "props": { "icon": "plus", "tooltip": "New chat  ⌘N", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } } },
+                { "id": "footer-settings", "type": "IconButton", "props": { "icon": "settings", "tooltip": "Settings  ⌘,", "do": "settings.open" } },
+                { "id": "footer-new-section", "type": "IconButton", "props": { "icon": "folder-plus", "tooltip": "New section", "do": "section.new" } },
+                { "id": "footer-new-chat", "type": "IconButton", "props": { "icon": "plus", "tooltip": "New chat  ⌘N", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } } },
                 { "type": "spacer" },
                 {
                   "if": ".app.settings_error or (.app.errors | length > 0)",
@@ -531,7 +531,7 @@
       "style": { "height": 40, "shrink": 0, "padding": [0, 0, 0, 8], "align": "stretch" },
       "children": [
         {
-          "for": ".selected.chats", "as": "c", "key": ".c.id",
+          "for": ".selected.chats", "as": "c", "key": ".c.id", "id": "chat-tab",
           "type": "row",
           "style": {
             "position": "relative", "gap": 8, "padding": [0, 14], "align": "center", "font_size": 13, "cursor": "pointer",

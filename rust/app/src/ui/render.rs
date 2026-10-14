@@ -399,6 +399,10 @@ impl Workspace {
                     }
                 }));
             }
+            if let Some(c) = click.clone() {
+                let label = obj.get("tooltip").map(|t| value_text(&self.exprs.resolve(t, ctx))).filter(|t| !t.is_empty()).unwrap_or_default();
+                self.clickables.push((id.clone(), label, c));
+            }
             if let Some(c) = click {
                 el = el.on_click(cx.listener(move |ws, e: &ClickEvent, window, cx| {
                     if e.click_count() < 2 {

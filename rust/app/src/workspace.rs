@@ -58,7 +58,7 @@ pub struct Workspace {
     pending_select: Option<String>,
     pub(crate) transcripts: HashMap<String, Transcript>,
     watching: HashSet<String>,
-    composers: HashMap<String, Entity<TextareaState>>,
+    pub(crate) composers: HashMap<String, Entity<TextareaState>>,
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
     term_by_id: HashMap<u64, Entity<TerminalView>>,
     pub(crate) expanded_tools: HashSet<String>,
@@ -73,6 +73,8 @@ pub struct Workspace {
     pub(crate) inspect_at: Option<std::time::Instant>,
     pub(crate) inspect_digest: u64,
     pub(crate) activity: Vec<String>,
+    /** What's clickable this frame: (node id, tooltip, action), for `ui.click` and inspect.json. */
+    pub(crate) clickables: Vec<(String, String, Value)>,
     pub(crate) focused: bool,
     pending_events: Vec<String>,
     pub(crate) notify_count: u64,
@@ -183,6 +185,7 @@ impl Workspace {
             inspect_at: None,
             inspect_digest: 0,
             activity: vec![],
+            clickables: vec![],
             focused: true,
             pending_events: vec![],
             notify_count: 0,
@@ -1076,6 +1079,7 @@ impl Render for Workspace {
             self.run_action(&a, window, cx);
         }
         self.render_generation += 1;
+        self.clickables.clear();
         let generation = self.render_generation;
         self.entered.retain(|_, (_, seen, _)| *seen + 2 >= generation);
         self.transitions.retain(|_, t| t.seen + 2 >= generation);
@@ -1100,7 +1104,7 @@ impl Render for Workspace {
         self.focused = window.is_window_active();
         let ctx = self.context();
         let body = self.render_view("main", &ctx, window, cx);
-        self.write_inspect(&ctx, window);
+        self.write_inspect(&ctx, window, cx);
         self.write_problems();
         let theme = self.settings.theme.clone();
         let bg = style::color(&Value::from("@window"), &theme).unwrap_or(parse_color("#212122"));

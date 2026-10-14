@@ -11,7 +11,7 @@ const ACTIVITY_LINES: usize = 400;
 
 impl Workspace {
     /** Rewrites inspect.json when what it describes changed (checked at most twice a second). */
-    pub(crate) fn write_inspect(&mut self, ctx: &jaq_json::Val, window: &Window) {
+    pub(crate) fn write_inspect(&mut self, ctx: &jaq_json::Val, window: &Window, cx: &App) {
         if self.inspect_at.is_some_and(|t| t.elapsed().as_millis() < 500) {
             return;
         }
@@ -25,6 +25,8 @@ impl Workspace {
             "window": {"width": f32::from(size.width), "height": f32::from(size.height), "focused": self.focused, "number": window_number()},
             "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
             "context": ctx,
+            "clickable": self.clickables.iter().map(|(id, label, _)| json!({"id": id, "label": label})).collect::<Vec<_>>(),
+            "composers": self.composers.iter().map(|(chat, c)| (chat.clone(), Value::String(c.read(cx).value().to_string()))).collect::<serde_json::Map<_, _>>(),
             "layout": layout.into_iter().map(|(k, b)| json!({"id": k, "x": b[0], "y": b[1], "w": b[2], "h": b[3]})).collect::<Vec<_>>(),
         });
         let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
