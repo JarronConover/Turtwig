@@ -7,3 +7,4 @@ pub mod motion;
 pub mod patch;
 pub mod render;
 pub mod style;
+pub mod trace_view;

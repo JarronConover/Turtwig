@@ -52,7 +52,7 @@ Ops run in order after merging, each naming a node by its `id` anywhere in `view
 "patch": [
   { "id": "designer-button", "move": { "after": "sidebar-drag" } },     // also "before": id, or "into": id with "at": n (negative from the end)
   { "id": "sidebar-header", "set": { "style": { "padding": [0, 12, 0, 88] } } },  // merged into the node; null removes a key
-  { "id": "chat-progress", "replace": { "type": "row", "children": ["Working…"] } },
+  { "id": "waiting", "replace": { "type": "waiting", "style": { "padding": [0, 12] } } },
   { "id": "status-pill", "remove": true },
   { "insert": { "type": "Pill", "props": { "text": "Docs", "do": "settings.docs" } }, "after": "status-pill" }
 ]
@@ -60,7 +60,7 @@ Ops run in order after merging, each naming a node by its `id` anywhere in `view
 
 Nodes with ids in the defaults include `sidebar`, `sidebar-header`, `sidebar-toggle`, `designer-button`,
 `sidebar-drag`, `sidebar-list`, `sidebar-footer`, `main-area`, `toolbar`, `toolbar-drag`, `status-pill`,
-`chat-card`, `transcript`, `chat-progress`, `waiting`, `composer-box`, `branch-bar`, `changes-pill`,
+`chat-card`, `transcript`, `waiting`, `composer-box`, `branch-bar`, `changes-pill`,
 `terminal-card`, `tab-terminal`, `tab-changes`, and `designer` (search the defaults below for `"id"`).
 Unknown ids are reported in `problems.txt`.
 

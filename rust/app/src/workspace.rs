@@ -10,7 +10,6 @@ use crate::ui::render::{value_text, Transition};
 use crate::ui::style;
 use agent_box_protocol::{Call, Chat, Event, Model, Worktree};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -57,13 +56,13 @@ pub struct Workspace {
     pub(crate) drag: Option<Drag>,
     pub(crate) pending_actions: Vec<Value>,
     pending_select: Option<String>,
-    transcripts: HashMap<String, Transcript>,
+    pub(crate) transcripts: HashMap<String, Transcript>,
     watching: HashSet<String>,
     composers: HashMap<String, Entity<TextareaState>>,
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
     term_by_id: HashMap<u64, Entity<TerminalView>>,
-    expanded_tools: HashSet<String>,
-    images: HashMap<String, Option<std::sync::Arc<Image>>>,
+    pub(crate) expanded_tools: HashSet<String>,
+    pub(crate) images: HashMap<String, Option<std::sync::Arc<Image>>>,
     pub(crate) diffs: HashMap<String, crate::ui::diff_view::DiffData>,
     pub(crate) attachments: HashMap<String, Vec<crate::ui::attach_view::Pending>>,
     pub(crate) send_when_ready: HashSet<String>,
@@ -921,78 +920,8 @@ impl Workspace {
             let overlay = if designer { self.drop_overlay(crate::designer::CHAT_ID, cx) } else { None };
             return div().relative().size_full().flex().items_center().justify_center().child(style::apply(div(), &st("empty"), &theme).child(empty)).children(overlay).into_any_element();
         };
-        let show_thinking = cs.get("show_thinking").and_then(Value::as_bool).unwrap_or(false);
-        let collapse = cs.get("collapse_tool_calls").and_then(Value::as_bool).unwrap_or(true);
-        let mut list = style::apply(v_flex(), &st("list"), &theme);
-        for (i, item) in items.iter().enumerate() {
-            let key = format!("{chat_id}:{i}");
-            let el: Option<AnyElement> = match item {
-                Item::User { text } => {
-                    let image_style = st("image");
-                    let max = |k: &str, d: f32| image_style.get(k).and_then(Value::as_f64).map(|x| x as f32).unwrap_or(d);
-                    let (mw, mh) = (max("max_width", 360.), max("max_height", 240.));
-                    let (uploads, rest) = split_uploads(text);
-                    let thumbs: Vec<AnyElement> = uploads
-                        .into_iter()
-                        .map(|p| {
-                            if crate::ui::attach_view::is_image(&p) {
-                                let (w, h) = fit(&p, mw, mh);
-                                style::apply(img(p).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, &theme).into_any_element()
-                            } else {
-                                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                                let name = name.split_once('-').filter(|(stamp, _)| stamp.chars().all(|c| c.is_ascii_digit())).map(|(_, n)| n.to_string()).unwrap_or(name);
-                                style::apply(h_flex().gap(px(6.)), &st("file"), &theme)
-                                    .child(gpui_kit::component::Icon::empty().path("icons/file.svg").size(px(14.)))
-                                    .child(name)
-                                    .into_any_element()
-                            }
-                        })
-                        .collect();
-                    let body = (!rest.is_empty()).then(|| rest.clone());
-                    Some(style::apply(v_flex(), &st("user"), &theme).children(body).children(thumbs).into_any_element())
-                }
-                Item::Image { media_type, data } => {
-                    let image = self.images.entry(key.clone()).or_insert_with(|| decode_image(media_type, data)).clone();
-                    image.map(|i| style::apply(img(i).object_fit(ObjectFit::Contain), &st("image"), &theme).into_any_element())
-                }
-                Item::Assistant { text } => {
-                    Some(style::apply(div(), &st("assistant"), &theme).child(TextView::markdown(SharedString::from(key), text.clone())).into_any_element())
-                }
-                Item::Thinking { text } if show_thinking => Some(style::apply(div(), &st("thinking"), &theme).child(text.clone()).into_any_element()),
-                Item::Thinking { .. } => None,
-                Item::Tool { id, name, summary, input, result, is_error } => {
-                    let open = self.expanded_tools.contains(id) || !collapse;
-                    let tid = id.clone();
-                    let dot = style::color(&Value::from(if result.is_none() { "@warning" } else if *is_error { "@danger" } else { "@success" }), &theme)
-                        .unwrap_or(gpui_kit::white());
-                    let mut col = v_flex().gap(px(6.)).child(
-                        style::apply(h_flex().id(SharedString::from(format!("tool:{id}"))).cursor_pointer(), &st("tool"), &theme)
-                            .child(div().size(px(7.)).rounded_full().bg(dot))
-                            .child(style::apply(div(), &st("tool_name"), &theme).child(name.clone()))
-                            .child(style::apply(div().flex_1().truncate(), &st("tool_summary"), &theme).child(summary.clone()))
-                            .on_click(cx.listener(move |ws, _, _, cx| {
-                                if !ws.expanded_tools.remove(&tid) {
-                                    ws.expanded_tools.insert(tid.clone());
-                                }
-                                cx.notify();
-                            })),
-                    );
-                    if open {
-                        let detail = format!(
-                            "{}{}",
-                            serde_json::to_string_pretty(input).unwrap_or_default(),
-                            result.as_ref().map(|r| format!("\n\n{}", r.chars().take(4000).collect::<String>())).unwrap_or_default()
-                        );
-                        col = col.child(style::apply(div(), &st("tool_detail"), &theme).child(detail));
-                    }
-                    Some(col.into_any_element())
-                }
-                Item::Notice { text } => Some(style::apply(div(), &st("notice"), &theme).child(text.clone()).into_any_element()),
-            };
-            if let Some(el) = el {
-                list = list.child(el);
-            }
-        }
+        let working = if designer { self.designer.working } else { self.chat(&chat_id).map(|c| c.state == "working").unwrap_or(false) };
+        let list = style::apply(v_flex(), &st("list"), &theme).children(self.render_items(&chat_id, &items, working, cx));
         let handle_key = if designer { "designer" } else { "transcript" };
         let fresh = !self.scroll_handles.contains_key(handle_key);
         let handle = self.scroll_handles.entry(handle_key.into()).or_default().clone();
@@ -1292,7 +1221,7 @@ pub fn stage_one(path: &std::path::Path, host: Option<&str>) -> Result<String, S
 }
 
 /** A message's attached uploads (by their local copies) and its text with their paths removed. */
-fn split_uploads(text: &str) -> (Vec<std::path::PathBuf>, String) {
+pub(crate) fn split_uploads(text: &str) -> (Vec<std::path::PathBuf>, String) {
     let dir = uploads_dir();
     let mut files = vec![];
     let mut words = vec![];
@@ -1313,7 +1242,7 @@ pub fn fit(path: &std::path::Path, max_w: f32, max_h: f32) -> (f32, f32) {
     (w * k, h * k)
 }
 
-fn decode_image(media_type: &str, data: &str) -> Option<std::sync::Arc<Image>> {
+pub(crate) fn decode_image(media_type: &str, data: &str) -> Option<std::sync::Arc<Image>> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
     let format = match media_type {

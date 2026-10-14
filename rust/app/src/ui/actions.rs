@@ -27,6 +27,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("worktree.test_local", "{branch}: check the branch out on the Mac with the box's latest work"),
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
     ("palette.open", "the command palette"),
+    ("steps.expand_all / steps.collapse_all", "{chat?}: open or close every step line in a chat's transcript"),
     ("diff.refresh", "reload the selected worktree's diff now"),
     ("diff.collapse_all / diff.expand_all", "collapse or expand every file in the diff"),
     ("designer.send", "{text}: ask the designer (a local agent that edits these settings live) for a change"),
@@ -210,6 +211,32 @@ impl Workspace {
                 });
             }
             "palette.open" => self.open_palette(window, cx),
+            "steps.expand_all" | "steps.collapse_all" => {
+                if let Some(id) = chat() {
+                    let keys: Vec<String> = self
+                        .transcripts
+                        .get(&id)
+                        .map(|t| {
+                            t.items
+                                .iter()
+                                .enumerate()
+                                .flat_map(|(i, it)| match it {
+                                    crate::transcript::Item::Tool { id: tid, .. } => vec![tid.clone(), format!("{id}:run:{i}")],
+                                    crate::transcript::Item::Thinking { .. } => vec![format!("{id}:think:{i}"), format!("{id}:run:{i}")],
+                                    _ => vec![],
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if name == "steps.expand_all" {
+                        self.expanded_tools.extend(keys);
+                    } else {
+                        for k in keys {
+                            self.expanded_tools.remove(&k);
+                        }
+                    }
+                }
+            }
             "diff.refresh" => {
                 for d in self.diffs.values_mut() {
                     d.stale = true;
