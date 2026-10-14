@@ -33,6 +33,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("steps.expand_all / steps.collapse_all", "{chat?}: open or close every step line in a chat's transcript"),
     ("ui.click", "{id?, label?}: click a clickable node as if by hand: exact node id, else the first whose id or tooltip contains `label` (inspect.json lists them)"),
     ("composer.set / composer.type", "{chat?, text}: replace or add to the text in a chat's message box (the designer's is chat `designer`)"),
+    ("js", "{code, ...args}: run JavaScript with `args`, `ctx` (the context), and `ab` (see Scripts)"),
+    ("<a script action>", "any name a script registers with ab.action(name, fn) works as an action everywhere"),
     ("app.snapshot", "capture the window to snapshot.png in the settings folder (for agents to look at)"),
     ("drop.preview", "{key, zone: before|inside|after, kind?}: show a drop target's indicator without dragging (for styling); cleared by the next drag"),
     ("diff.refresh", "reload the selected worktree's diff now"),
@@ -417,6 +419,17 @@ impl Workspace {
             "window.move" => window.start_window_move(),
             "window.zoom" => window.zoom_window(),
             "app.quit" => cx.quit(),
+            "js" => {
+                let code = s("code").unwrap_or_default();
+                let mut args = a.clone();
+                args.remove("code");
+                args.remove("do");
+                self.script_deliver(serde_json::json!({"type": "eval", "code": code, "args": args}), window, cx);
+            }
+            other if self.scripts.as_ref().is_some_and(|sc| sc.has_action(other)) => {
+                let msg = crate::script::action_message(other, a);
+                self.script_deliver(msg, window, cx);
+            }
             other => self.exprs.note(format!("unknown action `{other}`")),
         }
         self.pending_motion = true;

@@ -360,6 +360,13 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             }
             sc_tool(&args, None)
         }
+        Call::Exec { cmd, cwd, timeout_secs } => {
+            let home = util::home();
+            let cwd = cwd.unwrap_or_else(|| home.to_string_lossy().into_owned());
+            let env = util::agent_box_dir().join("bin").join("agent-env");
+            let o = util::run(&env.to_string_lossy(), &["bash", "-lc", &cmd], &[], Some(&cwd), Duration::from_secs(timeout_secs.unwrap_or(120)));
+            Ok(json!({ "code": if o.ok { 0 } else { 1 }, "stdout": o.stdout, "stderr": o.stderr }))
+        }
         Call::SectionMove { id, index } => sc_tool(&["section", "move", &id, "--index", &index.to_string()], None),
         Call::ProjectMove { repo, index } => sc_tool(&["project", "move", &repo, "--index", &index.to_string()], None),
         Call::WorktreeDiff { path, base } => crate::diff::worktree_diff(&path, base.as_deref()),

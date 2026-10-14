@@ -47,6 +47,8 @@ pub enum Call {
     /** Put a worktree in `section` (None: back under its project) before `before` (a path), or last. */
     WorktreeMove { path: String, section: Option<String>, before: Option<String> },
     SectionMove { id: String, index: usize },
+    /** Run a shell command on the box (bash -lc): `{code, stdout, stderr}`. For scripts that add box-side abilities. */
+    Exec { cmd: String, cwd: Option<String>, timeout_secs: Option<u64> },
     ProjectMove { repo: String, index: usize },
     /** `{diff, base, from, truncated}`: unified diff text; `base` "uncommitted" (default) or "branch". */
     WorktreeDiff { path: String, base: Option<String> },

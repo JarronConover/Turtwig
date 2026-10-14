@@ -75,8 +75,12 @@ pub struct Workspace {
     pub(crate) activity: Vec<String>,
     /** What's clickable this frame: (node id, tooltip, action), for `ui.click` and inspect.json. */
     pub(crate) clickables: Vec<(String, String, Value)>,
+    pub(crate) scripts: Option<crate::script::Scripts>,
+    pub(crate) script_data: Map<String, Value>,
+    script_timers: HashMap<u64, Task<()>>,
     pub(crate) focused: bool,
     pending_events: Vec<String>,
+    pub(crate) pending_script: Vec<Value>,
     pub(crate) notify_count: u64,
     badge: Option<String>,
     pub(crate) diff_collapsed: HashSet<String>,
@@ -186,8 +190,12 @@ impl Workspace {
             inspect_digest: 0,
             activity: vec![],
             clickables: vec![],
+            scripts: None,
+            script_data: Map::new(),
+            script_timers: HashMap::new(),
             focused: true,
             pending_events: vec![],
+            pending_script: vec![],
             notify_count: 0,
             badge: None,
             diff_collapsed: HashSet::new(),
@@ -196,8 +204,116 @@ impl Workspace {
             _tasks: [listen, watch, env_push, designer_listen].into_iter().chain(clicks).collect(),
             _subscriptions: vec![],
         };
+        let mut ws = ws;
         ws.configure_motion();
+        ws.load_scripts();
         ws
+    }
+
+    /** (Re)starts the scripts: a fresh JS context, so edits take effect at once and old timers stop. */
+    pub(crate) fn load_scripts(&mut self) {
+        self.script_timers.clear();
+        self.scripts = crate::script::Scripts::load(&self.settings.scripts);
+        self.pending_script.push(json!({"type": "event", "name": "start", "payload": null}));
+    }
+
+    pub(crate) fn script_deliver(&mut self, message: Value, window: &mut Window, cx: &mut Context<Self>) {
+        let ctx = crate::ui::expr::to_json(&self.context()).to_string();
+        let Some(scripts) = self.scripts.as_mut() else { return };
+        let outs = scripts.deliver(message, ctx);
+        for m in outs {
+            self.script_out(m, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn script_out(&mut self, m: Value, window: &mut Window, cx: &mut Context<Self>) {
+        let id = m["id"].as_u64().unwrap_or(0);
+        match m["type"].as_str().unwrap_or("") {
+            "do" => self.run_action(&m["action"], window, cx),
+            "data" => {
+                if let Some(n) = m["name"].as_str() {
+                    self.script_data.insert(n.to_string(), m["value"].clone());
+                }
+            }
+            "timer" => {
+                let ms = m["ms"].as_u64().unwrap_or(1000).max(16);
+                let repeat = m["repeat"].as_bool().unwrap_or(false);
+                let task = cx.spawn_in(window, async move |this, cx| loop {
+                    cx.background_executor().timer(Duration::from_millis(ms)).await;
+                    let alive = this.update_in(cx, |ws, window, cx| ws.script_deliver(json!({"type": "timer", "id": id, "repeat": repeat}), window, cx));
+                    if alive.is_err() || !repeat {
+                        break;
+                    }
+                });
+                self.script_timers.insert(id, task);
+            }
+            "cancel" => {
+                self.script_timers.remove(&id);
+            }
+            "shell" => {
+                let cmd = m["cmd"].as_str().unwrap_or("").to_string();
+                let home = std::env::var("HOME").unwrap_or_default();
+                cx.spawn_in(window, async move |this, cx| {
+                    let out = cx
+                        .background_spawn(async move {
+                            std::process::Command::new("/bin/sh")
+                                .arg("-c")
+                                .arg(cmd)
+                                .env("PATH", format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"))
+                                .output()
+                        })
+                        .await;
+                    let result = match out {
+                        Ok(o) => json!({"code": o.status.code(), "stdout": String::from_utf8_lossy(&o.stdout), "stderr": String::from_utf8_lossy(&o.stderr)}),
+                        Err(e) => json!({"code": -1, "stdout": "", "stderr": e.to_string()}),
+                    };
+                    this.update_in(cx, |ws, window, cx| ws.script_deliver(json!({"type": "reply", "id": id, "result": result}), window, cx)).ok();
+                })
+                .detach();
+            }
+            "box" => {
+                let call = serde_json::from_value::<Call>(json!({"method": m["method"], "params": m["params"]}));
+                let remote = self.remote.clone();
+                cx.spawn_in(window, async move |this, cx| {
+                    let (result, error) = match call {
+                        Ok(call) => match remote.call(call).await {
+                            Ok(v) => (v, Value::Null),
+                            Err(e) => (Value::Null, Value::String(e.to_string())),
+                        },
+                        Err(e) => (Value::Null, Value::String(format!("unknown box call: {e}"))),
+                    };
+                    this.update_in(cx, |ws, window, cx| ws.script_deliver(json!({"type": "reply", "id": id, "result": result, "error": error}), window, cx)).ok();
+                })
+                .detach();
+            }
+            "write" => {
+                let path = crate::script::expand(m["path"].as_str().unwrap_or(""));
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, m["text"].as_str().unwrap_or(""));
+            }
+            "emit" => {
+                let name = m["event"].as_str().unwrap_or("").to_string();
+                let payload = to_val(&m["payload"]);
+                self.fire_event(&name, vec![("payload".into(), payload)], window, cx);
+                self.pending_script.push(json!({"type": "event", "name": name, "payload": m["payload"]}));
+            }
+            "log" | "error" => {
+                use std::io::Write as _;
+                let text = m["text"].as_str().unwrap_or("").to_string();
+                if m["type"] == "error" {
+                    if let Some(s) = self.scripts.as_mut() {
+                        s.errors.push(text.clone());
+                    }
+                }
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(settings::dir().join("scripts.log")) {
+                    let _ = writeln!(f, "{text}");
+                }
+            }
+            _ => {}
+        }
     }
 
     fn configure_motion(&self) {
@@ -268,6 +384,8 @@ impl Workspace {
                 for p in &ev.paths {
                     if p.file_name().map(|n| n.to_owned()) == name || (defaults_name.is_some() && p.file_name().map(|n| n.to_owned()) == defaults_name) {
                         let _ = tx.send(false);
+                    } else if p.extension().is_some_and(|e| e == "js") && p.parent().is_some_and(|d| d.ends_with("scripts")) {
+                        let _ = tx.send(false);
                     } else if p.file_name().and_then(|n| n.to_str()) == Some("run.json") {
                         let _ = tx.send(true);
                     }
@@ -283,6 +401,9 @@ impl Workspace {
             if let Some(d) = &defaults_dir {
                 let _ = watcher.watch(d, RecursiveMode::NonRecursive);
             }
+            let scripts = crate::script::scripts_dir();
+            let _ = std::fs::create_dir_all(&scripts);
+            let _ = watcher.watch(&scripts, RecursiveMode::NonRecursive);
             while let Ok(first) = rx.recv_async().await {
                 cx.background_executor().timer(Duration::from_millis(80)).await;
                 let (mut reload, mut run) = (!first, first);
@@ -328,9 +449,11 @@ impl Workspace {
                 self.settings_error = None;
                 self.exprs = Exprs::default();
                 self.configure_motion();
+                self.load_scripts();
                 self.pending_motion = true;
                 let ctx = self.context();
                 self.update_badge(&ctx);
+                self.pending_script.push(json!({"type": "event", "name": "model", "payload": null}));
             }
             Err(e) => self.settings_error = Some(format!("{e:#}")),
         }
@@ -378,6 +501,10 @@ impl Workspace {
     }
 
     pub(crate) fn fire_event(&mut self, event: &str, extra: Vec<(String, Val)>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scripts.is_some() && event != "model" {
+            let payload: Map<String, Value> = extra.iter().map(|(k, v)| (k.clone(), crate::ui::expr::to_json(v))).collect();
+            self.pending_script.push(json!({"type": "event", "name": event, "payload": payload}));
+        }
         let Some(spec) = self.settings.events.get(event).cloned() else { return };
         let ctx = crate::ui::expr::with(&self.context(), extra);
         if let Some(cond) = spec.get("if").and_then(Value::as_str) {
@@ -393,6 +520,7 @@ impl Workspace {
     fn write_problems(&mut self) {
         let mut lines: Vec<String> = self.settings_error.iter().cloned().collect();
         lines.extend(self.settings.warnings.iter().cloned());
+        lines.extend(self.scripts.iter().flat_map(|s| s.errors.iter().cloned()));
         lines.extend(self.exprs.errors.borrow().iter().cloned());
         let text = if lines.is_empty() { "No problems.\n".to_string() } else { lines.join("\n") + "\n" };
         if text != self.problems_written {
@@ -556,6 +684,7 @@ impl Workspace {
                 "errors": self.exprs.errors.borrow().iter().chain(self.settings.warnings.iter()).cloned().collect::<Vec<_>>(),
             },
             "now": now,
+            "data": self.script_data,
             "designer": {
                 "working": self.designer.working,
                 "attachments": self.attachments_json(crate::designer::CHAT_ID),
@@ -1072,6 +1201,9 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.register_terminals(cx);
+        for m in std::mem::take(&mut self.pending_script) {
+            self.script_deliver(m, window, cx);
+        }
         for e in std::mem::take(&mut self.pending_events) {
             self.fire_event(&e, vec![], window, cx);
         }

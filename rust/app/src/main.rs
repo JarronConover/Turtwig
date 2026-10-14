@@ -4,6 +4,7 @@ mod diff;
 #[allow(deprecated)]
 mod macos;
 mod remote;
+mod script;
 mod settings;
 mod terminal;
 mod transcript;

@@ -50,6 +50,41 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `terminal` | Terminal font, size, padding, colors. |
 | `connection` | The box: `ssh_host`, `daemon` path, `retry_seconds`. |
 
+## Scripts
+
+Anything the built-in actions and data can't do, a script can: scripts are JavaScript (QuickJS),
+loaded from `scripts` in settings (`{"name": "source"}`) and from every `scripts/<name>.js` next to the
+settings file. Saving one restarts all scripts at once (fresh state, old timers stopped). Errors go to
+`problems.txt`; `ab.log` writes `scripts.log`.
+
+```js
+// a new action, usable anywhere an action is (buttons, keys, palette, run.json, other scripts)
+ab.action("box.uptime", (args, ctx) => {
+  ab.box("exec", { cmd: "uptime -p" }, (r) => ab.data("uptime", r.stdout.trim()));
+});
+// react to things: start, model, settings events (chat.waiting, chat.finished, ...), and your own ab.emit
+ab.on("start", () => ab.every(60000, () => ab.do("box.uptime")));
+ab.on("chat.finished", (p) => ab.log("finished", p.chat.name));
+```
+
+Then show it with a patch: `{ "insert": { "type": "text", "props": { "text": "{{ .data.uptime }}" } }, "after": "status-pill" }`.
+
+| `ab.` | does |
+| --- | --- |
+| `action(name, fn(args, ctx))` | define an action |
+| `on(event, fn(payload, ctx))` / `emit(event, payload)` | handle / raise events (`start` fires on every (re)load; `model` on every box update) |
+| `do(action)` | run any action |
+| `context()` / `state` / `set(key, value)` | read the context and UI state; set state |
+| `data(name, value)` | publish a value as `.data.<name>` for expressions |
+| `every(ms, fn)` / `after(ms, fn)` / `cancel(id)` | timers |
+| `shell(cmd, cb(result))` | run a command on the Mac: `{code, stdout, stderr}` |
+| `box(method, params, cb(result, error))` | call the box daemon: any call (`exec` runs bash on the box: `{cmd, cwd?, timeout_secs?}`) |
+| `fetch(url, cb(result))` | HTTP GET via curl (`result.stdout` is the body) |
+| `read(path)` / `write(path, text)` | files (`~/` allowed) |
+| `notify(text)` / `log(...)` | a notice in the window / a line in scripts.log |
+
+Inline in a node: `"on": { "click": { "do": "js", "code": "ab.notify('hi ' + ctx.selected.worktree.title)" } }`.
+
 ## Patch
 
 Ops run in order after merging, each naming a node by its `id` anywhere in `views` or `components`:
