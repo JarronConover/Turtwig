@@ -863,7 +863,12 @@ impl Workspace {
                 list = list.child(el);
             }
         }
-        let handle = self.scroll_handles.entry(if designer { "designer" } else { "transcript" }.into()).or_default().clone();
+        let handle_key = if designer { "designer" } else { "transcript" };
+        let fresh = !self.scroll_handles.contains_key(handle_key);
+        let handle = self.scroll_handles.entry(handle_key.into()).or_default().clone();
+        if fresh {
+            handle.scroll_to_bottom();
+        }
         div()
             .id(SharedString::from(format!("transcript:{chat_id}")))
             .size_full()
