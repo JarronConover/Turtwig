@@ -50,6 +50,27 @@ pub const ACTIONS: &[(&str, &str)] = &[
 const SETTINGS_AGENT: &str = r#"cd "$HOME/.agent-box/state/settings" && claude -p "You are customizing the Agent Box app for its user. Read SETTINGS.md in this folder first: it documents every setting and holds the full defaults. Then edit settings.jsonc (only that file) to do what the user asks, keeping their existing overrides. The app reloads on save; problems show up in its settings panel, so keep the file valid JSON with comments. When done, reply with one short sentence saying what you changed. The user's request: $REQUEST" --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep 2>&1 | tail -n 1"#;
 
 impl Workspace {
+    /** Applies a worktree move to the local model at once, so the sidebar settles before the box confirms. */
+    fn move_worktree_now(&mut self, path: &str, section: Option<&str>, before: Option<&str>) {
+        let m = &mut self.model;
+        let mut taken = None;
+        for list in m.projects.iter_mut().map(|p| &mut p.items).chain(m.sections.iter_mut().map(|s| &mut s.items)) {
+            if let Some(i) = list.iter().position(|w| w.path == path) {
+                taken = Some(list.remove(i));
+                break;
+            }
+        }
+        let Some(w) = taken else { return };
+        let list = match section {
+            Some(id) => m.sections.iter_mut().find(|s| s.id == id).map(|s| &mut s.items),
+            None => m.projects.iter_mut().find(|p| p.repo == w.repo).map(|p| &mut p.items),
+        };
+        if let Some(list) = list {
+            let at = before.and_then(|b| list.iter().position(|x| x.path == b)).unwrap_or(list.len());
+            list.insert(at, w);
+        }
+    }
+
     pub(crate) fn run_action(&mut self, action: &Value, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             Value::Null => {}
@@ -195,6 +216,7 @@ impl Workspace {
             "worktree.move" => {
                 if let Some(path) = s("path").or_else(|| s("dragged")) {
                     if s("before").as_deref() != Some(path.as_str()) {
+                        self.move_worktree_now(&path, s("section").as_deref(), s("before").as_deref());
                         self.call(Call::WorktreeMove { path, section: s("section"), before: s("before") }, cx);
                     }
                 }
@@ -203,6 +225,10 @@ impl Workspace {
                 if let Some(id) = s("id").or_else(|| s("dragged")) {
                     let ids: Vec<String> = self.model.sections.iter().map(|x| x.id.clone()).filter(|x| *x != id).collect();
                     let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize).or_else(|| s("before").and_then(|b| ids.iter().position(|x| *x == b))).unwrap_or(ids.len());
+                    if let Some(from) = self.model.sections.iter().position(|x| x.id == id) {
+                        let sec = self.model.sections.remove(from);
+                        self.model.sections.insert(index.min(self.model.sections.len()), sec);
+                    }
                     self.call(Call::SectionMove { id, index }, cx);
                 }
             }
@@ -210,6 +236,10 @@ impl Workspace {
                 if let Some(repo) = s("repo").or_else(|| s("dragged")) {
                     let repos: Vec<String> = self.model.projects.iter().map(|p| p.repo.clone()).filter(|r| *r != repo).collect();
                     let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize).or_else(|| s("before").and_then(|b| repos.iter().position(|x| *x == b))).unwrap_or(repos.len());
+                    if let Some(from) = self.model.projects.iter().position(|p| p.repo == repo) {
+                        let p = self.model.projects.remove(from);
+                        self.model.projects.insert(index.min(self.model.projects.len()), p);
+                    }
                     self.call(Call::ProjectMove { repo, index }, cx);
                 }
             }

@@ -137,7 +137,13 @@ fn session(
                 Ok(ServerMessage::Event(e)) => {
                     let _ = in_tx.send(Incoming::Event(e));
                 }
-                Err(_) => {}
+                Err(e) => {
+                    use std::io::Write as _;
+                    let log = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agent-box/remote.log");
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+                        let _ = writeln!(f, "unreadable message from the box ({e}): {}", line.chars().take(300).collect::<String>());
+                    }
+                }
             },
             Err(e) => break e.into(),
         }
