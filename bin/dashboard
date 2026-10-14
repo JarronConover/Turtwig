@@ -201,6 +201,7 @@ def shell_session(path):
     if subprocess.run(["tmux", "has-session", "-t", "=" + name], capture_output=True).returncode != 0:
         subprocess.run(["tmux", "new-session", "-d", "-s", name, "-c", path,
                         str(ROOT / "bin" / "agent-env"), os.environ.get("SHELL", "bash"), "-l"], check=False)
+        subprocess.run(["tmux", "set", "-t", name, "status", "off"], check=False)
     return name
 
 
