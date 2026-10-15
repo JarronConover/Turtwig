@@ -45,11 +45,13 @@
   },
 
   // The logo: `logo` nodes, the Dock icon while the app runs, and the bundle icon (see SETTINGS.md, Logo).
-  // art: SVG markup, or an .svg or image (png/jpg/webp) path; an SVG's currentColor becomes ink. tile: the rounded square behind it.
+  // art: SVG markup, or an .svg or image (png/jpg/webp) path. ink: an SVG's currentColor, and with
+  // tint, the color an image is redrawn in (its transparency kept). tile: the rounded square behind it.
   "logo": {
-    "art": "logo.svg",
-    "ink": "#17171b",
-    "tile": "#f4eee4",
+    "art": "logo.png",
+    "ink": "#111111",
+    "tint": true,
+    "tile": "#ffffff",
     "corner": 0.225,
     "padding": 0,
     "dock": { "margin": 0.098 }

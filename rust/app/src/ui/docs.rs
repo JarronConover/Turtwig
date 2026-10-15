@@ -55,8 +55,8 @@ full at the end of this file. Change anything by overriding it in your settings 
 ## Logo
 
 `logo.art` is SVG markup or the path of an `.svg` file or an image (PNG, JPEG, GIF, WebP) (relative paths look in this folder first, then next
-to the defaults; the built-in art is `logo.svg`). Saving the file updates the app live. `currentColor` in
-the art becomes `logo.ink`. `tile` is the rounded square behind it (a color, or null for none), with
+to the defaults; the built-in art is `logo.png`). Saving the file updates the app live. `currentColor` in
+an SVG becomes `logo.ink`; with `tint: true` an image is redrawn in `ink` too, keeping its transparency. `tile` is the rounded square behind it (a color, or null for none), with
 `corner` (radius) and `padding` as fractions of its side. `dock` overrides any of these for the Dock icon
 (`margin` leaves room around the tile like other macOS icons); `"dock": false` keeps the bundle's icon.
 Colors can be `@theme` tokens. The bundle icon (Finder, the Dock when the app is closed) is rebuilt from

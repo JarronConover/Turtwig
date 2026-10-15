@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub const DEFAULT_ART: &str = include_str!("../logo.svg");
+pub const DEFAULT_ART: &[u8] = include_bytes!("../logo.png");
 
 /** `logo` settings with a node's props laid over them. */
 pub fn spec(logo: &Value, over: &Map<String, Value>) -> Map<String, Value> {
@@ -17,12 +17,12 @@ pub fn spec(logo: &Value, over: &Map<String, Value>) -> Map<String, Value> {
     s
 }
 
-/** SVG markup as given, or the file it names (an .svg or an image): relative paths look in the settings folder, then next to
-the defaults; `logo.svg` falls back to the built-in art. */
-pub fn art(name: &str) -> String {
+/** SVG markup as given, or the file it names (an .svg or an image), and whether it's an image: relative
+paths look in the settings folder, then next to the defaults; anything missing falls back to the built-in art. */
+pub fn art(name: &str) -> (String, bool) {
     let name = name.trim();
     if name.starts_with('<') {
-        return name.to_string();
+        return (name.to_string(), false);
     }
     let p = std::path::PathBuf::from(crate::script::expand(name));
     let mut tries = vec![];
@@ -34,15 +34,14 @@ pub fn art(name: &str) -> String {
             tries.push(d.join(&p));
         }
     }
-    tries.iter().find_map(|p| file_art(p)).unwrap_or_else(|| DEFAULT_ART.to_string())
+    tries.iter().find_map(|p| file_art(p)).unwrap_or_else(|| (wrap_image(DEFAULT_ART, "image/png").unwrap_or_default(), true))
 }
 
 /** An .svg as is; a PNG, JPEG, GIF, or WebP wrapped in an SVG at its own size. */
-fn file_art(p: &std::path::Path) -> Option<String> {
-    use base64::Engine as _;
+fn file_art(p: &std::path::Path) -> Option<(String, bool)> {
     let ext = p.extension()?.to_str()?.to_ascii_lowercase();
     if ext == "svg" {
-        return std::fs::read_to_string(p).ok();
+        return std::fs::read_to_string(p).ok().map(|s| (s, false));
     }
     let mime = match ext.as_str() {
         "png" => "image/png",
@@ -51,9 +50,13 @@ fn file_art(p: &std::path::Path) -> Option<String> {
         "webp" => "image/webp",
         _ => return None,
     };
-    let bytes = std::fs::read(p).ok()?;
-    let size = imagesize::blob_size(&bytes).ok()?;
-    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some((wrap_image(&std::fs::read(p).ok()?, mime)?, true))
+}
+
+fn wrap_image(bytes: &[u8], mime: &str) -> Option<String> {
+    use base64::Engine as _;
+    let size = imagesize::blob_size(bytes).ok()?;
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
     Some(format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {w} {h}"><image width="{w}" height="{h}" xlink:href="data:{mime};base64,{data}"/></svg>"#,
         w = size.width,
@@ -97,14 +100,16 @@ fn rounded(x: f32, y: f32, side: f32, r: f32) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
-/** Renders the logo as a `px`-square PNG. Keys: `art`, `ink` (replaces `currentColor`), `tile` (a color,
-or null for none), `corner` and `padding` (fractions of the tile's side), `margin` (fraction of the image). */
+/** Renders the logo as a `px`-square PNG. Keys: `art`, `ink` (replaces an SVG's `currentColor`; with
+`tint`, also recolors an image, keeping its transparency), `tile` (a color, or null for none), `corner` and `padding` (fractions of the tile's side), `margin` (fraction of the image). */
 pub fn png(spec: &Map<String, Value>, theme: &Map<String, Value>, px: u32) -> Option<Vec<u8>> {
     let f = |k: &str, d: f32| spec.get(k).and_then(Value::as_f64).map(|v| v as f32).unwrap_or(d);
-    let mut svg = art(spec.get("art").and_then(Value::as_str).unwrap_or("logo.svg"));
-    if let Some(ink) = color(spec.get("ink"), theme) {
-        svg = svg.replace("currentColor", &ink);
+    let (mut svg, image) = art(spec.get("art").and_then(Value::as_str).unwrap_or("logo.png"));
+    let ink = color(spec.get("ink"), theme);
+    if let Some(ink) = &ink {
+        svg = svg.replace("currentColor", ink);
     }
+    let tint = ink.as_deref().and_then(rgba).filter(|_| image && spec.get("tint").and_then(Value::as_bool) == Some(true));
     let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
     let mut pm = tiny_skia::Pixmap::new(px, px)?;
     let size = px as f32;
@@ -132,6 +137,15 @@ pub fn png(spec: &Map<String, Value>, theme: &Map<String, Value>, px: u32) -> Op
     let (dx, dy) = (inner.0 + (inner.1 - ts.width() * scale) / 2., inner.0 + (inner.1 - ts.height() * scale) / 2.);
     let mut art = tiny_skia::Pixmap::new(px, px)?;
     resvg::render(&tree, tiny_skia::Transform::from_row(scale, 0., 0., scale, dx, dy), &mut art.as_mut());
+    if let Some(c) = tint {
+        let (r, g, b) = (c.red(), c.green(), c.blue());
+        for p in art.pixels_mut() {
+            let a = p.alpha() as f32 / 255.;
+            if let Some(q) = tiny_skia::PremultipliedColorU8::from_rgba((r * a * 255.) as u8, (g * a * 255.) as u8, (b * a * 255.) as u8, p.alpha()) {
+                *p = q;
+            }
+        }
+    }
     pm.draw_pixmap(0, 0, art.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), clip.as_ref());
     pm.encode_png().ok()
 }
