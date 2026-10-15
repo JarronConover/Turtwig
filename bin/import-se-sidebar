@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""Mirror super.engineering's sidebar on the box: its open worktrees (same
+branch, with uncommitted changes), its manual sections, worktree titles, and
+the chats that ran in each worktree. Run on the Mac.
+
+Branches travel as a git bundle over ssh, never through GitLab (a push there
+starts CI). Uncommitted work rides along as two commits (index, then working
+tree, untracked files included, ignored ones not) that are unpacked into the
+new worktree: staged stays staged, unstaged stays unstaged. A worktree whose
+MR merged and that has nothing local is skipped. Safe to re-run: a worktree
+that already exists on the box is left as it is; sections, titles and chat
+placement are brought up to date.
+"""
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import urllib.parse
+from pathlib import Path
+
+HOME = Path.home()
+HERE = Path(__file__).resolve().parent
+SC = HOME / ".super.engineering" / "bin" / "sc"
+BOX_HOME = "/home/coder"
+# super.engineering project name -> (box repo key, GitLab project, box checkout, box worktree base)
+REPOS = {
+    "redo": ("redo", "redo/redoapp/product/redo", f"{BOX_HOME}/dev/redo", f"{BOX_HOME}/dev/redo-worktrees"),
+    "redotech-internal-tools": ("internal-tools", "redo/redoapp/internal/redotech-internal-tools",
+                                f"{BOX_HOME}/dev/redotech-internal-tools",
+                                f"{BOX_HOME}/dev/redotech-internal-tools-worktrees"),
+    "redo-data": ("redo-data", "redo/redoapp/product/redo-data", f"{BOX_HOME}/dev/redo-data",
+                  f"{BOX_HOME}/dev/redo-data-worktrees"),
+}
+BIG_FILE = 20 * 1024 * 1024
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+chats = load("import_se_chats", HERE / "import-se-chats")
+chat_mod = chats.chat_mod
+BOX = chat_mod.BOX_SSH
+
+
+def run(cmd, **kw):
+    kw.setdefault("capture_output", True)
+    kw.setdefault("text", True)
+    return subprocess.run(cmd, **kw)
+
+
+def git(path, *args, env=None, check=True):
+    r = run(["git", "-C", str(path), *args], env=env)
+    if check and r.returncode:
+        sys.exit(f"git {' '.join(args)} in {path}: {r.stderr.strip()}")
+    return r.stdout.strip()
+
+
+def box(script, payload):
+    """Run a python snippet on the box (agent-env PATH) with a JSON argument; returns its last JSON line."""
+    remote = f"$HOME/agent-box/bin/agent-env python3 -c {shlex.quote(script)} {shlex.quote(json.dumps(payload))}"
+    r = run(["ssh", "-n", BOX, remote], timeout=7200)
+    if r.returncode:
+        sys.exit(f"box: {r.stderr.strip()[-2000:]}")
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def se_sidebar():
+    """(sections in order, worktree items) from super.engineering's own CLI."""
+    ws = json.loads(run([str(SC), "workspace", "list", "--json"], check=True).stdout)
+    secs = json.loads(run([str(SC), "section", "list", "--json"], check=True).stdout)["sections"]
+    manual = [s for s in secs if not s.get("built_in")]
+    items, project_order = [], []
+    for sec in ws["response"]["workspaces"][0]["sections"]:
+        if sec.get("kind") == "projects":
+            for proj in sec.get("projects", []):
+                project_order.append(proj["name"])
+                for n, it in enumerate(proj["items"]):
+                    items.append({**it, "section": None, "order": n})
+        else:
+            for n, it in enumerate(sec.get("items", [])):
+                items.append({**it, "section": sec["id"], "order": n})
+    return manual, [i for i in items if not i["is_primary"] and i["project_name"] in REPOS], project_order
+
+
+def merged_clean(it):
+    """Skip reason when the branch's MR merged and nothing is left locally, else None."""
+    path = it["path"]
+    if git(path, "status", "--porcelain"):
+        return None
+    project = urllib.parse.quote(REPOS[it["project_name"]][1], safe="")
+    branch = urllib.parse.quote(it["branch"], safe="")
+    out = run(["glab", "api", f"projects/{project}/merge_requests?source_branch={branch}&state=all&per_page=20"])
+    mrs = json.loads(out.stdout) if out.returncode == 0 and out.stdout.strip() else []
+    if any(m["state"] == "opened" for m in mrs):
+        return None
+    head = git(path, "rev-parse", "HEAD")
+    for m in mrs:
+        if m["state"] == "merged" and (m.get("sha") == head or run(
+                ["git", "-C", path, "merge-base", "--is-ancestor", head, m.get("merge_commit_sha") or m["sha"]]
+        ).returncode == 0):
+            return f"merged !{m['iid']}, nothing local"
+    return None
+
+
+def wip_commits(path):
+    """Commits holding the worktree's index and working tree on top of HEAD, or None when clean."""
+    if not git(path, "status", "--porcelain"):
+        return None, []
+    big = [f for f in git(path, "ls-files", "-z", "--others", "--exclude-standard").split("\0")
+           if f and os.path.getsize(os.path.join(path, f)) > BIG_FILE]
+    index_tree = git(path, "write-tree")
+    env = dict(os.environ, GIT_AUTHOR_NAME="se-import", GIT_AUTHOR_EMAIL="tj@getredo.com",
+               GIT_COMMITTER_NAME="se-import", GIT_COMMITTER_EMAIL="tj@getredo.com")
+    index_commit = git(path, "commit-tree", index_tree, "-p", "HEAD", "-m", "se-import: index", env=env)
+    with tempfile.TemporaryDirectory() as tmp:
+        env_idx = dict(env, GIT_INDEX_FILE=os.path.join(tmp, "index"))
+        git(path, "read-tree", index_tree, env=env_idx)
+        git(path, "add", "-A", "--", ".", *[f":(exclude,literal){f}" for f in big], env=env_idx)
+        work_tree = git(path, "write-tree", env=env_idx)
+    return git(path, "commit-tree", work_tree, "-p", index_commit, "-m", "se-import: work", env=env), big
+
+
+BOX_STATE = r"""
+import json, os, subprocess, sys
+out = {}
+for key, checkout, base in json.loads(sys.argv[1]):
+    subprocess.run(["git", "-C", checkout, "fetch", "-q", "origin"], capture_output=True)
+    main = subprocess.run(["git", "-C", checkout, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
+    out[key] = {"main": main, "exists": sorted(os.listdir(base)) if os.path.isdir(base) else []}
+print(json.dumps(out))
+"""
+
+BOX_APPLY = r"""
+import importlib.machinery, importlib.util, json, os, subprocess, sys
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, os.path.expanduser(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    m = importlib.util.module_from_spec(spec); loader.exec_module(m); return m
+chat = load("chat", "~/agent-box/bin/chat")
+sc = load("sc", "~/agent-box/shim/sc")
+job = json.loads(sys.argv[1])
+def git(cwd, *args, **kw):
+    return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, **kw)
+result = {}
+for repo, bundle in job["bundles"].items():
+    checkout = str(chat.PRIMARY[repo])
+    specs = [f"{r}:{r}" for r in job["refs"][repo]]
+    r = git(checkout, "fetch", "-q", bundle, *specs)
+    result[f"fetch:{repo}"] = r.stderr.strip() or "ok"
+    os.remove(bundle)
+for it in job["create"]:
+    try:
+        checkout = str(chat.PRIMARY[it["repo"]])
+        if git(checkout, "rev-parse", "-q", "--verify", f"refs/heads/{it['branch']}").returncode:
+            git(checkout, "branch", "--no-track", it["branch"], it["sha"], check=True)
+        path = str(chat.ensure_worktree({"repo": it["repo"], "branch": it["branch"]}))
+        if it.get("wip"):
+            idx, work = it["wip"] + "^", it["wip"]
+            for args, base, tip in ((["apply", "--index", "--binary"], "HEAD", idx), (["apply", "--binary"], idx, work)):
+                diff = git(path, "diff", "--binary", base, tip).stdout
+                if diff:
+                    a = subprocess.run(["git", "-C", path, *args], input=diff, capture_output=True, text=True)
+                    if a.returncode:
+                        raise RuntimeError("apply: " + a.stderr.strip())
+            git(path, "update-ref", "-d", it["wip_ref"])
+        result[it["key"]] = {"path": path}
+    except (SystemExit, Exception) as err:
+        result[it["key"]] = {"error": str(err)}
+with sc.Store() as s:
+    secs = s.data["sections"]
+    mine = []
+    for sec in job["sections"]:
+        cur = next((x for x in secs if x["section_id"] == sec["section_id"]), None)
+        if cur:
+            secs.remove(cur)
+            cur.update(name=sec["name"], collapsed=sec.get("collapsed", False))
+        else:
+            cur = {"section_id": sec["section_id"], "name": sec["name"], "kind": "manual", "rules": [],
+                   "priority": None, "collapsed": sec.get("collapsed", False), "built_in": False}
+        mine.append(cur)
+    s.data["sections"] = mine + secs
+    s.data["project_order"] = job["project_order"]
+    for path, meta in job["placement"].items():
+        if os.path.isdir(path):
+            m = s.wt(path)
+            m["label"], m["order"] = meta["label"], meta["order"]
+            if meta["section"]:
+                m["section"] = meta["section"]
+            else:
+                m.pop("section", None)
+    s.save("import super.engineering sidebar")
+print(json.dumps(result))
+"""
+
+
+def box_path(it):
+    return f"{REPOS[it['project_name']][3]}/{it['branch'].replace('/', '-')}"
+
+
+def place_chats(worktrees, dry_run):
+    """Register every chat that ran in a mirrored worktree on its box worktree (stopped)."""
+    chat_mod.git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+    titles = {}
+    for conv_id, _, title, sessions in chats.se_conversations():
+        for sid in sessions:
+            titles[sid] = title
+    changed = []
+    for it in worktrees:
+        slug_dir = chats.PROJECTS / chat_mod.project_slug(it["path"])
+        for src in sorted(slug_dir.glob("*.jsonl")):
+            cwd, _, prompts, last = chats.read_transcript(src)
+            if prompts < 1:
+                continue
+            chat_id, dst = src.stem, it["box_path"]
+            entry = chat_mod.load(chat_id)
+            if entry and entry.get("dir") == dst:
+                print(f"    chat {chat_id[:8]} {entry['name']}: in place")
+                if not dry_run:
+                    chats.copy_transcript(src, dst, chat_id)
+                continue
+            name = (entry or {}).get("name") or titles.get(chat_id) or chat_id[:8]
+            print(f"    chat {chat_id[:8]} {name}: {'move from ' + entry['dir'] if entry else 'import'} -> {dst}")
+            if dry_run:
+                continue
+            if entry and entry.get("dir"):
+                # Move the box's copy, which may have newer turns than the Mac's.
+                # ~/dev/redo is a link to ~/project, and claude names folders by the real path.
+                old = ".claude/projects/" + ("-home-coder-project" if entry["dir"] == f"{BOX_HOME}/dev/redo"
+                                             else chat_mod.project_slug(entry["dir"]))
+                new = f".claude/projects/{chat_mod.project_slug(dst)}"
+                run(["ssh", "-n", BOX, f"[ -e {new}/{chat_id}.jsonl ] || [ ! -e {old}/{chat_id}.jsonl ] || "
+                     f"{{ mkdir -p {new} && mv {old}/{chat_id}.jsonl {new}/ && "
+                     f"{{ [ ! -d {old}/{chat_id} ] || mv {old}/{chat_id} {new}/; }}; }}"])
+            chats.copy_transcript(src, dst, chat_id)
+            entry = entry or {"id": chat_id, "parent": None, "feature": None, "base": None, "model": None,
+                              "host": "box", "status": "stopped", "imported_from": "super.engineering",
+                              "created_at": chat_mod.now()}
+            entry.update(name=name, repo=REPOS[it["project_name"]][0], branch=it["branch"], dir=dst,
+                         kind="orchestrator" if it["title"].startswith("🧠") else "feature",
+                         updated_at=chat_mod.now())
+            changed.append(entry)
+    if changed:
+        with chat_mod.StateLock():
+            for entry in changed:
+                (chat_mod.REGISTRY / f"{entry['id']}.json").write_text(json.dumps(entry, indent=2) + "\n")
+            chat_mod.commit_state(f"place {len(changed)} super.engineering chats on their worktrees")
+        if (chat_mod.STATE_DIR / ".git" / "rebase-merge").exists():
+            print(f"warning: the state branch rebase stopped on a conflict (the box changed one of these chats);"
+                  f" resolve it in {chat_mod.STATE_DIR} and push", file=sys.stderr)
+    return len(changed)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="import-se-sidebar", description=__doc__.splitlines()[0])
+    p.add_argument("--dry-run", action="store_true", help="show the plan; change nothing")
+    p.add_argument("--only", help="only worktrees whose path contains this")
+    args = p.parse_args()
+
+    sections, items, project_order = se_sidebar()
+    if args.only:
+        items = [i for i in items if args.only in i["path"]]
+    box_state = box(BOX_STATE, [[name, v[2], v[3]] for name, v in REPOS.items()])
+
+    # Bundles leave out what the box already has: its main when the Mac has that
+    # commit, else the Mac's older origin/main, which the box has too.
+    bases = {}
+    for name in REPOS:
+        checkout, basis = HOME / "dev" / name, box_state[name]["main"]
+        if run(["git", "-C", str(checkout), "cat-file", "-e", basis]).returncode:
+            basis = git(checkout, "rev-parse", "origin/main")
+        bases[name] = basis
+
+    keep, skipped, create = [], [], []
+    for it in items:
+        if not os.path.isdir(it["path"]):
+            skipped.append((it, "folder missing on the Mac"))
+            continue
+        it["box_path"] = box_path(it)
+        exists = Path(it["box_path"]).name in box_state[it["project_name"]]["exists"]
+        reason = None if exists else merged_clean(it)
+        if reason:
+            skipped.append((it, reason))
+            continue
+        keep.append(it)
+        if not exists:
+            create.append(it)
+
+    refs, bundles, jobs = {}, {}, []
+    for it in create:
+        wip, big = (None, []) if args.dry_run else wip_commits(it["path"])
+        repo = REPOS[it["project_name"]][0]
+        sha = git(it["path"], "rev-parse", "HEAD")
+        job = {"key": it["path"], "repo": repo, "branch": it["branch"], "sha": sha}
+        refs.setdefault(it["project_name"], [])
+        # A branch with nothing beyond the box's main can't ride in the bundle; the box makes it from the sha.
+        if run(["git", "-C", it["path"], "merge-base", "--is-ancestor", sha,
+                bases[it["project_name"]]]).returncode:
+            refs[it["project_name"]].append(f"refs/heads/{it['branch']}")
+        if wip:
+            ref = f"refs/se-import/{it['branch']}"
+            git(it["path"], "update-ref", ref, wip)
+            refs[it["project_name"]].append(ref)
+            job.update(wip=wip, wip_ref=ref)
+        jobs.append(job)
+        dirty = len(git(it["path"], "status", "--porcelain").splitlines())
+        print(f"  create  {it['project_name']}/{it['branch']}  [{it['title']}]"
+              f"{f'  {dirty} uncommitted' if dirty else ''}{f'  (left out, >20MB: {big})' if big else ''}")
+    for it in keep:
+        if it not in create:
+            print(f"  exists  {it['project_name']}/{it['branch']}  [{it['title']}]")
+    for it, why in skipped:
+        print(f"  skip    {it['project_name']}/{it['branch']}  [{it['title']}]  ({why})")
+
+    if not args.dry_run and create:
+        for name, rs in refs.items():
+            if not rs:
+                continue
+            checkout = HOME / "dev" / name
+            basis = bases[name]
+            local = Path(tempfile.gettempdir()) / f"se-import-{name}.bundle"
+            git(checkout, "bundle", "create", "-q", str(local), *rs, "--not", basis)
+            remote = f".agent-box/se-import-{name}.bundle"
+            run(["rsync", "-a", str(local), f"{BOX}:{remote}"], check=True)
+            local.unlink()
+            bundles[REPOS[name][0]] = f"{BOX_HOME}/{remote}"
+        for job in jobs:
+            if job.get("wip_ref"):
+                git(job["key"], "update-ref", "-d", job["wip_ref"])
+
+    if not args.dry_run:
+        placement = {it["box_path"]: {"section": it["section"], "order": it["order"], "label": it["title"]}
+                     for it in keep}
+        job = {"bundles": bundles, "refs": {REPOS[n][0]: rs for n, rs in refs.items() if rs}, "create": jobs,
+               "sections": sections, "placement": placement,
+               "project_order": [REPOS[n][0] for n in project_order if n in REPOS]}
+        result = box(BOX_APPLY, job)
+        for key, value in result.items():
+            if isinstance(value, dict) and "error" in value or key.startswith("fetch:") and value != "ok":
+                print(f"  FAIL {key}: {value}")
+    moved = place_chats(keep, args.dry_run)
+    print(f"{'would create' if args.dry_run else 'created'} {len(create)} worktrees, {len(keep) - len(create)} already"
+          f" there, skipped {len(skipped)}; {moved} chats placed")
+
+
+if __name__ == "__main__":
+    main()
