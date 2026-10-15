@@ -8,5 +8,6 @@ if [ -n "${CODER_AGENT_URL:-}" ]; then
   # shim/sc: super.engineering's CLI, backed by git worktrees and the registry.
   export PATH="$HOME/agent-box/shim:$HOME/redo-monorepo-worktrees/bin:$HOME/.local/bin:$PATH"
   export WT_PRIMARY="$HOME/dev/redo" WT_BASE="$HOME/dev/redo-worktrees"
+  export REDO_GITLAB_USER_AUTH=1
 fi
 exec "$@"

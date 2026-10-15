@@ -4,6 +4,9 @@ AGENT_BOX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ -n "${CODER_AGENT_URL:-}" ]; then
   AGENT_HOST=box
+  # The image's glab wrapper uses TJ's Coder GitLab token only with this set;
+  # without it glab falls back to a config with no token and gets a 401.
+  export REDO_GITLAB_USER_AUTH=1
   AGENT_BOX_REPO_URL="${AGENT_BOX_REPO_URL:-https://gitlab.com/tj15/agent-box.git}"
 else
   AGENT_HOST=mac

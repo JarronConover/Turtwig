@@ -64,6 +64,14 @@ if [ "$AGENT_HOST" = box ]; then
   jq '.hasCompletedOnboarding = true | .theme = (.theme // "dark")' "$cfg" > "$tmp" && cat "$tmp" > "$cfg"
   rm -f "$tmp"
 
+  # GitLab refuses the box's ssh key; https works through Coder's GitLab
+  # credential helper. Route every gitlab.com ssh URL over https (glab's git
+  # protocol defaults to ssh, and only redo/ URLs were rewritten before).
+  for from in git@gitlab.com: ssh://git@gitlab.com/; do
+    git config --global --get-all url.https://gitlab.com/.insteadOf | grep -qxF "$from" \
+      || git config --global --add url.https://gitlab.com/.insteadOf "$from"
+  done
+
   # Second trigger: any ssh into the box runs boot if it hasn't run.
   line='[ -f /tmp/agent-box-booted ] || AGENT_BOX_TRIGGER=ssh "$HOME/agent-box/bin/session-start" < /dev/null'
   grep -qxF "$line" "$HOME/.bashrc" 2> /dev/null || printf '\n%s\n' "$line" >> "$HOME/.bashrc"

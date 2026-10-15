@@ -21,4 +21,13 @@ rsync -au "$host:$box_memory" "$mac_memory"
 ssh -n "$host" 'mkdir -p ~/.config/redo' 2> /dev/null
 rsync -au "$HOME/.config/redo/cursor-environments.json" "$HOME/.config/redo/cursor-typecheck-agents.json" \
   "$host:.config/redo/"
+# Safety hooks: the Linear issue guards and the no-squash rule. Each push
+# replaces the box's copies of them; the box's own hooks stay.
+synced='def synced: .matcher == "mcp__.+__save_issue" or any(.hooks[]?; (.command // "") | test("block-squash"));'
+hooks=$(jq -c "$synced"' [.hooks.PreToolUse[]? | select(synced)]' "$HOME/.claude/settings.json")
+merge="$synced"' .hooks.PreToolUse = ([.hooks.PreToolUse[]? | select(synced | not)] + $new)'
+ssh -n "$host" 'mkdir -p ~/.claude/hooks' 2> /dev/null
+rsync -a "$HOME/.claude/hooks/block-squash.py" "$host:.claude/hooks/"
+ssh -n "$host" "f=~/.claude/settings.json; [ -s \$f ] || echo '{}' > \$f; tmp=\$(mktemp)
+  jq --argjson new $(printf %q "$hooks") $(printf %q "$merge") \$f > \$tmp && cat \$tmp > \$f; rm -f \$tmp" 2> /dev/null
 echo "env pushed to $host"
