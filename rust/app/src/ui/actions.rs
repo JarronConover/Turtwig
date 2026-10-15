@@ -269,6 +269,7 @@ impl Workspace {
                                         s.set_value(joined, window, cx);
                                         s.focus(window, cx);
                                     });
+                                    window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
                                 }
                             }
                             "queue.send_now" => {

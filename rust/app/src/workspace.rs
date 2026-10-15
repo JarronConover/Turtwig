@@ -1139,9 +1139,27 @@ impl Workspace {
             s.set_value(next, window, cx);
             s.focus(window, cx);
         });
+        window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
         self.completion = None;
         self.ctx_rev += 1;
         cx.notify();
+    }
+
+    /** Tab: takes the highlighted completion, or fills in Claude Code's suggestion when the box is empty. */
+    fn on_tab(&mut self, chat: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion.as_ref().is_some_and(|x| x.0 == chat) {
+            self.accept_completion(None, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        let suggestion = self.chat(chat).filter(|c| c.state == "idle").and_then(|c| c.suggestion.clone());
+        if let (Some(text), Some(state)) = (suggestion, self.composers.get(chat).cloned()) {
+            if state.read(cx).value().is_empty() {
+                state.update(cx, |s, cx| s.set_value(text, window, cx));
+                window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
+                cx.stop_propagation();
+            }
+        }
     }
 
     pub(crate) fn move_completion(&mut self, by: i64, cx: &mut Context<Self>) {
@@ -1532,37 +1550,58 @@ impl Workspace {
         Some(
             div()
                 .id(SharedString::from(format!("composer:{chat}")))
-                .capture_key_down(move |e: &KeyDownEvent, window, cx| {
-                    let _ = key_view.update(cx, |ws, cx| {
-                        if e.keystroke.modifiers.modified() {
-                            return;
-                        }
-                        if e.keystroke.key == "tab" && !ws.completion.as_ref().is_some_and(|c| c.0 == key_chat) {
-                            let suggestion = ws.chat(&key_chat).filter(|c| c.state == "idle").and_then(|c| c.suggestion.clone());
-                            if let (Some(text), Some(state)) = (suggestion, ws.composers.get(&key_chat).cloned()) {
-                                if state.read(cx).value().is_empty() {
-                                    state.update(cx, |s, cx| s.set_value(text, window, cx));
-                                    cx.stop_propagation();
-                                }
+                // The input binds these keys to its own actions, so take them while a list is open.
+                .capture_action({
+                    let (v, c) = (key_view.clone(), key_chat.clone());
+                    move |_: &gpui_kit::component::input::MoveUp, _, cx| {
+                        let _ = v.update(cx, |ws, cx| {
+                            if ws.completion.as_ref().is_some_and(|x| x.0 == c) {
+                                ws.move_completion(-1, cx);
+                                cx.stop_propagation();
                             }
-                            return;
-                        }
-                        if !ws.completion.as_ref().is_some_and(|c| c.0 == key_chat) {
-                            return;
-                        }
-                        match e.keystroke.key.as_str() {
-                            "up" => ws.move_completion(-1, cx),
-                            "down" => ws.move_completion(1, cx),
-                            "tab" | "enter" => ws.accept_completion(None, window, cx),
-                            "escape" => {
+                        });
+                    }
+                })
+                .capture_action({
+                    let (v, c) = (key_view.clone(), key_chat.clone());
+                    move |_: &gpui_kit::component::input::MoveDown, _, cx| {
+                        let _ = v.update(cx, |ws, cx| {
+                            if ws.completion.as_ref().is_some_and(|x| x.0 == c) {
+                                ws.move_completion(1, cx);
+                                cx.stop_propagation();
+                            }
+                        });
+                    }
+                })
+                .capture_action({
+                    let (v, c) = (key_view.clone(), key_chat.clone());
+                    move |_: &gpui_kit::component::input::Escape, _, cx| {
+                        let _ = v.update(cx, |ws, cx| {
+                            if ws.completion.as_ref().is_some_and(|x| x.0 == c) {
                                 ws.completion = None;
                                 ws.ctx_rev += 1;
                                 cx.notify();
+                                cx.stop_propagation();
                             }
-                            _ => return,
-                        }
-                        cx.stop_propagation();
-                    });
+                        });
+                    }
+                })
+                .capture_action({
+                    let (v, c) = (key_view.clone(), key_chat.clone());
+                    move |e: &gpui_kit::component::input::Enter, window, cx| {
+                        let _ = v.update(cx, |ws, cx| {
+                            if !e.shift && !e.secondary && ws.completion.as_ref().is_some_and(|x| x.0 == c) {
+                                ws.accept_completion(None, window, cx);
+                                cx.stop_propagation();
+                            }
+                        });
+                    }
+                })
+                .capture_action({
+                    let (v, c) = (key_view.clone(), key_chat.clone());
+                    move |_: &gpui_kit::component::input::IndentInline, window, cx| {
+                        let _ = v.update(cx, |ws, cx| ws.on_tab(&c, window, cx));
+                    }
                 })
                 .flex()
                 .flex_col()
