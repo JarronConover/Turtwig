@@ -75,7 +75,10 @@
     "sidebar_width": 339,
     "terminal_height": 300,
     "bottom_tab": "terminal",
-    "diff_base": "uncommitted"
+    "diff_base": "uncommitted",
+    // Sidebar rows: "worktrees" (one row per worktree; its chats are tabs) or "chats" (each worktree's
+    // chats listed under its row too).
+    "sidebar_rows": "worktrees"
   },
 
   "views": {
@@ -673,8 +676,8 @@
     },
 
     "WorktreeChats": {
-      "about": "A worktree's chats under its sidebar row, open ones first, then newest; the first `chat.sidebar_chats` (5) unless expanded. Clicking one opens it (resuming its process). props: w (a worktree), indent (left padding).",
-      "if": "(.props.w.chats | length) > 0",
+      "about": "Only when state.sidebar_rows is \"chats\": a worktree's chats under its sidebar row, open ones first, then newest; the first `chat.sidebar_chats` (5) unless expanded. Clicking one opens it (resuming its process). props: w (a worktree), indent (left padding).",
+      "if": ".state.sidebar_rows == \"chats\" and (.props.w.chats | length) > 0",
       "type": "column",
       "style": { "padding": [0, 0, 2, 0] },
       "children": [
@@ -946,6 +949,8 @@
     { "label": "New orchestrator chat in redo", "do": { "do": "chat.new", "repo": "redo", "kind": "orchestrator" } },
     { "label": "New feature chat in redo…", "do": { "do": "prompt", "title": "Branch name", "then": { "do": "chat.new", "repo": "redo", "kind": "feature", "branch": "{{ .input }}" } } },
     { "label": "New section…", "do": "section.new" },
+    { "label": "Sidebar: list chats under worktrees", "if": ".state.sidebar_rows != \"chats\"", "do": { "do": "state.set", "key": "sidebar_rows", "value": "chats" } },
+    { "label": "Sidebar: worktrees only", "if": ".state.sidebar_rows == \"chats\"", "do": { "do": "state.set", "key": "sidebar_rows", "value": "worktrees" } },
     { "label": "Toggle sidebar", "do": { "do": "state.toggle", "key": "sidebar_open" } },
     { "label": "Toggle terminal", "do": { "do": "state.toggle", "key": "terminal_open" } },
     { "label": "Open in Cursor", "if": ".selected.worktree", "do": { "do": "open", "url": "cursor://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } },
