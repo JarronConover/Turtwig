@@ -1176,6 +1176,8 @@
     "queue": true,
     // Typing with nothing focused goes to the selected chat's message box.
     "type_to_focus": true,
+    // Claude Code's suggested next prompt shows in the empty message box; Tab fills it in (doesn't send).
+    "suggestions": true,
     // Copy and Fork under each message while you hover it.
     "message_actions": true,
     // Select and copy message text with the mouse.

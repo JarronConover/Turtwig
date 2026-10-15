@@ -50,6 +50,7 @@ pub struct Workspace {
     pub(crate) queued: HashMap<String, Vec<String>>,
     /** This view, for click handlers built without a `cx` (message actions). */
     pub(crate) view_handle: Option<WeakEntity<Workspace>>,
+    placeholders: HashMap<String, String>,
     /** When a queued message last went out, so it isn't sent twice before the chat turns busy. */
     queue_sent: HashMap<String, std::time::Instant>,
     pub(crate) settings: Settings,
@@ -198,6 +199,7 @@ impl Workspace {
             completion: None,
             queued: HashMap::new(),
             view_handle: None,
+            placeholders: HashMap::new(),
             queue_sent: HashMap::new(),
             settings,
             settings_error,
@@ -1502,6 +1504,16 @@ impl Workspace {
                 self.ctx_rev += 1;
             }
         }
+        // Claude Code's suggested next prompt shows as the placeholder; Tab fills it in (`chat.suggestions`).
+        let suggestion = (self.settings.chat.get("suggestions").and_then(Value::as_bool) != Some(false))
+            .then(|| self.chat(&chat).filter(|c| c.state == "idle").and_then(|c| c.suggestion.clone()))
+            .flatten();
+        let fallback = self.settings.chat.get("placeholder").and_then(Value::as_str).unwrap_or("Message the agent…").to_string();
+        let wanted = suggestion.as_ref().map(|s| format!("{s}   ⇥ Tab")).unwrap_or(fallback);
+        if chat != crate::designer::CHAT_ID && self.placeholders.get(&chat) != Some(&wanted) {
+            self.placeholders.insert(chat.clone(), wanted.clone());
+            c.update(cx, |s, cx| s.set_placeholder(wanted, window, cx));
+        }
         let view = cx.entity().downgrade();
         let (paste_view, paste_chat) = (view.clone(), chat.clone());
         let textarea = Textarea::new(&c).appearance(false).on_paste(move |item, window, cx| {
@@ -1522,7 +1534,20 @@ impl Workspace {
                 .id(SharedString::from(format!("composer:{chat}")))
                 .capture_key_down(move |e: &KeyDownEvent, window, cx| {
                     let _ = key_view.update(cx, |ws, cx| {
-                        if !ws.completion.as_ref().is_some_and(|c| c.0 == key_chat) || e.keystroke.modifiers.modified() {
+                        if e.keystroke.modifiers.modified() {
+                            return;
+                        }
+                        if e.keystroke.key == "tab" && !ws.completion.as_ref().is_some_and(|c| c.0 == key_chat) {
+                            let suggestion = ws.chat(&key_chat).filter(|c| c.state == "idle").and_then(|c| c.suggestion.clone());
+                            if let (Some(text), Some(state)) = (suggestion, ws.composers.get(&key_chat).cloned()) {
+                                if state.read(cx).value().is_empty() {
+                                    state.update(cx, |s, cx| s.set_value(text, window, cx));
+                                    cx.stop_propagation();
+                                }
+                            }
+                            return;
+                        }
+                        if !ws.completion.as_ref().is_some_and(|c| c.0 == key_chat) {
                             return;
                         }
                         match e.keystroke.key.as_str() {
