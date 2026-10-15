@@ -602,7 +602,7 @@
           "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 140 },
           "children": [{ "type": "spinner", "props": { "size": "xsmall" } }, { "type": "text", "props": { "text": "Starting…" } }]
         },
-        { "if": ".selected.worktree", "type": "divider", "props": { "axis": "y" }, "style": { "margin": [8, 4] } },
+        { "if": ".selected.worktree", "id": "chat-tab-divider", "type": "divider", "props": { "axis": "y" }, "style": { "height": 14, "self": "center", "margin": [0, 4] } },
         {
           "if": ".selected.worktree",
           "id": "chat-tab-new",
