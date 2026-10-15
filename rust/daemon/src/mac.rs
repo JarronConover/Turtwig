@@ -496,6 +496,35 @@ pub fn chat_start(chat_id: &str) -> Result<Value, String> {
        None, None)
 }
 
+fn new_uuid() -> String {
+    let mut b = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut b);
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/** Fork a chat into a new terminal tab of its worktree: `claude --resume <its session>
+--fork-session` under a new id, which stdout starts with. */
+pub fn chat_fork(chat_id: &str) -> Result<Value, String> {
+    let source = transcript_for(chat_id).and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .ok_or("no session to fork for this chat")?;
+    let dir = tab(chat_id).map(|t| t.worktree)
+        .or_else(|| se_chats().get(chat_id).and_then(|(_, s)| str_of(s, "worktree_path")))
+        .or_else(|| transcript_cwd(chat_id))
+        .ok_or("don't know which worktree this chat ran in")?;
+    let id = new_uuid();
+    let label = format!("abx-{}", &id[..8]);
+    let command = format!("claude --resume {source} --fork-session --session-id {id}");
+    sc(&["terminal", "new", "--standalone", "--worktree", &dir, "--label", &label, "--command", &command, "--output", "json"],
+       None, None)?;
+    Ok(json!({ "stdout": format!("{id}  {dir}\n") }))
+}
+
 /** A new chat in super.engineering's chat view; stdout starts with its id. */
 pub fn chat_new(dir: Option<&str>, prompt: Option<&str>, model: Option<&str>) -> Result<Value, String> {
     let dir = match dir.filter(|d| !d.is_empty()) {
