@@ -902,7 +902,8 @@ impl Workspace {
     /** Whether a chat shows as a tab: its process is running (or starting, or was just opened), and it
     wasn't closed. Worktrees open with no tabs unless a chat there is live. */
     pub(crate) fn chat_open(&self, c: &Chat) -> bool {
-        !self.closed.contains(&c.id) && (self.opened.contains(&c.id) || c.alive || c.state == "working" || c.state == "waiting")
+        !self.closed.contains(&c.id)
+            && (self.opened.contains(&c.id) || c.alive || c.state == "working" || c.state == "waiting" || c.status == "running_elsewhere")
     }
 
     pub(crate) fn current_worktree(&self) -> Option<&Worktree> {
@@ -1189,6 +1190,23 @@ impl Workspace {
         }
     }
 
+    /** The dialog (settings `chat.takeover`) before a.box takes a chat over from the program running it. */
+    pub(crate) fn takeover_confirm(&self, name: &str, then: Value) -> Value {
+        let t = self.settings.chat.get("takeover").cloned().unwrap_or(Value::Null);
+        let s = |k: &str, d: &str| t.get(k).and_then(Value::as_str).unwrap_or(d).replace("{name}", name);
+        if t.get("confirm") == Some(&Value::Bool(false)) {
+            return then;
+        }
+        json!({
+            "do": "confirm",
+            "title": s("title", "Take over “{name}”?"),
+            "text": s("text", "It's running in super.engineering. a.box will close it there and continue the same conversation here."),
+            "confirm": s("confirm_label", "Take it over"),
+            "cancel": s("cancel_label", "Not now"),
+            "then": then
+        })
+    }
+
     /** Sends the next queued message to each chat that's idle again. */
     pub(crate) fn flush_queue(&mut self) {
         let ready: Vec<String> = self
@@ -1219,6 +1237,15 @@ impl Workspace {
         };
         let text = [typed, paths.join(" ")].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
         if text.is_empty() {
+            return;
+        }
+        // A chat another program (super.engineering) is still running: hold the message and offer to take it over.
+        if self.chat(id).is_some_and(|c| c.status == "running_elsewhere") {
+            self.queued.entry(id.to_string()).or_default().push(text);
+            let name = self.chat(id).map(|c| c.name.clone()).unwrap_or_default();
+            let ask = json!({"do": "chat.open", "chat": id, "force": true});
+            self.run_action(&self.takeover_confirm(&name, ask), window, cx);
+            state.update(cx, |s, cx| s.set_value("", window, cx));
             return;
         }
         let busy = self.chat(id).is_some_and(|c| c.state == "working" || c.state == "waiting") || self.queued.get(id).is_some_and(|q| !q.is_empty());

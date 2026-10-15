@@ -640,6 +640,17 @@
               "props": { "empty": "{{ if .selected.worktree then \"No chat in this worktree yet. Press + above to start one.\" else \"Select a worktree\" end }}" },
               "style": { "grow": 1, "min_height": 0 }
             },
+            {
+              "if": ".selected.chat.status == \"running_elsewhere\"",
+              "id": "elsewhere-banner",
+              "type": "row",
+              "style": { "gap": 10, "padding": [8, 14], "margin": [0, 28, 8, 28], "align": "center", "radius": 10, "border": 1, "border_color": "@line", "background": "@card", "font_size": 13, "width": "full", "max_width": 860, "self": "center" },
+              "children": [
+                { "type": "icon", "props": { "name": "eye", "size": 14, "color": "@text_muted" } },
+                { "type": "text", "props": { "text": "Running in super.engineering. You're watching; send a message or take it over to continue here." }, "style": { "grow": 1, "color": "@text_muted" } },
+                { "type": "Pill", "id": "elsewhere-take-over", "props": { "text": "Take it over", "icon": "arrow-down-to-line", "do": { "do": "chat.take_over", "chat": "{{ .selected.chat.id }}" } } }
+              ]
+            },
             { "id": "waiting", "type": "waiting", "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" } },
             {
               "if": ".selected.chat",
@@ -1183,6 +1194,8 @@
     // Typing one of these at the start of a word opens a list of matches under the composer.
     // Messages sent while the agent is working wait here and go out one per turn as it finishes.
     "queue": true,
+    // Before continuing a chat super.engineering still runs ({name}: the chat). confirm: false skips the question.
+    "takeover": { "confirm": true },
     // Typing with nothing focused goes to the selected chat's message box.
     "type_to_focus": true,
     // Claude Code's suggested next prompt shows in the empty message box; Tab fills it in (doesn't send).

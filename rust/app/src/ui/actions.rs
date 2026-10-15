@@ -17,7 +17,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.keys", "{chat, keys: [..]}: press keys in the chat's session (Enter, Escape, Up, 1, ...)"),
     ("chat.archive / chat.stop / chat.start", "{chat}"),
     ("chat.close", "{chat}: close its tab and stop its Claude process (wherever it runs)"),
-    ("chat.open", "{chat, host?}: open a chat as a tab, resuming its process if it isn't running (host: where a chat from `.history` lives)"),
+    ("chat.take_over", "{chat}: ask, then close a chat in the program running it (super.engineering) and continue it here"),
+    ("chat.open", "{chat, host?, force?}: open a chat as a tab, resuming its process if it isn't running (host: where a chat from `.history` lives)"),
     ("tab.move", "{chat?, target: chat id, zone: before|after}: reorder a worktree's tabs (chat defaults to `dragged`)"),
     ("chat.interrupt", "{chat}: stop what the agent is doing (Esc), keeping the chat open"),
     ("queue.remove / queue.edit / queue.send_now", "{chat, index}: drop a queued message, put it back in the composer to change, or send it now"),
@@ -212,6 +213,9 @@ impl Workspace {
             }
             "chat.open" => {
                 if let Some(id) = chat() {
+                    // One super.engineering still runs opens to watch; resuming it (force) takes it over.
+                    let elsewhere = self.chat(&id).is_some_and(|c| c.status == "running_elsewhere")
+                        && a.get("force").and_then(Value::as_bool) != Some(true);
                     self.closed.remove(&id);
                     self.opened.insert(id.clone());
                     let alive = self.chat(&id).map(|c| (c.alive, c.host.clone()));
@@ -220,6 +224,7 @@ impl Workspace {
                         self.select(p, window, cx);
                     }
                     match alive {
+                        _ if elsewhere => {}
                         Some((false, host)) if host == "mac" && !self.remotes.contains_key("mac") => {
                             self.run_local(vec!["chat".into(), "start".into(), id], window, cx)
                         }
@@ -237,6 +242,13 @@ impl Workspace {
                         }
                         _ => {}
                     }
+                }
+            }
+            "chat.take_over" => {
+                if let Some(id) = chat() {
+                    let name = self.chat(&id).map(|c| c.name.clone()).unwrap_or_default();
+                    let ask = self.takeover_confirm(&name, serde_json::json!({"do": "chat.open", "chat": id, "force": true}));
+                    self.run_action(&ask, window, cx);
                 }
             }
             "tab.move" => {
