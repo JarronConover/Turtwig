@@ -2,6 +2,10 @@
 """Copy recent super.engineering Claude chats to the box, so a.box lists them
 and `claude --resume` there keeps their full context. Run on the Mac.
 
+This makes copies on the box, which then diverge from the Mac's chats. a.box
+shows and drives the Mac's own super.engineering chats in place (agent-boxd
+in Mac mode), so use this only to hand chats over to the box for good.
+
 Each chat lands in the box's checkout of the same repo; a chat that was on a
 branch that exists on the remote gets that branch's worktree on the box (made
 by bin/chat's ensure_worktree, so wt for redo). Imported chats are registered

@@ -3,6 +3,10 @@
 branch, with uncommitted changes), its manual sections, worktree titles, and
 the chats that ran in each worktree. Run on the Mac.
 
+This makes copies on the box (branches, worktrees, chats), which then diverge
+from the Mac's. a.box shows the Mac's own sidebar in place (agent-boxd in Mac
+mode), so use this only to hand a feature over to the box for good.
+
 Branches travel as a git bundle over ssh, never through GitLab (a push there
 starts CI). Uncommitted work rides along as two commits (index, then working
 tree, untracked files included, ignored ones not) that are unpacked into the
