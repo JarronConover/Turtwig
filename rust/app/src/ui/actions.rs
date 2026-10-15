@@ -46,6 +46,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("notify", "{text}: a notification inside the window"),
     ("notify.system", "{title, text, chat?, sound?: bool}: a macOS notification banner; clicking it brings the window up on `chat`"),
     ("dock.bounce", "bounce the Dock icon once"),
+    ("sound", "{name, volume?}: play a macOS sound by name (Glass, Ping, Funk, Hero, Submarine...) or an audio file path"),
     ("open", "{url}: open a URL or app link"),
     ("shell", "{run, env?: {NAME: value}, notify?: bool}: run a shell command on the Mac (pass user text through env, not into run); notify shows its last output line"),
     ("settings.agent", "{request}: a local Claude Code agent reads SETTINGS.md and edits your settings to do what request says; the app reloads when it saves"),
@@ -53,7 +54,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
 ];
 
 /** A one-shot local Claude Code run in the settings folder; it may only read and edit files there. */
-const SETTINGS_AGENT: &str = r#"cd "$HOME/.agent-box/state/settings" && claude -p "You are customizing the Agent Box app for its user. Read SETTINGS.md in this folder first: it documents every setting and holds the full defaults. Then edit settings.jsonc (only that file) to do what the user asks, keeping their existing overrides. The app reloads on save; problems show up in its settings panel, so keep the file valid JSON with comments. When done, reply with one short sentence saying what you changed. The user's request: $REQUEST" --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep 2>&1 | tail -n 1"#;
+const SETTINGS_AGENT: &str = r#"cd "$HOME/.agent-box/state/settings" && claude -p "You are customizing the a.box app for its user. Read SETTINGS.md in this folder first: it documents every setting and holds the full defaults. Then edit settings.jsonc (only that file) to do what the user asks, keeping their existing overrides. The app reloads on save; problems show up in its settings panel, so keep the file valid JSON with comments. When done, reply with one short sentence saying what you changed. The user's request: $REQUEST" --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep --settings '{"disableAllHooks": true}' 2>&1 | tail -n 1"#;
 
 impl Workspace {
     /** The worktree listed after `target` in its list, skipping `moving`; None when `target` is last. */
@@ -390,7 +391,13 @@ impl Workspace {
                 self.notify_count += 1;
                 let id = format!("{}#{}", s("chat").unwrap_or_default(), self.notify_count);
                 #[cfg(target_os = "macos")]
-                crate::macos::notify(&id, &s("title").unwrap_or("Agent Box".into()), &s("text").unwrap_or_default(), a.get("sound").and_then(Value::as_bool) != Some(false));
+                crate::macos::notify(&id, &s("title").unwrap_or("a.box".into()), &s("text").unwrap_or_default(), a.get("sound").and_then(Value::as_bool) != Some(false));
+            }
+            "sound" => {
+                #[cfg(target_os = "macos")]
+                if let Some(n) = s("name") {
+                    crate::macos::play_sound(&n, a.get("volume").and_then(Value::as_f64).unwrap_or(1.) as f32);
+                }
             }
             "dock.bounce" => {
                 #[cfg(target_os = "macos")]

@@ -1,0 +1,32 @@
+<!-- a.box: a girl in profile, inked in currentColor (settings logo.ink) on transparent. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+    <rect width="512" height="512" fill="#000"/>
+    <g transform="translate(256 300) scale(1.08) translate(-238 -300)">
+    <path fill="#fff" d="M244 56 C324 56 378 120 382 200 L386 234 C378 228 372 226 366 230 L360 246 C354 236 346 232 338 234 L332 248 C324 240 314 236 304 238 L292 242 C284 238 280 236 276 240 C274 290 276 330 268 364 C260 396 244 424 240 450 C236 476 244 496 252 512 L156 512 C128 502 100 506 76 494 C94 490 104 482 110 470 C86 476 68 470 52 456 C96 410 120 320 120 220 C120 126 166 56 244 56 Z"/>
+    <g transform="translate(366 238) scale(1.25) translate(-366 -238)">
+      <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+        <path stroke-width="4.5" d="M366 238 C369 246 368 252 367 256 C366 262 367 268 371 274 C376 283 381 290 384 296 C384 299 380 301 375 301 C376 304 377 306 377 308 C376 310 374 311 372 312 C374 314 375 316 374 319 C372 322 368 323 367 325 C369 331 370 338 366 345 C361 352 350 356 340 358 C338 392 340 440 344 474"/>
+        <path stroke-width="2.2" d="M354 354 C346 354 338 351 331 346"/>
+        <path stroke-width="2" d="M372 312 L366 313"/><path stroke-width="2.4" d="M334 253 C342 249 352 249 360 253"/>
+        <path stroke-width="3.5" d="M342 474 C360 486 392 494 430 500"/>
+        <path stroke-width="1.8" d="M336 288 L344 289"/>
+      </g>
+      <g transform="translate(345 272) scale(1.15) translate(-345 -272)"><path fill="#fff" d="M320 272 C328 260 346 256 360 266 L357 270 C348 265 336 266 328 274 Z M322 272 C314 270 308 266 303 259 C312 263 318 265 327 266 Z"/>
+      <ellipse fill="#fff" cx="352" cy="279" rx="5" ry="11"/>
+      <ellipse fill="#000" cx="351" cy="274" rx="1.7" ry="3.2"/></g>
+      <path fill="#fff" d="M376 297 l-4 1 l3 2 Z"/>
+      <path fill="#fff" d="M276 420 C296 426 320 428 340 422 L340 429 C320 435 296 433 276 427 Z"/>
+      <path fill="#fff" d="M310 431 l5 7 l-5 7 l-5 -7 Z"/>
+    </g>
+    <g fill="#000">
+      <path d="M168 134 C192 104 226 88 262 86 C234 96 210 112 194 132 L186 126 L180 140 L174 130 Z"/>
+      <path d="M276 86 C308 90 336 106 354 132 L346 131 L342 119 L334 127 L328 113 L320 121 C306 106 292 96 276 86 Z"/>
+    </g>
+    <g fill="none" stroke="#000" stroke-linecap="round" stroke-width="2.5">
+      <path d="M168 220 C168 320 152 420 118 500 M206 200 C212 300 200 400 172 500 M248 200 C258 290 250 380 222 480"/>
+    </g>
+    </g>
+  </mask>
+  <rect width="512" height="512" fill="currentColor" mask="url(#m)"/>
+</svg>

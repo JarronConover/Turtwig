@@ -1,4 +1,4 @@
-/*! Wire protocol between `agent-boxd` and the Agent Box app: newline-delimited JSON over ssh.
+/*! Wire protocol between `agent-boxd` and the a.box app: newline-delimited JSON over ssh.
 Requests get a `Response` with the same `id`; the daemon pushes `Event`s at any time. */
 
 use serde::{Deserialize, Serialize};

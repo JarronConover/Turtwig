@@ -7,9 +7,9 @@ use super::style::STYLE_KEYS;
 use crate::settings;
 use serde_json::{json, Value};
 
-const GUIDE: &str = r##"# Agent Box settings reference
+const GUIDE: &str = r##"# a.box settings reference
 
-Agent Box is a container plus data: **everything you see and every button's behavior is defined in
+a.box is a container plus data: **everything you see and every button's behavior is defined in
 settings**. The built-in look (super.engineering's) is itself just the default settings, printed in
 full at the end of this file. Change anything by overriding it in your settings file.
 
@@ -41,14 +41,30 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `components` | Reusable nodes; use one as `{"type": "Name", "props": {...}}` and read props inside as `.props.x`. |
 | `theme` | Named values referenced as `@name` in styles (colors, fonts) and readable as `.theme.name`. `animations: false` turns animation off. |
 | `state` | UI state and starting values. Read as `.state.key`; change with `state.set` / `state.toggle` / `state.cycle`. |
-| `events` | Actions to run when things happen: `chat.waiting`, `chat.finished`, `chat.stopped` (the chat is `.chat`), `designer.finished`. Each is `{"if": jq, "do": action}`. |
+| `events` | Actions to run when things happen: `chat.waiting`, `chat.finished`, `chat.stopped` (the chat is `.chat`; `.chat.asks` is true when its last reply ends in a question), `designer.finished`. Each is `{"if": jq, "do": action}`. |
 | `dock` | `badge`: a template for the Dock icon's badge; empty or 0 hides it. |
+| `sounds` | A sound per event: `chat.finished`, `chat.question` (a finished turn ending in a question), `chat.waiting`, `chat.stopped`, `designer.finished`. Values are macOS sound names or audio file paths; null silences one. Also `volume` (0-1), `when` (`always` or `unfocused`), `enabled`. The `sound` action plays one anywhere. |
+| `logo` | The logo shown by `logo` nodes, the Dock while the app runs, and the app bundle's icon. See Logo. |
 | `keys` | `[{"key": "cmd-k", "do": <action>, "if": <jq>}]`. Key names: `cmd`, `ctrl`, `alt`, `shift` + `-` + key (`cmd-shift-p`, `ctrl-\``, `cmd-\\`). |
 | `commands` | Command palette entries: `[{"label", "do", "if"}]`. Worktrees are added automatically. |
 | `motion` | How things move: `move` (glide to new positions), `enter` (how new nodes come in), `style` (colors and sizes ease), `enabled`. See Motion. |
 | `chat` | Look of the built-in transcript, composer, and waiting card: style objects per part. |
 | `terminal` | Terminal font, size, padding, colors. |
 | `connection` | The box: `ssh_host`, `daemon` path, `retry_seconds`. |
+
+## Logo
+
+`logo.art` is SVG markup or the path of an `.svg` file or an image (PNG, JPEG, GIF, WebP) (relative paths look in this folder first, then next
+to the defaults; the built-in art is `logo.svg`). Saving the file updates the app live. `currentColor` in
+the art becomes `logo.ink`. `tile` is the rounded square behind it (a color, or null for none), with
+`corner` (radius) and `padding` as fractions of its side. `dock` overrides any of these for the Dock icon
+(`margin` leaves room around the tile like other macOS icons); `"dock": false` keeps the bundle's icon.
+Colors can be `@theme` tokens. The bundle icon (Finder, the Dock when the app is closed) is rebuilt from
+these by `bundle.sh`.
+
+```jsonc
+{"logo": {"art": "my-logo.svg", "ink": "#2b1d3a", "tile": "#ffd6e7"}}
+```
 
 ## Scripts
 
@@ -276,7 +292,7 @@ pub fn write_reference() {
     if !p.exists() {
         let _ = std::fs::write(
             &p,
-            "// Agent Box settings: everything here overrides the built-in defaults.\n// Reference: SETTINGS.md in this folder (for you and for agents).\n{\n  \"$schema\": \"./settings.schema.json\"\n}\n",
+            "// a.box settings: everything here overrides the built-in defaults.\n// Reference: SETTINGS.md in this folder (for you and for agents).\n{\n  \"$schema\": \"./settings.schema.json\"\n}\n",
         );
     }
 }
@@ -290,7 +306,7 @@ fn schema() -> Value {
         .collect();
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "Agent Box settings",
+        "title": "a.box settings",
         "description": "See SETTINGS.md in this folder.",
         "type": "object",
         "definitions": {

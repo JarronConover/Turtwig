@@ -1,4 +1,4 @@
-/*! agent-boxd: the box daemon for the Agent Box app.
+/*! agent-boxd: the box daemon for the a.box app.
 `run` serves the app's protocol on a unix socket, `connect` relays stdio to it, `hook` logs Claude Code hooks. */
 
 mod db;

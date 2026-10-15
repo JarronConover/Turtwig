@@ -35,6 +35,12 @@ pub struct Settings {
     /** `badge`: a template for the Dock icon's badge (empty or null hides it). */
     #[serde(default)]
     pub dock: Value,
+    /** A sound per event (`chat.finished`, `chat.question`, `chat.waiting`, ...), plus `volume`, `when`, `enabled`. */
+    #[serde(default)]
+    pub sounds: Value,
+    /** The logo (art, colors, tile) drawn by `logo` nodes, the Dock, and the bundle icon; see SETTINGS.md, Logo. */
+    #[serde(default)]
+    pub logo: Value,
     /** Look of the built-in diff view. */
     #[serde(default)]
     pub diff: Value,

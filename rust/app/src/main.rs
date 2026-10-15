@@ -1,6 +1,7 @@
 mod designer;
 mod diff;
 mod jsc;
+mod logo;
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
 mod macos;
@@ -17,7 +18,7 @@ use gpui_kit::*;
 fn open_main(cx: &mut App) {
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
-            title: Some("Agent Box".into()),
+            title: Some("a.box".into()),
             appears_transparent: true,
             traffic_light_position: Some(point(px(20.), px(15.))),
         }),
@@ -30,6 +31,15 @@ fn open_main(cx: &mut App) {
 }
 
 fn main() {
+    // `--iconset DIR` writes the bundle icon's PNGs from the settings' logo (bundle.sh turns them into AppIcon.icns).
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--iconset") {
+        if let Err(e) = logo::write_iconset(std::path::Path::new(args.get(2).map(String::as_str).unwrap_or("AppIcon.iconset"))) {
+            eprintln!("{e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     // Clicking the Dock icon (or opening the app again) after closing the window brings it back.
     app.on_reopen(|cx| {
@@ -42,12 +52,12 @@ fn main() {
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
         cx.set_menus([Menu {
-            name: "Agent Box".into(),
+            name: "a.box".into(),
             items: vec![
                 MenuItem::action("Settings…", workspace::OpenSettings),
                 MenuItem::action("Command Palette", workspace::Palette),
                 MenuItem::separator(),
-                MenuItem::action("Quit Agent Box", workspace::Quit),
+                MenuItem::action("Quit a.box", workspace::Quit),
             ],
             disabled: false,
         }]);

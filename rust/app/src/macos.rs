@@ -132,6 +132,39 @@ fn log(line: &str) {
     }
 }
 
+thread_local! {
+    static PLAYING: std::cell::RefCell<Vec<Retained<objc2_app_kit::NSSound>>> = const { std::cell::RefCell::new(vec![]) };
+}
+
+/** Plays a system sound by name (`Glass`, `Ping`, ...) or an audio file; `~/` paths work. */
+pub fn play_sound(name: &str, volume: f32) {
+    use objc2_app_kit::NSSound;
+    let path = crate::script::expand(name);
+    let sound = if path.contains('/') {
+        NSSound::initWithContentsOfFile_byReference(<NSSound as objc2::AnyThread>::alloc(), &NSString::from_str(&path), true)
+    } else {
+        NSSound::soundNamed(&NSString::from_str(name))
+    };
+    let Some(sound) = sound else {
+        log(&format!("no sound named {name}"));
+        return;
+    };
+    sound.setVolume(volume.clamp(0., 1.));
+    sound.play();
+    PLAYING.with(|p| {
+        let mut p = p.borrow_mut();
+        p.retain(|s| s.isPlaying());
+        p.push(sound);
+    });
+}
+
+/** Replaces the Dock icon while the app runs; None puts the bundle's icon back. */
+pub fn set_app_icon(png: Option<&[u8]>) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let image = png.and_then(|b| objc2_app_kit::NSImage::initWithData(<objc2_app_kit::NSImage as objc2::AnyThread>::alloc(), &objc2_foundation::NSData::with_bytes(b)));
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(image.as_deref()) };
+}
+
 pub fn set_badge(label: Option<&str>) {
     let Some(mtm) = MainThreadMarker::new() else {
         log("set_badge off the main thread");

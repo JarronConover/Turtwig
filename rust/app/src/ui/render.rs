@@ -41,6 +41,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("scroll", "A scrolling container. `props.axis`: y (default) | x | both."),
     ("text", "Text. `props.text` (templates allowed); a plain string node is shorthand for this."),
     ("icon", "A Lucide icon. `props.name` (e.g. git-branch, panel-left, plus), `props.size` (points), `props.spin` (bool)."),
+    ("logo", "The app's logo (settings `logo`) at `props.size` (24). Any `logo` key in props overrides it for this node, e.g. `{\"tile\": null}` for bare art."),
     ("spinner", "A loading spinner. `props.size`: xsmall | small | medium | large."),
     ("spacer", "Takes the remaining space (grow 1)."),
     ("divider", "A 1-point line. `props.axis`: x (default, horizontal) | y."),
@@ -184,6 +185,15 @@ impl Workspace {
                 } else {
                     vec![icon.into_any_element()]
                 }
+            }
+            "logo" => {
+                let size = props.get("size").and_then(Value::as_f64).unwrap_or(24.) as f32;
+                let spec = crate::logo::spec(&self.settings.logo, &props);
+                let pixels = (size * window.scale_factor()).ceil() as u32;
+                crate::logo::image(&spec, &theme, pixels.max(1))
+                    .map(|i| img(i).size(px(size)).flex_none().into_any_element())
+                    .into_iter()
+                    .collect()
             }
             "spinner" => {
                 let s = Spinner::new();

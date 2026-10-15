@@ -164,7 +164,7 @@ def workspace_list(args):
         for sec in s.data["sections"]:
             secs.append({"id": sec["section_id"], "kind": "worktrees", "name": sec["name"],
                          "items": [i for i in its if i["section"] == sec["section_id"]]})
-    out("workspaces", {"workspaces": [{"id": WORKSPACE, "title": "Agent box", "selected": True, "sections": secs}]})
+    out("workspaces", {"workspaces": [{"id": WORKSPACE, "title": "a.box", "selected": True, "sections": secs}]})
 
 
 def section_cmd(args):

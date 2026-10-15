@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""abx: look at and drive the running Agent Box app from a shell (for agents and for debugging).
+"""abx: look at and drive the running a.box app from a shell (for agents and for debugging).
 
   abx state [PATH]        the app's live state (inspect.json); PATH like context.selected.chat.name
   abx layout [ID]         where nodes with ids are drawn (x, y, w, h); filter by id substring

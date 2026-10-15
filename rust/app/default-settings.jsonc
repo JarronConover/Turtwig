@@ -44,6 +44,17 @@
     "drag_preview": { "padding": [5, 10], "radius": 8, "background": "#2b2f38", "border": 1, "border_color": "#488efc", "color": "#f5f5f7", "font_size": 13, "shadow": "lg", "opacity": 0.95 }
   },
 
+  // The logo: `logo` nodes, the Dock icon while the app runs, and the bundle icon (see SETTINGS.md, Logo).
+  // art: SVG markup, or an .svg or image (png/jpg/webp) path; an SVG's currentColor becomes ink. tile: the rounded square behind it.
+  "logo": {
+    "art": "logo.svg",
+    "ink": "#17171b",
+    "tile": "#f4eee4",
+    "corner": 0.225,
+    "padding": 0,
+    "dock": { "margin": 0.098 }
+  },
+
   // How things move. move: nodes glide to new positions after a change (give a node an `id` so it
   // glides even when moved to a different parent). enter: how nodes that appear after a change come
   // in. style: colors and sizes ease. Set "enabled": false to turn all motion off.
@@ -104,7 +115,15 @@
               "props": { "handle": "sidebar" },
               "style": { "grow": 1, "min_height": 0, "padding": [0, 6, 10, 6] },
               "children": [
-                { "type": "text", "props": { "text": "Agent box" }, "style": { "height": 30, "padding": [6, 8, 0, 8], "font_size": 15, "font_weight": "semibold" } },
+                {
+                  "id": "brand",
+                  "type": "row",
+                  "style": { "height": 34, "padding": [4, 8, 0, 6], "gap": 8, "align": "center" },
+                  "children": [
+                    { "id": "brand-logo", "type": "logo", "props": { "size": 24 } },
+                    { "id": "brand-name", "type": "text", "props": { "text": "a.box" }, "style": { "font_size": 15, "font_weight": "semibold" } }
+                  ]
+                },
                 { "type": "SectionLabel", "props": { "text": "Projects" } },
                 {
                   "for": ".projects", "as": "p", "key": ".p.name",
@@ -477,7 +496,7 @@
           ]
         },
         { "id": "toolbar-drag", "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } },
-        { "id": "status-pill", "type": "Pill", "props": { "text": "{{ if .app.connected then \"agent box\" else .app.status end }}", "mono": true, "tooltip": "{{ .app.status }}", "do": "palette.open" } },
+        { "id": "status-pill", "type": "Pill", "props": { "text": "{{ if .app.connected then \"a.box\" else .app.status end }}", "mono": true, "tooltip": "{{ .app.status }}", "do": "palette.open" } },
         { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "square-terminal", "tooltip": "Open in Cursor", "do": { "do": "open", "url": "cursor://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } } },
         { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "code", "tooltip": "Open in VS Code", "do": { "do": "open", "url": "vscode://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } } },
         { "if": ".selected.worktree.mr", "type": "Pill", "props": { "text": "!{{ .selected.worktree.mr.number }}", "icon": "git-pull-request", "tooltip": "Open the merge request", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } } }
@@ -688,18 +707,32 @@
     "chat.waiting": {
       "if": ".app.focused | not",
       "do": [
-        { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} needs you", "text": "{{ .chat.waiting_on.message // \"It's waiting for an answer.\" }}" },
+        { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} needs you", "text": "{{ .chat.waiting_on.message // \"It's waiting for an answer.\" }}", "sound": false },
         "dock.bounce"
       ]
     },
     "chat.finished": {
       "if": ".app.focused | not",
-      "do": { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} finished", "text": "{{ .chat.last_message // \"Ready for your next message.\" }}" }
+      "do": { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} finished", "text": "{{ .chat.last_message // \"Ready for your next message.\" }}", "sound": false }
     },
     "designer.finished": {
       "if": ".app.focused | not",
-      "do": { "do": "notify.system", "chat": "designer", "title": "The designer finished", "text": "Your changes are in." }
+      "do": { "do": "notify.system", "chat": "designer", "title": "The designer finished", "text": "Your changes are in.", "sound": false }
     }
+  },
+
+  // Sounds when things happen, focused or not ("when": "unfocused" to only play in the background).
+  // A name is a macOS sound (Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi
+  // Submarine Tink) or an audio file path; null silences one. chat.question: a turn that ends asking you.
+  "sounds": {
+    "enabled": true,
+    "volume": 1,
+    "when": "always",
+    "chat.finished": "Glass",
+    "chat.question": "Ping",
+    "chat.waiting": "Funk",
+    "chat.stopped": null,
+    "designer.finished": "Glass"
   },
 
   // The Dock icon's badge: how many chats are waiting on you.
@@ -752,6 +785,10 @@
     // Trace-style transcript (after shadcn's Trace): user turns as bubbles, replies as text, steps as quiet lines.
     "fold_steps_after": 5,
     "step_detail_lines": 40,
+    // Code in expanded steps: long lines scroll sideways with a horizontal swipe, or with shift + scroll
+    // (shift), which holds the transcript still. shift_holds_transcript: shift + scroll elsewhere in the
+    // transcript doesn't scroll it either. scrollbar: hover | always | scrolling | never.
+    "code_scroll": { "shift": true, "speed": 1, "shift_holds_transcript": true, "scrollbar": "hover" },
     "list": { "gap": 22, "padding": [20, 28], "width": "full", "max_width": 780, "self": "center" },
     "user": { "max_width": "80%", "padding": [8, 14], "radius": 16, "background": "@user_bubble", "font_size": 14, "line_height": 1.5, "gap": 6 },
     "assistant": { "font_size": 14, "line_height": 1.6 },

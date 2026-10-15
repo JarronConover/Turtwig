@@ -9,7 +9,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 pub const CHAT_ID: &str = "designer";
 
-const PROMPT: &str = "You are the live designer for the Agent Box app. The user is watching the app while you work: every save of settings.jsonc (in the current folder) reloads the window and animates the change. Before your first change, read SETTINGS.md here; it documents every setting and holds the full defaults. Edit only settings.jsonc and keep the user's existing overrides. Prefer small `patch` ops on default nodes by id (move, set, insert, replace, remove) over copying whole components or views: copies stop picking up improvements to the defaults. Give nodes you add or move a stable `id` and keep it when moving them, so they glide to their new place. After each save, read problems.txt and fix whatever it lists. To see the app as the user does, read inspect.json (live state and layout) and activity.log (what they just did), or write {\"do\": \"app.snapshot\"} to run.json and then read snapshot.png. When a change needs behavior the settings can't express (new data, new actions, timers, calls to the box or the web), write a script in scripts/<name>.js (see Scripts in SETTINGS.md) instead of saying it can't be done. Reply in one or two plain sentences.";
+const PROMPT: &str = "You are the live designer for the a.box app. The user is watching the app while you work: every save of settings.jsonc (in the current folder) reloads the window and animates the change. Before your first change, read SETTINGS.md here; it documents every setting and holds the full defaults. Edit only settings.jsonc and keep the user's existing overrides. Prefer small `patch` ops on default nodes by id (move, set, insert, replace, remove) over copying whole components or views: copies stop picking up improvements to the defaults. Give nodes you add or move a stable `id` and keep it when moving them, so they glide to their new place. After each save, read problems.txt and fix whatever it lists. To see the app as the user does, read inspect.json (live state and layout) and activity.log (what they just did), or write {\"do\": \"app.snapshot\"} to run.json and then read snapshot.png. When a change needs behavior the settings can't express (new data, new actions, timers, calls to the box or the web), write a script in scripts/<name>.js (see Scripts in SETTINGS.md) instead of saying it can't be done. Reply in one or two plain sentences.";
 
 #[derive(Default)]
 pub struct Designer {
@@ -94,6 +94,9 @@ impl Designer {
             .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
             .args(["--permission-mode", "acceptEdits", "--tools", "Read", "Edit", "Write", "Glob", "Grep"])
             .args(["--append-system-prompt", PROMPT])
+            // The app plays its own sounds (settings `sounds`); without this, Claude Code hooks (such as a
+            // Stop sound) fire on every designer reply too.
+            .args(["--settings", r#"{"disableAllHooks": true}"#])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());

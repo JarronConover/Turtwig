@@ -85,6 +85,7 @@ pub struct Workspace {
     pub(crate) pending_script: Vec<Value>,
     pub(crate) notify_count: u64,
     badge: Option<String>,
+    dock_icon: Option<Vec<u8>>,
     pub(crate) diff_collapsed: HashSet<String>,
     pub(crate) diff_scroll: UniformListScrollHandle,
     focus: FocusHandle,
@@ -202,6 +203,7 @@ impl Workspace {
             pending_script: vec![],
             notify_count: 0,
             badge: None,
+            dock_icon: None,
             diff_collapsed: HashSet::new(),
             diff_scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
@@ -211,6 +213,7 @@ impl Workspace {
         let mut ws = ws;
         ws.configure_motion();
         ws.load_scripts();
+        ws.update_dock_icon();
         ws
     }
 
@@ -424,6 +427,8 @@ impl Workspace {
                 for p in &ev.paths {
                     if p.file_name().map(|n| n.to_owned()) == name || (defaults_name.is_some() && p.file_name().map(|n| n.to_owned()) == defaults_name) {
                         let _ = tx.send(false);
+                    } else if p.extension().is_some_and(|e| e == "svg") {
+                        let _ = tx.send(false);
                     } else if p.extension().is_some_and(|e| e == "js") && p.parent().is_some_and(|d| d.ends_with("scripts")) {
                         let _ = tx.send(false);
                     } else if p.file_name().and_then(|n| n.to_str()) == Some("run.json") {
@@ -494,6 +499,8 @@ impl Workspace {
                 self.pending_motion = true;
                 let ctx = self.context();
                 self.update_badge(&ctx);
+                crate::logo::clear_cache();
+                self.update_dock_icon();
                 self.pending_script.push(json!({"type": "event", "name": "model", "payload": null}));
             }
             Err(e) => self.settings_error = Some(format!("{e:#}")),
@@ -532,6 +539,16 @@ impl Workspace {
         cx.notify();
     }
 
+    /** The Dock shows the settings' logo while the app runs (`logo.dock: false` keeps the bundle's icon). */
+    pub(crate) fn update_dock_icon(&mut self) {
+        let png = crate::logo::dock_spec(&self.settings.logo).and_then(|s| crate::logo::png(&s, &self.settings.theme, 512));
+        if png != self.dock_icon {
+            #[cfg(target_os = "macos")]
+            crate::macos::set_app_icon(png.as_deref());
+            self.dock_icon = png;
+        }
+    }
+
     fn update_badge(&mut self, ctx: &Val) {
         let label = self.settings.dock.get("badge").map(|t| self.exprs.resolve(t, ctx)).map(|v| value_text(&v)).filter(|s| !s.is_empty() && s != "0");
         if label != self.badge {
@@ -546,6 +563,7 @@ impl Workspace {
             let payload: Map<String, Value> = extra.iter().map(|(k, v)| (k.clone(), crate::ui::expr::to_json(v))).collect();
             self.pending_script.push(json!({"type": "event", "name": event, "payload": payload}));
         }
+        self.play_event_sound(event, &extra);
         let Some(spec) = self.settings.events.get(event).cloned() else { return };
         let ctx = crate::ui::expr::with(&self.context(), extra);
         if let Some(cond) = spec.get("if").and_then(Value::as_str) {
@@ -555,6 +573,21 @@ impl Workspace {
         }
         let action = self.exprs.resolve_action(spec.get("do").unwrap_or(&Value::Null), &ctx);
         self.run_action(&action, window, cx);
+    }
+
+    /** `sounds` from settings: a sound per event (a finished turn that ends in a question plays
+    `chat.question`), whether or not the window is focused unless `when` is "unfocused". */
+    fn play_event_sound(&self, event: &str, extra: &[(String, Val)]) {
+        let sounds = &self.settings.sounds;
+        if sounds.get("enabled") == Some(&Value::Bool(false)) || (sounds.get("when").and_then(Value::as_str) == Some("unfocused") && self.focused) {
+            return;
+        }
+        let asks = event == "chat.finished" && extra.iter().any(|(k, v)| k == "chat" && crate::ui::expr::to_json(v).get("asks") == Some(&Value::Bool(true)));
+        let key = if asks { "chat.question" } else { event };
+        if let Some(name) = sounds.get(key).and_then(Value::as_str) {
+            #[cfg(target_os = "macos")]
+            crate::macos::play_sound(name, sounds.get("volume").and_then(Value::as_f64).unwrap_or(1.) as f32);
+        }
     }
 
     /** problems.txt lets an agent that just edited settings see what broke. */
@@ -775,6 +808,7 @@ impl Workspace {
             o.insert("age_text".into(), Value::String(age_text(c.last_activity)));
             o.insert("attachments".into(), self.attachments_json(&c.id));
             let last = self.transcripts.get(&c.id).and_then(|t| t.items.iter().rev().find_map(|i| if let Item::Assistant { text } = i { Some(text.clone()) } else { None }));
+            o.insert("asks".into(), Value::Bool(last.as_deref().is_some_and(|t| t.trim_end().ends_with('?'))));
             o.insert("last_message".into(), last.map(|t| Value::String(t.chars().take(280).collect())).unwrap_or(Value::Null));
             let activity = self.transcripts.get(&c.id).filter(|_| c.state == "working").map(|t| t.activity()).unwrap_or_default();
             o.insert("activity".into(), Value::String(activity));
@@ -1129,9 +1163,17 @@ impl Workspace {
             .flex()
             .flex_col()
             .overflow_y_scroll()
+            .restrict_scroll_to_axis()
             .track_scroll(&handle)
             .child(list);
-        div().relative().size_full().child(scroll).children(overlay).into_any_element()
+        let shift_holds = cs.get("code_scroll").and_then(|c| c.get("shift_holds_transcript")).and_then(Value::as_bool) != Some(false);
+        div()
+            .relative()
+            .size_full()
+            .child(scroll)
+            .when(shift_holds, |d| d.child(crate::ui::trace_view::shift_scroll_layer(None, 1.)))
+            .children(overlay)
+            .into_any_element()
     }
 
     pub(crate) fn composer_view(&mut self, chat: Option<String>, props: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {

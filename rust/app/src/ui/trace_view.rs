@@ -182,7 +182,7 @@ impl Workspace {
                 let live = running && result.is_none();
                 let title = if *is_error { failed } else if live { doing } else { done };
                 let open = self.expanded_tools.contains(id);
-                let body = if open { self.step_detail(name, input, result.as_deref(), *is_error, st, theme) } else { vec![] };
+                let body = if open { self.step_detail(id, name, input, result.as_deref(), *is_error, st, theme) } else { vec![] };
                 self.trace_line(id, icon, &title, live, *is_error, true, open, body, st, theme, cx)
             }
             _ => div().into_any_element(),
@@ -190,7 +190,7 @@ impl Workspace {
     }
 
     /** What a step did: an edit as -/+ lines, a command with its output, or the tool's result. */
-    fn step_detail(&self, name: &str, input: &Value, result: Option<&str>, is_error: bool, st: Styles, theme: &Map<String, Value>) -> Vec<AnyElement> {
+    fn step_detail(&mut self, id: &str, name: &str, input: &Value, result: Option<&str>, is_error: bool, st: Styles, theme: &Map<String, Value>) -> Vec<AnyElement> {
         let max_lines = self.settings.chat.get("step_detail_lines").and_then(Value::as_u64).unwrap_or(40) as usize;
         let c = |k: &str| style::color(&Value::from(format!("@{k}")), theme);
         let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -213,7 +213,7 @@ impl Workspace {
             }
         }
         let total = lines.len();
-        let mut code = style::apply(v_flex(), &st("step_code"), theme);
+        let mut code = v_flex().flex_none().min_w_full();
         for (bg, fg, text) in lines.into_iter().take(max_lines) {
             let text = if text.is_empty() { " ".to_string() } else { text.replace('\t', "    ") };
             code = code.child(div().px(px(8.)).whitespace_nowrap().when_some(bg, |d, b| d.bg(b)).when_some(fg, |d, f| d.text_color(f)).child(text));
@@ -221,7 +221,41 @@ impl Workspace {
         if total > max_lines {
             code = code.child(div().px(px(8.)).italic().child(format!("… {} more lines", total - max_lines)));
         }
-        vec![code.into_any_element()]
+        // Long lines scroll sideways with a horizontal swipe (never with the transcript's vertical scroll),
+        // or with shift held, which holds the transcript still; `chat.code_scroll` tunes it.
+        let cfg = self.settings.chat.get("code_scroll").cloned().unwrap_or(Value::Null);
+        let shift = cfg.get("shift").and_then(Value::as_bool) != Some(false);
+        let speed = cfg.get("speed").and_then(Value::as_f64).unwrap_or(1.) as f32;
+        let frame_id = format!("{id}:frame");
+        // "hover" shows the bar while the pointer is anywhere over the code (and while scrolling).
+        let mode = match cfg.get("scrollbar").and_then(Value::as_str) {
+            Some("always") => Some(gpui_kit::base::ScrollbarMode::Always),
+            Some("scrolling") => Some(gpui_kit::base::ScrollbarMode::Scrolling),
+            Some("never") => None,
+            _ if HOVERED_CODE.with(|h| h.borrow().as_deref() == Some(frame_id.as_str())) => Some(gpui_kit::base::ScrollbarMode::Always),
+            _ => Some(gpui_kit::base::ScrollbarMode::Scrolling),
+        };
+        let handle = self.scroll_handles.entry(format!("code:{id}")).or_default().clone();
+        let lane = h_flex().id(SharedString::from(format!("{id}:code"))).items_start().overflow_x_scroll().restrict_scroll_to_axis().track_scroll(&handle).pb(px(12.)).child(code);
+        let fid = frame_id.clone();
+        let mut frame = style::apply(div().relative(), &st("step_code"), theme).id(SharedString::from(frame_id)).child(lane).on_hover(move |hovered, window, _| {
+            HOVERED_CODE.with(|h| {
+                let mut h = h.borrow_mut();
+                if *hovered {
+                    *h = Some(fid.clone());
+                } else if h.as_deref() == Some(fid.as_str()) {
+                    *h = None;
+                }
+            });
+            window.refresh();
+        });
+        if shift {
+            frame = frame.child(shift_scroll_layer(Some(handle.clone()), speed));
+        }
+        if let Some(mode) = mode {
+            frame = frame.child(gpui_kit::component::scroll::Scrollbar::horizontal(&handle).mode(mode));
+        }
+        vec![frame.into_any_element()]
     }
 
     /** One Trace line: icon, title (pulsing while running), a chevron when it expands, and its content
@@ -279,4 +313,36 @@ impl Workspace {
         }
         col.into_any_element()
     }
+}
+
+thread_local! {
+    static HOVERED_CODE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/** Over its parent (which must be `relative`), shift + scroll catches the wheel before anything under it:
+with a handle it scrolls that handle sideways; without one it just holds still what would have scrolled. */
+pub fn shift_scroll_layer(handle: Option<ScrollHandle>, speed: f32) -> impl IntoElement {
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                if phase != DispatchPhase::Capture || !e.modifiers.shift || !hitbox.is_hovered(window) {
+                    return;
+                }
+                if let Some(h) = &handle {
+                    let d = e.delta.pixel_delta(window.line_height());
+                    let step = if d.x.is_zero() { d.y } else { d.x };
+                    let mut o = h.offset();
+                    o.x = (o.x + step * speed).clamp(-h.max_offset().x, px(0.));
+                    h.set_offset(o);
+                    window.refresh();
+                }
+                cx.stop_propagation();
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+    .top_0()
+    .left_0()
 }
