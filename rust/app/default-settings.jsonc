@@ -164,7 +164,14 @@
                         { "id": "project-new-chat", "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "repo": "{{ .p.repo }}" } } }
                       ]
                     },
-                    { "for": ".p.items", "as": "w", "key": ".w.path", "id": "wt-row", "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": false } }
+                    {
+                      "for": ".p.items", "as": "w", "key": ".w.path",
+                      "type": "column",
+                      "children": [
+                        { "id": "wt-row", "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": false } },
+                        { "id": "wt-chats", "type": "WorktreeChats", "props": { "w": "{{ .w }}", "indent": 40 } }
+                      ]
+                    }
                   ]
                 },
                 {
@@ -210,12 +217,19 @@
                     {
                       "if": "(\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end | not",
                       "for": "[.s.items[] | select(.chats | any(.kind == \"orchestrator\"))] + [.s.items[] | select(.chats | any(.kind == \"orchestrator\") | not)]",
-                      "as": "w", "key": ".w.path", "id": "wt-row",
-                      "type": "WorktreeRow",
-                      "props": {
-                        "w": "{{ .w }}", "in_section": true,
-                        "child": "{{ (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) }}"
-                      }
+                      "as": "w", "key": ".w.path",
+                      "type": "column",
+                      "children": [
+                        {
+                          "id": "wt-row",
+                          "type": "WorktreeRow",
+                          "props": {
+                            "w": "{{ .w }}", "in_section": true,
+                            "child": "{{ (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) }}"
+                          }
+                        },
+                        { "id": "wt-chats", "type": "WorktreeChats", "props": { "w": "{{ .w }}", "indent": "{{ if (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) then 44 else 32 end }}" } }
+                      ]
                     }
                   ]
                 }
@@ -654,6 +668,44 @@
               ]
             }
           ]
+        }
+      ]
+    },
+
+    "WorktreeChats": {
+      "about": "A worktree's chats under its sidebar row, open ones first, then newest; the first `chat.sidebar_chats` (5) unless expanded. Clicking one opens it (resuming its process). props: w (a worktree), indent (left padding).",
+      "if": "(.props.w.chats | length) > 0",
+      "type": "column",
+      "style": { "padding": [0, 0, 2, 0] },
+      "children": [
+        {
+          "for": ".state as $s | .props.w.path as $p | (.props.w.chats | sort_by([(if .open then 1 else 0 end), (.last_activity // 0)]) | reverse) as $all | if $s[\"chats_more:\" + $p] then $all else $all[:5] end",
+          "as": "c", "key": ".c.id", "id": "wt-chat",
+          "type": "row",
+          "style": {
+            "height": 26, "padding": "{{ [0, 10, 0, (.props.indent // 40)] }}", "gap": 7, "align": "center", "radius": 6, "font_size": 12.5, "cursor": "pointer",
+            "color": "{{ if .c.active then \"@text\" elif .c.open then \"@text_muted\" else \"@text_faint\" end }}",
+            "background": "{{ if .c.active then \"@hover\" else \"transparent\" end }}",
+            "hover": { "background": "@hover", "color": "@text" }
+          },
+          "tooltip": "{{ .c.name }} · {{ .hosts[.c.host].label // .c.host }} · {{ if .c.open then .c.state else \"closed (click to resume)\" end }}",
+          "on": { "click": { "do": "chat.open", "chat": "{{ .c.id }}" } },
+          "children": [
+            { "if": ".c.state == \"working\"", "type": "spinner", "props": { "size": "xsmall" } },
+            { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 11, "color": "@warning" } },
+            { "if": ".c.state != \"working\" and .c.state != \"waiting\"", "type": "box", "style": { "width": 6, "height": 6, "radius": 3, "margin": [0, 2], "background": "{{ if .c.open then \"@accent\" else \"@line\" end }}" } },
+            { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "grow": 1, "truncate": true } },
+            { "if": ".c.host != .props.w.host", "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 11 } },
+            { "type": "text", "props": { "text": "{{ .c.age_text }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "shrink": 0 } }
+          ]
+        },
+        {
+          "if": "(.props.w.chats | length) > 5",
+          "id": "wt-chats-more",
+          "type": "row",
+          "style": { "height": 24, "padding": "{{ [0, 10, 0, ((.props.indent // 40) + 13)] }}", "align": "center", "font_size": 12, "color": "@text_faint", "cursor": "pointer", "radius": 6, "hover": { "color": "@text" } },
+          "on": { "click": { "do": "state.set", "key": "chats_more:{{ .props.w.path }}", "value": "{{ .state[\"chats_more:\" + .props.w.path] | not }}" } },
+          "children": [{ "type": "text", "props": { "text": "{{ if .state[\"chats_more:\" + .props.w.path] then \"Show fewer\" else \"Show \\((.props.w.chats | length) - 5) more\" end }}" } }]
         }
       ]
     },
