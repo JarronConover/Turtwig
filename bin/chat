@@ -93,12 +93,38 @@ def load(chat_id):
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def save(chat, message):
+def save(chat, message, wait=False):
+    """Write the registry entry now; the state branch commit and push happen in the background
+    (they take seconds), unless wait."""
     with StateLock():
         REGISTRY.mkdir(parents=True, exist_ok=True)
         chat["updated_at"] = now()
         (REGISTRY / f"{chat['id']}.json").write_text(json.dumps(chat, indent=2) + "\n")
-        commit_state(message)
+        if wait:
+            commit_state(message)
+    if not wait:
+        background("_commit", message)
+
+
+def background(*args):
+    subprocess.Popen([sys.executable, __file__, *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def cmd__commit(args):
+    with StateLock():
+        commit_state(args.message)
+
+
+def cmd__rc(args):
+    """After `new` returns: wait for the Remote Control link and record it."""
+    chat = load(args.chat)
+    if chat:
+        url = wait_for_rc_url(tmux_name(chat))
+        if url:
+            chat = load(args.chat) or chat
+            chat["rc_url"] = url
+            save(chat, f"chat link: {chat['name']}")
 
 
 def all_chats():
@@ -196,7 +222,7 @@ def wip_restore(directory, host, fresh=False):
         print(text, file=sys.stderr)
 
 
-def launch(chat, resume, restore_from=None):
+def launch(chat, resume, restore_from=None, wait_rc=True):
     directory = ensure_worktree(chat, restore_from)
     trust_folder(directory)
     name = tmux_name(chat)
@@ -217,7 +243,8 @@ def launch(chat, resume, restore_from=None):
     run(["tmux", "new-session", "-d", "-s", name, "-x", "220", "-y", "60", "-c", str(directory),
          shlex.join(cmd)])
     chat["dir"] = str(directory)
-    chat["rc_url"] = wait_for_rc_url(name) or chat.get("rc_url")
+    if wait_rc:
+        chat["rc_url"] = wait_for_rc_url(name) or chat.get("rc_url")
 
 
 def wait_for_rc_url(name, timeout=45):
@@ -269,10 +296,11 @@ def cmd_new(args):
         "status": "running",
         "created_at": now(),
     }
-    launch(chat, resume=False)
+    launch(chat, resume=False, wait_rc=False)
     chat.pop("prompt", None)
     save(chat, f"chat new: {args.name}")
-    print(f"{chat_id}  {args.name}  {chat['dir']}  {chat.get('rc_url') or ''}")
+    background("_rc", chat_id)
+    print(f"{chat_id}  {args.name}  {chat['dir']}")
 
 
 def cmd_list(args):
@@ -311,9 +339,10 @@ def cmd_start(args):
     chat = find(args.chat)
     if chat["host"] != HOST:
         sys.exit(f"{chat['name']} lives on {chat['host']}; move it here first")
-    launch(chat, resume=True)
+    launch(chat, resume=True, wait_rc=False)
     chat["status"] = "running"
     save(chat, f"chat start: {chat['name']}")
+    background("_rc", chat["id"])
 
 
 def cmd_attach(args):
@@ -347,7 +376,7 @@ def on_box(*args):
 def release_here(chat):
     """Stop the chat here and make its latest WIP and transcript durable."""
     chat["status"] = "moving"
-    save(chat, f"chat moving: {chat['name']}")
+    save(chat, f"chat moving: {chat['name']}", wait=True)
     if tmux_alive(tmux_name(chat)):
         run(["tmux", "kill-session", "-t", tmux_name(chat)], check=False)
     if chat.get("branch") and chat.get("dir"):
@@ -362,7 +391,7 @@ def take_over(chat, directory):
     chat["dir"] = str(directory)
     chat["status"] = "running"
     launch(chat, resume=True)
-    save(chat, f"chat moved to {HOST}: {chat['name']}")
+    save(chat, f"chat moved to {HOST}: {chat['name']}", wait=True)
 
 
 def prepare_here(chat, frm):
@@ -565,6 +594,13 @@ def main():
     h.add_argument("chat")
     h.add_argument("dir")
     h.set_defaults(fn=cmd__take)
+
+    h = sub.add_parser("_commit")
+    h.add_argument("message")
+    h.set_defaults(fn=cmd__commit)
+    h = sub.add_parser("_rc")
+    h.add_argument("chat")
+    h.set_defaults(fn=cmd__rc)
 
     sv = sub.add_parser("supervise")
     sv.add_argument("--interval", type=int, default=30)
