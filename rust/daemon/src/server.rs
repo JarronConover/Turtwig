@@ -327,6 +327,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             chat_tool(&refs, 900)
         }
+        Call::History { .. } => Err("history isn't implemented yet".into()),
         Call::ChatStart { chat_id } => chat_tool(&["start", &chat_id], 300),
         Call::ChatStop { chat_id } => chat_tool(&["stop", &chat_id], 120),
         Call::ChatArchive { chat_id } => chat_tool(&["archive", &chat_id], 120),

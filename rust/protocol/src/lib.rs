@@ -57,6 +57,8 @@ pub enum Call {
     TermInput { term_id: u64, data: String },
     TermResize { term_id: u64, cols: u16, rows: u16 },
     TermClose { term_id: u64 },
+    /** Past chats, newest first: `{chats: [{id, name, dir, host, last_activity, closed}]}`. `ChatStart` reopens any of them. */
+    History { limit: Option<usize> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +133,13 @@ pub struct Worktree {
     /** Newest activity (a chat transcript or the last commit), unix seconds. */
     pub age: Option<f64>,
     pub chat_ids: Vec<String>,
+    /** The machine it's on: "box" or "mac". */
+    #[serde(default = "default_host")]
+    pub host: String,
+}
+
+fn default_host() -> String {
+    "box".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

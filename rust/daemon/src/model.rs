@@ -254,6 +254,7 @@ fn worktree(caches: &Arc<Caches>, d: &Value, chats: &[Chat]) -> Option<Worktree>
         mr,
         age,
         chat_ids: mine.iter().map(|c| c.id.clone()).collect(),
+        host: "box".into(),
     })
 }
 
