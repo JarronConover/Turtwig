@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""Copy recent super.engineering Claude chats to the box, so a.box lists them
+and `claude --resume` there keeps their full context. Run on the Mac.
+
+Each chat lands in the box's checkout of the same repo; a chat that was on a
+branch that exists on the remote gets that branch's worktree on the box (made
+by bin/chat's ensure_worktree, so wt for redo). Imported chats are registered
+stopped: nothing starts until TJ starts one from a.box. Safe to re-run: chats
+already in the registry keep their entry, and a transcript the box has since
+continued is never overwritten.
+"""
+
+import argparse
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shlex
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+HERE = Path(__file__).resolve().parent
+SE_DB = HOME / ".superconductor" / "db" / "super.engineering.db"
+PROJECTS = HOME / ".claude" / "projects"
+BOX_HOME = "/home/coder"
+REPO_NAMES = {"redo": "redo", "redotech-internal-tools": "internal-tools", "redo-data": "redo-data"}
+DEFAULT_BRANCHES = {"", "HEAD", "main", "master"}
+# The a.box chats themselves; this script's own session is skipped too.
+SKIP_TITLE = re.compile(r"agent.?box|a\.box", re.I)
+
+
+def load_chat_module():
+    loader = importlib.machinery.SourceFileLoader("agent_box_chat", str(HERE / "chat"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+chat_mod = load_chat_module()
+
+
+def se_conversations():
+    db = sqlite3.connect(f"file:{SE_DB}?mode=ro", uri=True)
+    rows = db.execute("""
+        select c.conversation_id, c.updated_at,
+               coalesce(json_extract(c.metadata, '$.superconductor.tab_title'), s.cached_title),
+               s.last_resume_provider_session_id,
+               (select group_concat(binding_value) from conversation_bindings b
+                 where b.conversation_id = c.conversation_id and b.binding_kind = 'provider_session')
+        from conversations c left join conversation_state_cache s using (conversation_id)
+        where c.provider_key = 'claude'""").fetchall()
+    for conv_id, updated, title, last_resume, bound in rows:
+        sessions = {conv_id.removeprefix("conv:claude:"), last_resume, *(bound or "").split(",")} - {None, ""}
+        yield conv_id, updated, title, sessions
+
+
+def newest_transcript(sessions):
+    found = [p for s in sessions for p in PROJECTS.glob(f"*/{s}.jsonl")]
+    return max(found, key=lambda p: p.stat().st_mtime, default=None)
+
+
+def is_prompt(entry):
+    if entry.get("type") != "user" or entry.get("isMeta"):
+        return False
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, list):
+        content = " ".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
+    text = (content or "").strip()
+    return bool(text) and not text.startswith(("<command-", "<local-command", "Caveat:", "<task-notification",
+                                               "[Request interrupted"))
+
+
+def read_transcript(path):
+    """(last cwd, last git branch, real prompt count, last entry time)."""
+    cwd = branch = None
+    prompts, last = 0, 0.0
+    with open(path, errors="replace") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("cwd"):
+                cwd, branch = entry["cwd"], entry.get("gitBranch") or ""
+            prompts += is_prompt(entry)
+            if entry.get("timestamp"):
+                try:
+                    ts = datetime.datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00")).timestamp()
+                    last = max(last, ts)
+                except ValueError:
+                    pass
+    return cwd, branch, prompts, last
+
+
+def repo_for(cwd):
+    p = Path(cwd)
+    if p.is_dir():
+        url = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"], capture_output=True, text=True).stdout
+        name = Path(url.strip().removesuffix(".git")).name
+        if name in REPO_NAMES:
+            return REPO_NAMES[name]
+    rel = cwd.removeprefix(str(HOME) + "/")
+    for name, repo in sorted(REPO_NAMES.items(), key=lambda kv: -len(kv[0])):
+        if re.match(rf"(dev/{re.escape(name)}(-worktrees)?|\.superconductor/worktrees/{re.escape(name)})(/|$)", rel):
+            return repo
+    return None
+
+
+_remote_heads = {}
+
+
+def on_remote(repo, branch):
+    if repo not in _remote_heads:
+        primary = HOME / "dev" / {v: k for k, v in REPO_NAMES.items()}[repo]
+        out = subprocess.run(["git", "-C", str(primary), "ls-remote", "--heads", "origin"],
+                             capture_output=True, text=True, check=True).stdout
+        _remote_heads[repo] = {line.split("refs/heads/", 1)[1] for line in out.splitlines() if "refs/heads/" in line}
+    return branch in _remote_heads[repo]
+
+
+BOX_PLACE = r"""
+import importlib.machinery, importlib.util, json, os, sys
+loader = importlib.machinery.SourceFileLoader("chat", os.path.expanduser("~/agent-box/bin/chat"))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+chat = importlib.util.module_from_spec(spec)
+loader.exec_module(chat)
+out = {}
+for item in json.loads(sys.argv[1]):
+    try:
+        if item["branch"]:
+            d = chat.worktree_dir(item) if item["dry_run"] else chat.ensure_worktree(item)
+        else:
+            d = chat.PRIMARY[item["repo"]]
+        out[item["id"]] = {"dir": str(d), "real": os.path.realpath(str(d))}
+    except (SystemExit, Exception) as err:
+        out[item["id"]] = {"error": str(err)}
+print(json.dumps(out))
+"""
+
+
+def box_place(items, dry_run):
+    """Box directory for each chat, creating branch worktrees unless dry_run."""
+    payload = json.dumps([{**i, "dry_run": dry_run} for i in items])
+    remote = f"$HOME/agent-box/bin/agent-env python3 -c {shlex.quote(BOX_PLACE)} {shlex.quote(payload)}"
+    out = subprocess.run(["ssh", "-n", chat_mod.BOX_SSH, remote], capture_output=True, text=True, timeout=3600)
+    if out.returncode != 0:
+        sys.exit(f"box: {out.stderr.strip()}")
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def copy_transcript(src, box_real_dir, chat_id):
+    dst = f".claude/projects/{chat_mod.project_slug(box_real_dir)}/"
+    subprocess.run(["ssh", "-n", chat_mod.BOX_SSH, f"mkdir -p {shlex.quote(dst)}"], check=True, capture_output=True)
+    # -u: a transcript the box has continued since the last import stays.
+    subprocess.run(["rsync", "-au", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
+                    f"{src.parent}/", f"{chat_mod.BOX_SSH}:{dst}"], check=True, capture_output=True)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="import-se-chats", description=__doc__.splitlines()[0])
+    p.add_argument("--days", type=float, default=7, help="chats active in the last N days (default 7)")
+    p.add_argument("--min-prompts", type=int, default=2, help="skip chats with fewer real prompts (default 2)")
+    p.add_argument("--skip", action="append", default=[], help="conversation or session id prefix to skip")
+    p.add_argument("--dry-run", action="store_true", help="show the plan; change nothing")
+    args = p.parse_args()
+    if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        args.skip.append(os.environ["CLAUDE_CODE_SESSION_ID"])
+
+    chat_mod.git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+    cutoff = time.time() - args.days * 86400
+    plan, skipped = [], []
+    for conv_id, updated, title, sessions in se_conversations():
+        # A transcript's mtime can be newer than its last turn (a copy touches
+        # it), never older, so it only prefilters; the last entry decides.
+        path = newest_transcript(sessions)
+        if not path or path.stat().st_mtime < cutoff:
+            continue
+        cwd, branch, prompts, last = read_transcript(path)
+        if (last or path.stat().st_mtime) < cutoff:
+            continue
+        chat_id, title = path.stem, title or path.stem[:8]
+        ids = sessions | {conv_id, conv_id.removeprefix("conv:claude:")}
+        if any(i.startswith(s) for i in ids for s in args.skip) or SKIP_TITLE.search(title):
+            skipped.append((title, "a.box session"))
+            continue
+        if prompts < args.min_prompts:
+            skipped.append((title, f"{prompts} prompt(s)"))
+            continue
+        repo = repo_for(cwd or "")
+        if not repo:
+            skipped.append((title, f"not in a box repo: {cwd}"))
+            continue
+        note = ""
+        if branch in DEFAULT_BRANCHES:
+            branch = None
+        elif not on_remote(repo, branch):
+            note, branch = f"branch {branch} not on remote", None
+        existing = chat_mod.load(chat_id)
+        plan.append({"id": chat_id, "name": title, "repo": repo, "branch": branch, "src": path, "note": note,
+                     "exists": bool(existing), "mtime": last or path.stat().st_mtime})
+
+    plan.sort(key=lambda c: -c["mtime"])
+    places = box_place([{"id": c["id"], "repo": c["repo"], "branch": c["branch"]} for c in plan], args.dry_run) \
+        if plan else {}
+    registered = []
+    for c in plan:
+        place = places.get(c["id"], {})
+        where = f"{c['repo']}" + (f" @ {c['branch']}" if c["branch"] else " (main checkout)")
+        status = "registered" if c["exists"] else "new"
+        if "error" in place:
+            print(f"  FAIL {c['name']} [{where}]: {place['error']}")
+            continue
+        print(f"  {status:10} {c['id'][:8]}  {c['name']}  [{where}]  {c['note']}")
+        if args.dry_run:
+            continue
+        copy_transcript(c["src"], place["real"], c["id"])
+        if c["exists"]:
+            continue
+        mtime = datetime.datetime.fromtimestamp(c["mtime"], datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        chat = {"id": c["id"], "name": c["name"], "kind": "feature" if c["branch"] else "primary", "parent": None,
+                "feature": None, "repo": c["repo"], "branch": c["branch"], "base": None, "dir": place["dir"],
+                "model": None, "host": "box", "status": "stopped", "created_at": mtime,
+                "imported_from": "super.engineering", "updated_at": chat_mod.now()}
+        registered.append(chat)
+    for title, why in skipped:
+        print(f"  skip       {title}  ({why})")
+    if registered:
+        with chat_mod.StateLock():
+            chat_mod.REGISTRY.mkdir(parents=True, exist_ok=True)
+            for chat in registered:
+                (chat_mod.REGISTRY / f"{chat['id']}.json").write_text(json.dumps(chat, indent=2) + "\n")
+            chat_mod.commit_state(f"import {len(registered)} super.engineering chats")
+    print(f"{'would import' if args.dry_run else 'imported'} {len(plan)} chats ({len(registered)} newly registered),"
+          f" skipped {len(skipped)}")
+
+
+if __name__ == "__main__":
+    main()
