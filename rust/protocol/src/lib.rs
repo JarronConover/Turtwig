@@ -39,6 +39,8 @@ pub enum Call {
         model: Option<String>,
     },
     ChatStart { chat_id: String },
+    /** A new chat in the same folder that starts with a copy of this one's conversation; replies like ChatNew. */
+    ChatFork { chat_id: String },
     ChatStop { chat_id: String },
     ChatArchive { chat_id: String },
     /** Type text into the chat and submit it. */

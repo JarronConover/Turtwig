@@ -222,14 +222,16 @@ def wip_restore(directory, host, fresh=False):
         print(text, file=sys.stderr)
 
 
-def launch(chat, resume, restore_from=None, wait_rc=True):
+def launch(chat, resume, restore_from=None, wait_rc=True, fork_from=None):
     directory = ensure_worktree(chat, restore_from)
     trust_folder(directory)
     name = tmux_name(chat)
     if tmux_alive(name):
         return
     cmd = [shutil.which("claude") or str(HOME / ".local" / "bin" / "claude")]
-    if resume:
+    if fork_from:
+        cmd += ["--resume", fork_from, "--fork-session", "--session-id", chat["id"]]
+    elif resume:
         cmd += ["--resume", chat["id"]]
     else:
         cmd += ["--session-id", chat["id"]]
@@ -301,6 +303,23 @@ def cmd_new(args):
     save(chat, f"chat new: {args.name}")
     background("_rc", chat_id)
     print(f"{chat_id}  {args.name}  {chat['dir']}")
+
+
+def cmd_fork(args):
+    """A new chat that starts with a copy of this one's conversation, in the same folder."""
+    src = find(args.chat)
+    if src["host"] != HOST:
+        sys.exit(f"{src['name']} lives on {src['host']}; fork it there")
+    chat_id = str(uuid.uuid4())
+    chat = {k: src.get(k) for k in ("kind", "parent", "feature", "repo", "branch", "base", "dir", "model")}
+    chat.update({"id": chat_id, "name": args.name or f"{src['name']} (fork)", "host": HOST, "status": "running",
+                 "created_at": now(), "forked_from": src["id"]})
+    if chat["kind"] == "orchestrator":
+        chat["kind"] = "feature"
+    launch(chat, resume=False, wait_rc=False, fork_from=src["id"])
+    save(chat, f"chat fork: {chat['name']}")
+    background("_rc", chat_id)
+    print(f"{chat_id}  {chat['name']}  {chat['dir']}")
 
 
 def cmd_list(args):
@@ -549,6 +568,11 @@ def main():
     n.add_argument("--model")
     n.add_argument("--prompt", help="first message")
     n.set_defaults(fn=cmd_new)
+
+    fk = sub.add_parser("fork", help="start a new chat from a copy of this one's conversation")
+    fk.add_argument("chat")
+    fk.add_argument("--name")
+    fk.set_defaults(fn=cmd_fork)
 
     ls = sub.add_parser("list")
     ls.add_argument("--json", action="store_true")

@@ -382,6 +382,8 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         Call::WorktreeDelete { path } if mac::is_mac() => mac::worktree_delete(&path),
         Call::SectionMove { id, index } if mac::is_mac() => mac::section_move(&id, index),
         Call::ProjectMove { .. } if mac::is_mac() => Err("super.engineering has no project order to change".into()),
+        Call::ChatFork { .. } if mac::is_mac() => Err("forking a chat on the Mac isn't supported yet".into()),
+        Call::ChatFork { chat_id } => chat_tool(&["fork", &chat_id], 120),
         Call::ChatStart { chat_id } => chat_tool(&["start", &chat_id], 300),
         Call::ChatStop { chat_id } => chat_tool(&["stop", &chat_id], 120),
         Call::ChatArchive { chat_id } => chat_tool(&["archive", &chat_id], 120),
