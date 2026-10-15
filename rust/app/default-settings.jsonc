@@ -85,7 +85,10 @@
     "diff_base": "uncommitted",
     // Sidebar rows: "worktrees" (one row per worktree; its chats are tabs) or "chats" (each worktree's
     // chats listed under its row too).
-    "sidebar_rows": "worktrees"
+    "sidebar_rows": "worktrees",
+    // Projects: "merged" lists each repo once with every machine's worktrees (each marked with its
+    // machine); "by_host" gives each machine its own copy of the project.
+    "sidebar_projects": "merged"
   },
 
   "views": {
@@ -148,12 +151,15 @@
                       "style": {
                         "position": "relative", "height": 37, "padding": [0, 8], "gap": 8, "align": "center", "radius": 8, "border": 1,
                         "border_color": "{{ if .app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\" then \"@accent\" else \"transparent\" end }}",
-                        "background": "{{ if .app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\" then \"#488efc1a\" else \"transparent\" end }}"
+                        "background": "{{ if .app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\" then \"#488efc1a\" else \"transparent\" end }}",
+                        "cursor": "pointer"
                       },
                       "drag": { "kind": "project", "value": "{{ .p.repo }}", "label": "{{ .p.name }}" },
+                      "tooltip": "{{ if .state[\"collapsed:proj:\" + .p.repo] then \"Show\" else \"Hide\" end }} {{ .p.name }}'s worktrees",
                       "drop_key": "proj:{{ .p.repo }}",
                       "drop_zones": { "worktree": "inside", "project": "edges" },
                       "on": {
+                        "click": { "do": "state.toggle", "key": "collapsed:proj:{{ .p.repo }}" },
                         "drop_item": [
                           {
                             "accept": "worktree",
@@ -170,12 +176,15 @@
                       "children": [
                         { "type": "DropLine", "props": { "key": "proj:{{ .p.repo }}" } },
                         { "type": "Badge", "props": { "letter": "{{ .p.letter }}", "hue": "{{ .p.hue }}", "size": 22 } },
-                        { "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "grow": 1, "font_size": 14 } },
-                        { "id": "project-host", "type": "HostIcon", "props": { "host": "{{ .p.host }}", "size": 12 } },
-                        { "id": "project-new-chat", "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "repo": "{{ .p.repo }}" } } }
+                        { "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "font_size": 14, "truncate": true, "min_width": 0, "shrink": 1 } },
+                        { "type": "icon", "props": { "name": "{{ if .state[\"collapsed:proj:\" + .p.repo] then \"chevron-right\" else \"chevron-down\" end }}", "size": 12, "color": "@text_faint" } },
+                        { "type": "spacer" },
+                        { "for": ".p.hosts", "as": "h", "id": "project-host", "type": "HostIcon", "props": { "host": "{{ .h }}", "size": 12 } },
+                        { "id": "project-new-chat", "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "dir": "{{ ([.p.items[] | select(.is_primary)][0] // .p.items[0]).path }}" } } }
                       ]
                     },
                     {
+                      "if": ".state[\"collapsed:proj:\" + .p.repo] | not",
                       "for": ".p.items", "as": "w", "key": ".w.path",
                       "type": "column",
                       "children": [

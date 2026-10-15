@@ -38,7 +38,7 @@ pub struct Workspace {
     pub(crate) models: HashMap<String, Model>,
     pub(crate) host_up: HashMap<String, bool>,
     /** Where each merged project and section came from, by index and id. */
-    pub(crate) project_hosts: Vec<String>,
+    pub(crate) project_hosts: Vec<Vec<String>>,
     pub(crate) section_hosts: HashMap<String, String>,
     /** Past chats from every host's `History`, for the history panel. */
     pub(crate) history: Vec<Value>,
@@ -666,9 +666,13 @@ impl Workspace {
 
     pub(crate) fn set_state(&mut self, key: String, value: Value) {
         self.ctx_rev += 1;
+        let regroup = key == "sidebar_projects";
         self.state.insert(key.clone(), value.clone());
         self.user_state.insert(key, value);
         self.save_state();
+        if regroup {
+            self.merge_models();
+        }
     }
 
     fn save_state(&self) {
@@ -754,7 +758,10 @@ impl Workspace {
         let mut hosts: Vec<&String> = self.models.keys().collect();
         hosts.sort_by_key(|h| if h.as_str() == "mac" { 0 } else { 1 });
         let mut merged = Model { host: "all".into(), ..Default::default() };
-        let (mut project_hosts, mut section_hosts) = (vec![], HashMap::new());
+        let (mut project_hosts, mut section_hosts): (Vec<Vec<String>>, HashMap<String, String>) = (vec![], HashMap::new());
+        // state.sidebar_projects: "merged" (default) lists each repo once with every machine's worktrees;
+        // "by_host" keeps a project per machine.
+        let by_host = self.state.get("sidebar_projects").and_then(Value::as_str) == Some("by_host");
         for h in hosts {
             let m = &self.models[h];
             if h == "box" {
@@ -766,8 +773,18 @@ impl Workspace {
                 for w in &mut p.items {
                     w.host = h.clone();
                 }
-                merged.projects.push(p);
-                project_hosts.push(h.clone());
+                match merged.projects.iter().position(|x| x.repo == p.repo).filter(|_| !by_host) {
+                    Some(i) => {
+                        merged.projects[i].items.extend(p.items);
+                        if !project_hosts[i].contains(h) {
+                            project_hosts[i].push(h.clone());
+                        }
+                    }
+                    None => {
+                        merged.projects.push(p);
+                        project_hosts.push(vec![h.clone()]);
+                    }
+                }
             }
             for s in &m.sections {
                 let mut s = s.clone();
@@ -920,7 +937,8 @@ impl Workspace {
             .enumerate()
             .map(|(i, p)| {
                 json!({"name": p.name, "repo": p.repo, "hue": p.hue, "letter": letter(&p.name),
-                       "host": self.project_hosts.get(i).cloned().unwrap_or_else(|| "box".into()),
+                       "hosts": self.project_hosts.get(i).cloned().unwrap_or_else(|| vec!["box".into()]),
+                       "host": self.project_hosts.get(i).and_then(|h| h.first().cloned()).unwrap_or_else(|| "box".into()),
                        "items": p.items.iter().map(|w| self.worktree_json(w, Value::Null)).collect::<Vec<_>>()})
             })
             .collect();
