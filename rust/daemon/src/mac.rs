@@ -516,6 +516,11 @@ Escape and C-c. */
 pub fn chat_keys(chat_id: &str, keys: &[String]) -> Result<Value, String> {
     let t = tab(chat_id).ok_or("this chat isn't open in super.engineering")?;
     if t.ui == "chat" {
+        // A lone Escape is the app's stop button; a chat view cancels its turn instead.
+        if keys.len() == 1 && keys[0] == "Escape" {
+            let conv = t.conversation_id.clone().unwrap_or_else(|| chat_id.to_string());
+            return sc(&["chat", "cancel", &conv], None, None);
+        }
         return Err("this chat is in super.engineering's chat view, which takes no keys; answer it there".into());
     }
     for k in keys {
