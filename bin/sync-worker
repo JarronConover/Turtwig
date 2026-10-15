@@ -54,7 +54,7 @@ sync_sessions() {
     # Only the chats that live on the Mac, not every local session.
     local f id slug
     for f in "$AGENT_STATE_DIR"/registry/chats/*.json; do
-      [ -f "$f" ] && [ "$(jq -r .host "$f")" = mac ] || continue
+      [ -f "$f" ] && [[ "$(jq -r '.host + " " + .status' "$f")" =~ ^mac\ (running|moving)$ ]] || continue
       id=$(jq -r .id "$f")
       slug=$(jq -r .dir "$f" | sed 's#[^A-Za-z0-9]#-#g')
       [ -f "$CLAUDE_PROJECTS_DIR/$slug/$id.jsonl" ] || continue

@@ -3,24 +3,26 @@
 skills use (worktrees, sidebar sections and labels, discussion tabs), backed
 by git worktrees, `wt`, and the agent-box state repo instead of the Mac app.
 
-Sections and labels live in ~/.agent-box/state/sc.json; the dashboard shows
-them. A discussion tab becomes a Remote Control chat (bin/chat).
+Sections and labels live in ~/.agent-box/state/sc.json (sc-mac.json on the Mac);
+the dashboard shows them. A discussion tab becomes a Remote Control chat (bin/chat).
 """
 
 import fcntl
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import uuid
 from pathlib import Path
 
 HOME = Path.home()
+ON_BOX = bool(os.environ.get("CODER_AGENT_URL"))
 STATE_DIR = HOME / ".agent-box" / "state"
-STORE = STATE_DIR / "sc.json"
-CHAT = HOME / "agent-box" / "bin" / "chat"
-WT = HOME / "redo-monorepo-worktrees" / "bin" / "wt"
+STORE = STATE_DIR / ("sc.json" if ON_BOX else "sc-mac.json")
+CHAT = Path(__file__).resolve().parent.parent / "bin" / "chat"
+WT = HOME / "redo-monorepo-worktrees" / "bin" / "wt" if ON_BOX else Path(shutil.which("wt") or "wt")
 REPOS = {
     "redo": HOME / "dev" / "redo",
     "internal-tools": HOME / "dev" / "redotech-internal-tools",
@@ -79,9 +81,9 @@ class Store:
     def __exit__(self, *exc):
         if self.dirty and not exc[0]:
             STORE.write_text(json.dumps(self.data, indent=2) + "\n")
-            git("add", "sc.json", cwd=STATE_DIR)
+            git("add", STORE.name, cwd=STATE_DIR)
             git("commit", "-q", "-m", f"sc: {self.message}", cwd=STATE_DIR)
-            git("pull", "-q", "--rebase", "origin", "state", cwd=STATE_DIR)
+            git("pull", "-q", "--rebase", "--autostash", "origin", "state", cwd=STATE_DIR)
             git("push", "-q", "origin", "HEAD:state", cwd=STATE_DIR)
         fcntl.flock(self.lock, fcntl.LOCK_UN)
 

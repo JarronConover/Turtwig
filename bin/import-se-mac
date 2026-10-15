@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""Import super.engineering's sidebar and chats into a.box's own Mac store, once
+(re-runnable). Run on the Mac.
+
+Sections (names, order, collapsed), worktree titles and order, and section
+membership go into sc-mac.json through the shim, keyed by the real worktree
+paths; nothing is copied. Every Claude conversation super.engineering knows
+becomes a registry chat on host mac with its real session id and its worktree
+as dir: "stopped" when super.engineering has it open, "archived" (History only)
+otherwise. Transcripts stay where they are. A chat a.box has started since is
+left alone.
+"""
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = Path.home()
+HERE = Path(__file__).resolve().parent
+SC = HOME / ".super.engineering" / "bin" / "sc"
+SE_DB = HOME / ".superconductor" / "db" / "super.engineering.db"
+PROJECTS = HOME / ".claude" / "projects"
+REPO_KEYS = {"redo": "redo", "redotech-internal-tools": "internal-tools", "redo-data": "redo-data"}
+ENV = {k: v for k, v in os.environ.items() if not k.startswith(("SUPER_ENGINEERING_", "SUPERCONDUCTOR_"))}
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def sc(*args):
+    # Some sc commands find their workspace from the current folder.
+    out = subprocess.run([str(SC), *args], capture_output=True, text=True, env=ENV, timeout=60, cwd=HOME / "dev" / "redo")
+    try:
+        return json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return {}
+
+
+def se_items(ws):
+    """[(section id or None, project name, item)] in sidebar order."""
+    out = []
+    for sec in ws.get("response", {}).get("workspaces", [{}])[0].get("sections", []):
+        if sec.get("kind") == "projects":
+            for proj in sec.get("projects", []):
+                out += [(None, proj.get("name"), it) for it in proj.get("items", [])]
+        else:
+            out += [(sec.get("id"), it.get("project_name"), it) for it in sec.get("items", [])]
+    return out
+
+
+def open_sessions(items):
+    """Session ids (and conversation ids) of the Claude tabs super.engineering has open."""
+    found = set()
+    for _, _, it in items:
+        selectors = []
+        for tab in it.get("sessions", []):
+            parts = tab.get("id", "").split(".")
+            if len(parts) == 3 and parts[0][1:].isdigit() and parts[2][1:].isdigit():
+                selectors += ["--to", f"view:{parts[0][1:]}/tab:{int(parts[2][1:]) + 1}"]
+        if not selectors:
+            continue
+        state = sc("layout", "state", "--worktree", it["path"], "--output", "json", *selectors)
+        for t in state.get("response", {}).get("targets", []):
+            found.update(x for x in (t.get("session_id"), t.get("conversation_id")) if x)
+    return found
+
+
+def transcripts():
+    index = {}
+    for p in PROJECTS.glob("*/*.jsonl"):
+        m = p.stat().st_mtime
+        if p.stem not in index or index[p.stem][1] < m:
+            index[p.stem] = (p, m)
+    return index
+
+
+def bindings():
+    db = sqlite3.connect(f"file:{SE_DB}?mode=ro", uri=True)
+    out = {}
+    for conv, session in db.execute(
+            "SELECT conversation_id, binding_value FROM conversation_bindings WHERE binding_kind = 'provider_session'"
+            " AND provider_key = 'claude' ORDER BY updated_at DESC"):
+        out.setdefault(conv, []).append(session)
+    return out
+
+
+def repo_of(path):
+    url = subprocess.run(["git", "-C", path, "remote", "get-url", "origin"], capture_output=True, text=True).stdout
+    return REPO_KEYS.get(Path(url.strip().removesuffix(".git")).name)
+
+
+def import_sidebar(shim, items, sections, project_order, dry_run):
+    manual = [s for s in sections if not s.get("built_in")]
+    placement = {}
+    for sec_id, _, it in items:
+        if it.get("is_primary"):
+            continue
+        group = [i for s, _, i in items if s == sec_id and (sec_id or i.get("project_name") == it.get("project_name"))]
+        placement[os.path.realpath(it["path"])] = {"section": sec_id, "label": it.get("title") or it.get("branch"),
+                                                   "order": group.index(it)}
+    print(f"sections: {len(manual)}; worktrees placed: {len(placement)}")
+    for s in manual:
+        print(f"  {s['name']}{' (collapsed)' if s.get('collapsed') else ''}:"
+              f" {sum(1 for p in placement.values() if p['section'] == s['section_id'])} worktrees")
+    if dry_run:
+        return
+    with shim.Store() as st:
+        mine = []
+        for s in manual:
+            cur = next((x for x in st.data["sections"] if x["section_id"] == s["section_id"]), None)
+            if cur:
+                st.data["sections"].remove(cur)
+            cur = {**(cur or {"kind": "manual", "rules": [], "priority": None, "built_in": False}),
+                   "section_id": s["section_id"], "name": s["name"], "collapsed": bool(s.get("collapsed"))}
+            mine.append(cur)
+        st.data["sections"] = mine + st.data["sections"]
+        st.data["project_order"] = [REPO_KEYS[n] for n in project_order if n in REPO_KEYS]
+        for path, p in placement.items():
+            meta = st.wt(path)
+            meta["label"], meta["order"] = p["label"], p["order"]
+            if p["section"]:
+                meta["section"] = p["section"]
+            else:
+                meta.pop("section", None)
+        st.save("import super.engineering sidebar (mac)")
+
+
+def import_chats(chat, items, dry_run):
+    index, binds = transcripts(), bindings()
+    opened = open_sessions(items)
+    listed = sc("chat", "list", "--json").get("sessions", [])
+    entries, skipped = {}, []
+    for s in listed:
+        if s.get("provider_key") != "claude":
+            continue
+        conv = s.get("conversation_id") or ""
+        if conv.startswith("conv:claude:"):
+            sid = conv.removeprefix("conv:claude:")
+        else:
+            # A chat-view thread: its newest Claude session that has a transcript.
+            sid = next((x for x in binds.get(conv, []) if x in index), None)
+        if not sid or sid not in index:
+            skipped.append((s.get("title"), "no transcript"))
+            continue
+        d = s.get("worktree_path")
+        if not d or not os.path.isdir(d):
+            skipped.append((s.get("title"), f"no folder {d}"))
+            continue
+        is_open = bool(opened & {sid, conv})
+        prev = entries.get(sid)
+        if prev and (prev["status"] == "stopped" or not is_open):
+            continue
+        entries[sid] = {
+            "id": sid, "name": s.get("title") or "Claude", "kind": "primary" if os.path.realpath(d) in {
+                os.path.realpath(str(p)) for p in chat.PRIMARY.values()} else "feature",
+            "parent": None, "feature": None, "repo": repo_of(d), "branch": None, "base": None, "dir": d,
+            "model": None, "host": "mac", "status": "stopped" if is_open else "archived",
+            "created_at": chat.now(), "imported_from": "super.engineering", "se_conversation": conv,
+        }
+    chat.git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    write, kept = [], []
+    for e in entries.values():
+        cur = chat.load(e["id"])
+        if cur and not (cur.get("imported_from") == "super.engineering" and cur.get("host") == "mac"
+                        and cur.get("status") in ("stopped", "archived")) and not (
+                cur.get("host") == "box" and cur.get("status") == "archived"):
+            kept.append((e["name"], f"already a.box's ({cur.get('host')}, {cur.get('status')})"))
+            continue
+        if cur and {k: cur.get(k) for k in ("name", "dir", "status")} == {k: e[k] for k in ("name", "dir", "status")}:
+            continue
+        if cur:
+            e["created_at"] = cur.get("created_at", e["created_at"])
+        write.append(e)
+    stopped = [e for e in entries.values() if e["status"] == "stopped"]
+    print(f"chats: {len(entries)} ({len(stopped)} open in super.engineering, {len(entries) - len(stopped)} history);"
+          f" {len(write)} to write, {len(kept)} left alone, {len(skipped)} skipped")
+    for e in stopped:
+        print(f"  open  {e['id'][:8]}  {e['name'][:50]}  [{e['dir']}]")
+    for name, why in kept:
+        print(f"  keep  {name}  ({why})")
+    if dry_run or not write:
+        return
+    with chat.StateLock():
+        chat.REGISTRY.mkdir(parents=True, exist_ok=True)
+        for e in write:
+            e["updated_at"] = chat.now()
+            (chat.REGISTRY / f"{e['id']}.json").write_text(json.dumps(e, indent=2) + "\n")
+        chat.commit_state(f"import {len(write)} super.engineering chats (mac)")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="import-se-mac", description=__doc__.splitlines()[0])
+    p.add_argument("--dry-run", action="store_true", help="show what would be imported; change nothing")
+    args = p.parse_args()
+    if os.environ.get("CODER_AGENT_URL"):
+        sys.exit("run this on the Mac")
+    chat = load("agent_box_chat", HERE / "chat")
+    shim = load("agent_box_sc", HERE.parent / "shim" / "sc")
+    ws = sc("workspace", "list", "--json")
+    items = se_items(ws)
+    sections = sc("section", "list", "--json").get("sections", [])
+    project_order = [p.get("name") for sec in ws.get("response", {}).get("workspaces", [{}])[0].get("sections", [])
+                     for p in sec.get("projects", [])]
+    if not items:
+        sys.exit("super.engineering returned no worktrees (is it running?)")
+    import_sidebar(shim, items, sections, project_order, args.dry_run)
+    import_chats(chat, items, args.dry_run)
+
+
+if __name__ == "__main__":
+    main()

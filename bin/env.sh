@@ -61,8 +61,9 @@ wip_key() {
   printf '%s/%s' "$(basename "${origin%.git}")" "$(printf '%s' "$branch" | tr '/' '~')"
 }
 
-# Is this session id a registry chat that lives on the Mac?
+# Is this session id a registry chat that a.box runs on the Mac? (Chats imported
+# from super.engineering and not started here are left alone.)
 mac_chat() {
   local f="$AGENT_STATE_DIR/registry/chats/$1.json"
-  [ -n "$1" ] && [ -f "$f" ] && [ "$(jq -r .host "$f")" = mac ]
+  [ -n "$1" ] && [ -f "$f" ] && [ "$(jq -r '.host + " " + .status' "$f")" = "mac running" ]
 }

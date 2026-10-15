@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -222,13 +223,92 @@ def wip_restore(directory, host, fresh=False):
         print(text, file=sys.stderr)
 
 
+def claude_bin():
+    # On the Mac, super.engineering's `claude` wrapper comes first on PATH; a.box runs Claude itself.
+    real = HOME / ".local" / "bin" / "claude"
+    if not ON_BOX and real.exists():
+        return str(real)
+    return shutil.which("claude") or str(real)
+
+
+def session_pids(chat_id):
+    """Claude processes (and their wrappers) running this session outside a.box."""
+    out = run(["ps", "-axo", "pid=,args="], capture_output=True, check=False).stdout
+    pids = []
+    for line in out.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        words = args.split()[:2]
+        if any(w.endswith("/claude") or w == "claude" for w in words) and re.search(
+                rf"--(resume|session-id)[ =]{re.escape(chat_id)}\b", args):
+            pids.append(int(pid))
+    return pids
+
+
+def close_in_super_engineering(chat):
+    """Close the super.engineering tab running this chat, the way its UI would."""
+    sc = HOME / ".super.engineering" / "bin" / "sc"
+    if not sc.exists() or not chat.get("dir"):
+        return
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("SUPER_ENGINEERING_", "SUPERCONDUCTOR_"))}
+
+    def call(*args):
+        out = run([str(sc), *args], capture_output=True, check=False, env=env, timeout=30)
+        try:
+            return json.loads(out.stdout)
+        except json.JSONDecodeError:
+            return {}
+    ws = call("workspace", "list", "--json")
+    items = []
+    for sec in ws.get("response", {}).get("workspaces", [{}])[0].get("sections", []):
+        items += sec.get("items", [])
+        for proj in sec.get("projects", []):
+            items += proj.get("items", [])
+    real = os.path.realpath(chat["dir"])
+    for it in items:
+        if os.path.realpath(it.get("path", "")) != real:
+            continue
+        selectors = []
+        for tab in it.get("sessions", []):
+            parts = tab.get("id", "").split(".")
+            if len(parts) == 3 and parts[0][1:].isdigit() and parts[2][1:].isdigit():
+                selectors += ["--to", f"view:{parts[0][1:]}/tab:{int(parts[2][1:]) + 1}"]
+        if not selectors:
+            return
+        state = call("layout", "state", "--worktree", it["path"], "--output", "json", *selectors)
+        for t in state.get("response", {}).get("targets", []):
+            if chat["id"] in (t.get("session_id"), (t.get("conversation_id") or "").removeprefix("conv:claude:")):
+                call("agent", "stop", "--to", "id:" + t["stable_target_id"], "--close", "--worktree", it["path"],
+                     "--output", "json")
+
+
+def stop_elsewhere(chat):
+    """Stop whatever else runs this session (super.engineering, usually) before a.box resumes it, so
+    two processes never share one session. Exits if it won't stop."""
+    if not session_pids(chat["id"]):
+        return
+    close_in_super_engineering(chat)
+    for sig in (None, signal.SIGTERM):
+        if sig:
+            for pid in session_pids(chat["id"]):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    pass
+        deadline = time.time() + 15
+        while time.time() < deadline and session_pids(chat["id"]):
+            time.sleep(0.5)
+        if not session_pids(chat["id"]):
+            return
+    sys.exit(f"another process still runs session {chat['id']}: {session_pids(chat['id'])}")
+
+
 def launch(chat, resume, restore_from=None, wait_rc=True, fork_from=None):
     directory = ensure_worktree(chat, restore_from)
     trust_folder(directory)
     name = tmux_name(chat)
     if tmux_alive(name):
         return
-    cmd = [shutil.which("claude") or str(HOME / ".local" / "bin" / "claude")]
+    cmd = [claude_bin()]
     if fork_from:
         cmd += ["--resume", fork_from, "--fork-session", "--session-id", chat["id"]]
     elif resume:
@@ -358,6 +438,8 @@ def cmd_start(args):
     chat = find(args.chat)
     if chat["host"] != HOST:
         sys.exit(f"{chat['name']} lives on {chat['host']}; move it here first")
+    if not tmux_alive(tmux_name(chat)):
+        stop_elsewhere(chat)
     launch(chat, resume=True, wait_rc=False)
     chat["status"] = "running"
     save(chat, f"chat start: {chat['name']}")

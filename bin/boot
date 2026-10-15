@@ -32,27 +32,7 @@ if [ -d "$backup" ]; then
   rsync -a --ignore-existing "$backup/" "$CLAUDE_PROJECTS_DIR/"
 fi
 
-settings="$HOME/.claude/settings.json"
-mkdir -p "$(dirname "$settings")"
-[ -s "$settings" ] || echo '{}' > "$settings"
-tmp=$(mktemp)
-boxd="$AGENT_BOX_DIR/rust/target/release/agent-boxd"
-jq --arg sync "$AGENT_BOX_DIR/bin/turn-sync" --arg start "$AGENT_BOX_DIR/bin/session-start" \
-  --arg boxd "$boxd hook 2> /dev/null || true" '
-  def ensure(event; cmd):
-    .hooks[event] = ((.hooks[event] // [])
-      | map(select(any(.hooks[]?; .command == cmd) | not))
-      + [{hooks: [{type: "command", command: cmd}]}]);
-  ensure("Stop"; $sync) | ensure("SubagentStop"; $sync) | ensure("SessionStart"; $start)
-  | if $box then
-      reduce ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "PermissionRequest",
-              "Stop", "SubagentStop", "SessionStart", "SessionEnd") as $e (.; ensure($e; $boxd))
-      | .enableAllProjectMcpServers = true
-      | .permissions.defaultMode = "bypassPermissions"
-      | .skipDangerousModePermissionPrompt = true
-    else . end
-' --argjson box "$([ "$AGENT_HOST" = box ] && echo true || echo false)" "$settings" > "$tmp" && cat "$tmp" > "$settings"
-rm -f "$tmp"
+"$AGENT_BOX_DIR/bin/claude-hooks"
 
 if [ "$AGENT_HOST" = box ]; then
   # The template's startup claude otherwise sits on the first-run theme

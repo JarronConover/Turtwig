@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Merge agent-box's Claude Code hooks into ~/.claude/settings.json, keeping every
+# other hook: turn sync, session start, and agent-boxd's event log (chat states
+# and the prompts a chat waits on) on both machines; the box's own defaults there.
+set -u
+. "$(dirname "$0")/env.sh"
+
+settings="$HOME/.claude/settings.json"
+mkdir -p "$(dirname "$settings")"
+[ -s "$settings" ] || echo '{}' > "$settings"
+tmp=$(mktemp)
+boxd="$AGENT_BOX_DIR/rust/target/release/agent-boxd"
+jq --arg sync "$AGENT_BOX_DIR/bin/turn-sync" --arg start "$AGENT_BOX_DIR/bin/session-start" \
+  --arg boxd "$boxd hook 2> /dev/null || true" '
+  def ensure(event; cmd):
+    .hooks[event] = ((.hooks[event] // [])
+      | map(select(any(.hooks[]?; .command == cmd) | not))
+      + [{hooks: [{type: "command", command: cmd}]}]);
+  ensure("Stop"; $sync) | ensure("SubagentStop"; $sync) | ensure("SessionStart"; $start)
+  | reduce ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "PermissionRequest",
+            "Stop", "SubagentStop", "SessionStart", "SessionEnd") as $e (.; ensure($e; $boxd))
+  | if $box then
+      .enableAllProjectMcpServers = true
+      | .permissions.defaultMode = "bypassPermissions"
+      | .skipDangerousModePermissionPrompt = true
+    else . end
+' --argjson box "$([ "$AGENT_HOST" = box ] && echo true || echo false)" "$settings" > "$tmp" && cat "$tmp" > "$settings"
+rm -f "$tmp"

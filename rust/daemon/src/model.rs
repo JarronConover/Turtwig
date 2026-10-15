@@ -241,8 +241,10 @@ pub(crate) fn suggestion(pane: &str) -> Option<String> {
 
 fn chats(states: &ChatStates) -> Vec<Chat> {
     let dir = util::agent_home().join("state").join("registry").join("chats");
+    let here = crate::mac::host();
     let alive = util::tmux_sessions();
     let mut out = vec![];
+    let mut elsewhere: Option<std::collections::HashSet<String>> = None;
     let mut paths: Vec<_> = std::fs::read_dir(&dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
     paths.sort();
     for p in paths {
@@ -259,8 +261,15 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
         }
         let id = s("id").unwrap_or_default();
         let host = s("host").unwrap_or_else(|| "box".into());
+        if host != here {
+            continue;
+        }
         let tmux = util::chat_session(&id);
-        let is_alive = host == "box" && alive.contains(&tmux);
+        let is_alive = alive.contains(&tmux);
+        // A stopped Mac chat that super.engineering still runs: starting it here takes it over.
+        let status = if !is_alive && here == "mac" && elsewhere
+            .get_or_insert_with(|| crate::mac::sessions_running())
+            .contains(&id) { "running_elsewhere".to_string() } else { status };
         let dir = s("dir");
         let last = dir.as_deref().and_then(|d| util::mtime(&util::transcript_path(d, &id)));
         let hook = states.get(&id).filter(|(st, _)| st != "stopped");
@@ -324,14 +333,11 @@ fn worktree(caches: &Arc<Caches>, d: &Value, chats: &[Chat]) -> Option<Worktree>
         mr,
         age,
         chat_ids: mine.iter().map(|c| c.id.clone()).collect(),
-        host: "box".into(),
+        host: crate::mac::host().into(),
     })
 }
 
 pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model {
-    if crate::mac::is_mac() {
-        return crate::mac::build(caches, last_seq);
-    }
     let ws = sc(&["workspace", "list", "--json"]);
     let secs = sc(&["section", "list", "--json"]);
     let chats = chats(states);
@@ -381,9 +387,14 @@ pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model 
             }
         }
     }
+    let ssh_host = if crate::mac::is_mac() {
+        String::new()
+    } else {
+        std::env::var("AGENT_BOX_SSH_HOST").unwrap_or_else(|_| "coder.tj-agents".into())
+    };
     Model {
-        host: "box".into(),
-        ssh_host: std::env::var("AGENT_BOX_SSH_HOST").unwrap_or_else(|_| "coder.tj-agents".into()),
+        host: crate::mac::host().into(),
+        ssh_host,
         projects,
         sections,
         chats,
