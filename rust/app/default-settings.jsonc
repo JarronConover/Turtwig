@@ -1132,6 +1132,21 @@
     "line_height": 1.25,
     "padding": [14, 6],
     "foreground": "#f5f5f7",
-    "background": "#1e1e1f"
+    "background": "#1e1e1f",
+    // Mac-style editing: each combo sends this text to the shell (readline/zsh codes). Use opt or alt,
+    // cmd, ctrl, shift. {"paste": true} pastes the clipboard; null hands the combo back to the app.
+    "keys": {
+      "cmd-backspace": "\u0015",
+      "alt-backspace": "\u001b\u007f",
+      "cmd-delete": "\u000b",
+      "alt-delete": "\u001bd",
+      "cmd-left": "\u0001",
+      "cmd-right": "\u0005",
+      "alt-left": "\u001bb",
+      "alt-right": "\u001bf",
+      "shift-enter": "\u001b\r",
+      "cmd-v": { "paste": true },
+      "cmd-k": "\u000c"
+    }
   }
 }

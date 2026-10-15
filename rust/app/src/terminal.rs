@@ -9,7 +9,9 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor, Processor, StdSyncHandler};
+use alacritty_terminal::term::TermMode;
 use base64::Engine as _;
+use serde_json::Value;
 use gpui_kit::*;
 
 struct Size {
@@ -36,6 +38,8 @@ pub struct TerminalView {
     /** Which daemon the PTY lives on ("box", "mac"); terminal ids are only unique per daemon. */
     pub host: String,
     pub term_id: Option<u64>,
+    /** settings `terminal.keys`, by normalized combo. */
+    keys: std::collections::HashMap<String, Value>,
     pub session: Option<String>,
     pub cwd: Option<String>,
     size: (u16, u16),
@@ -67,6 +71,7 @@ impl TerminalView {
             padding: ts.padding,
             fg: parse_color(&ts.foreground),
             bg: parse_color(&ts.background),
+            keys: ts.keys.iter().map(|(k, v)| (normalize_combo(k), v.clone())).collect(),
         }
     }
 
@@ -116,9 +121,41 @@ impl TerminalView {
         }
     }
 
+    /** Picks up edited `terminal.keys` without reopening the terminal. */
+    pub fn set_keys(&mut self, keys: &serde_json::Map<String, Value>) {
+        self.keys = keys.iter().map(|(k, v)| (normalize_combo(k), v.clone())).collect();
+    }
+
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
         let m = &k.modifiers;
+        let mut combo: Vec<&str> = vec![];
+        for (on, name) in [(m.control, "ctrl"), (m.alt, "alt"), (m.shift, "shift"), (m.platform, "cmd")] {
+            if on {
+                combo.push(name);
+            }
+        }
+        combo.push(k.key.as_str());
+        match self.keys.get(&combo.join("-")) {
+            Some(Value::String(text)) => {
+                self.write(text.as_bytes());
+                cx.stop_propagation();
+                return;
+            }
+            Some(Value::Object(o)) if o.get("paste").and_then(Value::as_bool) == Some(true) => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                    if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
+                        self.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
+                    } else {
+                        self.write(text.as_bytes());
+                    }
+                }
+                cx.stop_propagation();
+                return;
+            }
+            Some(Value::Null) => return,
+            _ => {}
+        }
         if m.platform {
             return;
         }
@@ -292,5 +329,30 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
+    }
+}
+
+/** "opt+Left" and "Cmd-Backspace" both become "alt-left" / "cmd-backspace", modifiers in a fixed order. */
+fn normalize_combo(combo: &str) -> String {
+    let parts: Vec<String> = combo.to_ascii_lowercase().split(['-', '+']).filter(|p| !p.is_empty()).map(str::to_string).collect();
+    let Some((key, mods)) = parts.split_last() else { return String::new() };
+    let has = |names: &[&str]| mods.iter().any(|m| names.contains(&m.as_str()));
+    let mut out: Vec<&str> = vec![];
+    for (names, name) in [(&["ctrl", "control"][..], "ctrl"), (&["alt", "opt", "option"][..], "alt"), (&["shift"][..], "shift"), (&["cmd", "command", "super", "meta"][..], "cmd")] {
+        if has(names) {
+            out.push(name);
+        }
+    }
+    out.push(key.as_str());
+    out.join("-")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn combos_normalize() {
+        assert_eq!(super::normalize_combo("Opt+Left"), "alt-left");
+        assert_eq!(super::normalize_combo("cmd-shift-Backspace"), "shift-cmd-backspace");
+        assert_eq!(super::normalize_combo("shift-enter"), "shift-enter");
     }
 }

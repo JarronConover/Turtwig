@@ -544,6 +544,10 @@ impl Workspace {
                 self.update_badge(&ctx);
                 crate::logo::clear_cache();
                 self.update_dock_icon();
+                let keys = self.settings.terminal.keys.clone();
+                for t in self.terminals.values() {
+                    t.update(cx, |t, _| t.set_keys(&keys));
+                }
                 self.pending_script.push(json!({"type": "event", "name": "model", "payload": null}));
             }
             Err(e) => self.settings_error = Some(format!("{e:#}")),

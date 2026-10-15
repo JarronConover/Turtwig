@@ -82,6 +82,10 @@ pub struct TerminalSettings {
     pub padding: [f32; 2],
     pub foreground: String,
     pub background: String,
+    /** Key combos (`cmd-backspace`, `alt-left`, `shift-enter`) to the text they send; `{"paste": true}`
+    pastes the clipboard; null leaves the combo to the app. Checked before the terminal's own keys. */
+    #[serde(default)]
+    pub keys: Map<String, Value>,
 }
 
 impl Default for Settings {
