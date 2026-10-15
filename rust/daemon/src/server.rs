@@ -9,7 +9,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::{db, model, term, util};
+use crate::{db, mac, model, term, util};
 
 struct Watch {
     path: PathBuf,
@@ -142,6 +142,11 @@ fn model_loop(shared: &Arc<Shared>) {
         *woke = false;
     }
     std::thread::sleep(Duration::from_millis(250));
+    // On the Mac every build polls super.engineering, so build only while someone is watching.
+    if mac::is_mac() && !shared.conns.lock().unwrap().iter().any(|c| c.subscribed.load(Ordering::SeqCst)) {
+        *shared.model.lock().unwrap() = None;
+        return;
+    }
     let states = shared.states.lock().unwrap().clone();
     let next = model::build(&shared.caches, &states, shared.last_seq.load(Ordering::SeqCst));
     let changed = shared.model.lock().unwrap().as_ref() != Some(&next);
@@ -274,7 +279,9 @@ fn registry_chat(chat_id: &str) -> Option<Value> {
 
 fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, String> {
     let result = match call {
-        Call::Hello { .. } => Ok(json!({ "version": PROTOCOL_VERSION, "host": "box" })),
+        Call::Hello { .. } => {
+            Ok(json!({ "version": PROTOCOL_VERSION, "host": if mac::is_mac() { "mac" } else { "box" } }))
+        }
         Call::Subscribe { from_seq } => {
             let current = shared.model.lock().unwrap().clone();
             let model = match current {
@@ -300,10 +307,15 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             return Ok(json!({ "last_seq": last }));
         }
         Call::TranscriptRead { chat_id, from } => {
-            let chat = registry_chat(&chat_id).ok_or("no such chat")?;
-            let id = chat.get("id").and_then(|v| v.as_str()).unwrap_or(&chat_id).to_string();
-            let dir = chat.get("dir").and_then(|v| v.as_str()).ok_or("chat has no folder")?;
-            let path = util::transcript_path(dir, &id);
+            let (id, path) = if mac::is_mac() {
+                (chat_id.clone(), mac::transcript_for(&chat_id).ok_or("no transcript for this chat yet")?)
+            } else {
+                let chat = registry_chat(&chat_id).ok_or("no such chat")?;
+                let id = chat.get("id").and_then(|v| v.as_str()).unwrap_or(&chat_id).to_string();
+                let dir = chat.get("dir").and_then(|v| v.as_str()).ok_or("chat has no folder")?;
+                let path = util::transcript_path(dir, &id);
+                (id, path)
+            };
             let mut w = Watch { path: path.clone(), offset: 0, next_line: 0 };
             let all = read_lines(&mut w);
             let entries: Vec<Value> = all.into_iter().skip(from).collect();
@@ -314,6 +326,12 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         Call::TranscriptUnwatch { chat_id } => {
             conn.watches.lock().unwrap().retain(|k, _| !k.starts_with(&chat_id));
             return Ok(json!({}));
+        }
+        Call::ChatNew { branch: Some(_), .. } if mac::is_mac() => {
+            Err("on the Mac, make worktrees in super.engineering; a chat there takes a dir".into())
+        }
+        Call::ChatNew { dir, prompt, model, .. } if mac::is_mac() => {
+            mac::chat_new(dir.as_deref(), prompt.as_deref(), model.as_deref())
         }
         Call::ChatNew { name, kind, branch, base, dir, repo, prompt, model } => {
             let mut args: Vec<String> = vec!["new".into(), name, "--kind".into(), kind];
@@ -327,7 +345,23 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             chat_tool(&refs, 900)
         }
-        Call::History { .. } => Err("history isn't implemented yet".into()),
+        Call::History { limit } => {
+            let limit = limit.unwrap_or(200);
+            return Ok(if mac::is_mac() { mac::history(limit) } else { box_history(limit) });
+        }
+        Call::ChatStart { chat_id } if mac::is_mac() => mac::chat_start(&chat_id),
+        Call::ChatStop { chat_id } if mac::is_mac() => mac::chat_stop(&chat_id),
+        Call::ChatArchive { chat_id } if mac::is_mac() => mac::chat_archive(&chat_id),
+        Call::ChatSend { chat_id, text } if mac::is_mac() => mac::chat_send(&chat_id, &text),
+        Call::ChatKeys { chat_id, keys } if mac::is_mac() => mac::chat_keys(&chat_id, &keys),
+        Call::SectionCreate { name } if mac::is_mac() => mac::section_create(&name),
+        Call::SectionRename { id, name } if mac::is_mac() => mac::section_rename(&id, &name),
+        Call::SectionDelete { id } if mac::is_mac() => mac::section_delete(&id),
+        Call::SectionAssign { path, section } if mac::is_mac() => mac::section_assign(&path, section.as_deref()),
+        Call::WorktreeMove { path, section, .. } if mac::is_mac() => mac::section_assign(&path, section.as_deref()),
+        Call::WorktreeDelete { path } if mac::is_mac() => mac::worktree_delete(&path),
+        Call::SectionMove { id, index } if mac::is_mac() => mac::section_move(&id, index),
+        Call::ProjectMove { .. } if mac::is_mac() => Err("super.engineering has no project order to change".into()),
         Call::ChatStart { chat_id } => chat_tool(&["start", &chat_id], 300),
         Call::ChatStop { chat_id } => chat_tool(&["stop", &chat_id], 120),
         Call::ChatArchive { chat_id } => chat_tool(&["archive", &chat_id], 120),
@@ -403,6 +437,31 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
     };
     shared.poke();
     result
+}
+
+/** Every registry chat, archived ones too, newest first. */
+fn box_history(limit: usize) -> Value {
+    let dir = util::agent_home().join("state").join("registry").join("chats");
+    let alive = util::tmux_sessions();
+    let mut chats: Vec<Value> = vec![];
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Some(c) = std::fs::read_to_string(e.path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+            continue;
+        };
+        let s = |k: &str| c.get(k).and_then(|v| v.as_str()).map(|v| v.to_string());
+        let (Some(id), dir) = (s("id"), s("dir")) else { continue };
+        let host = s("host").unwrap_or_else(|| "box".into());
+        let alive = host == "box" && alive.contains(&util::chat_session(&id));
+        let last = dir.as_deref().and_then(|d| util::mtime(&util::transcript_path(d, &id)));
+        chats.push(json!({
+            "id": id, "name": s("name").unwrap_or_default(), "dir": dir, "host": host, "last_activity": last,
+            "closed": s("status").as_deref() != Some("running") || !alive,
+        }));
+    }
+    let t = |v: &Value| v.get("last_activity").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    chats.sort_by(|a, b| t(b).total_cmp(&t(a)));
+    chats.truncate(limit);
+    json!({ "chats": chats })
 }
 
 fn find_item_id(v: &Value, path: &str) -> Option<String> {

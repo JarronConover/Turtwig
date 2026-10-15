@@ -11,7 +11,7 @@ const GIT_TTL: Duration = Duration::from_secs(20);
 const MR_TTL: Duration = Duration::from_secs(90);
 
 /** Repo key and GitLab project for each checkout folder name. */
-fn repo_for(project_name: &str) -> (&'static str, &'static str, f32) {
+pub(crate) fn repo_for(project_name: &str) -> (&'static str, &'static str, f32) {
     match project_name {
         "redotech-internal-tools" | "internal-tools" => {
             ("internal-tools", "redo/redoapp/internal/redotech-internal-tools", 120.0)
@@ -259,6 +259,9 @@ fn worktree(caches: &Arc<Caches>, d: &Value, chats: &[Chat]) -> Option<Worktree>
 }
 
 pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model {
+    if crate::mac::is_mac() {
+        return crate::mac::build(caches, last_seq);
+    }
     let ws = sc(&["workspace", "list", "--json"]);
     let secs = sc(&["section", "list", "--json"]);
     let chats = chats(states);

@@ -19,8 +19,14 @@ pub fn db_path() -> PathBuf {
     agent_home().join("boxd.db")
 }
 
+/** The agent-box checkout this binary was built in (rust/target/release/agent-boxd), else ~/agent-box. */
 pub fn agent_box_dir() -> PathBuf {
-    home().join("agent-box")
+    let built_in = std::env::current_exe()
+        .ok()
+        .and_then(|e| std::fs::canonicalize(e).ok())
+        .and_then(|e| e.ancestors().nth(4).map(|p| p.to_path_buf()))
+        .filter(|p| p.join("bin").join("agent-env").exists());
+    built_in.unwrap_or_else(|| home().join("agent-box"))
 }
 
 pub fn now() -> f64 {
@@ -63,8 +69,20 @@ impl Output {
 
 /** Run a command, killing it after `timeout`. */
 pub fn run(cmd: &str, args: &[&str], envs: &[(&str, &str)], cwd: Option<&str>, timeout: Duration) -> Output {
+    run_with(cmd, args, envs, &[], cwd, None, timeout)
+}
+
+/** `run`, also dropping env vars that start with any of `unset`, and feeding `input` on stdin. */
+pub fn run_with(cmd: &str, args: &[&str], envs: &[(&str, &str)], unset: &[&str], cwd: Option<&str>,
+                input: Option<&str>, timeout: Duration) -> Output {
     let mut c = Command::new(cmd);
-    c.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
+    c.args(args).stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
+    for (k, _) in std::env::vars() {
+        if unset.iter().any(|p| k.starts_with(p)) {
+            c.env_remove(k);
+        }
+    }
     for (k, v) in envs {
         c.env(k, v);
     }
@@ -75,6 +93,13 @@ pub fn run(cmd: &str, args: &[&str], envs: &[(&str, &str)], cwd: Option<&str>, t
         Ok(ch) => ch,
         Err(e) => return Output { ok: false, stdout: String::new(), stderr: format!("{cmd}: {e}") },
     };
+    if let (Some(text), Some(mut w)) = (input, child.stdin.take()) {
+        use std::io::Write;
+        let text = text.to_string();
+        std::thread::spawn(move || {
+            let _ = w.write_all(text.as_bytes());
+        });
+    }
     let mut out = child.stdout.take();
     let mut err = child.stderr.take();
     let t_out = std::thread::spawn(move || {
