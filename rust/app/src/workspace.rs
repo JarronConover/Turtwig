@@ -1209,9 +1209,18 @@ impl Workspace {
             .track_scroll(&handle)
             .child(list);
         let shift_holds = cs.get("code_scroll").and_then(|c| c.get("shift_holds_transcript")).and_then(Value::as_bool) != Some(false);
+        // Files dropped anywhere on the transcript attach to its chat, whether or not the overlay that
+        // names the chat has rendered yet.
+        let (drop_view, drop_chat) = (cx.entity().downgrade(), chat_id.to_string());
         div()
+            .id(SharedString::from(format!("transcript-drop:{chat_id}")))
             .relative()
             .size_full()
+            .on_drop(move |paths: &ExternalPaths, window, cx| {
+                let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
+                let chat = drop_chat.clone();
+                let _ = drop_view.update(cx, |ws, cx| ws.attach(chat, files, window, cx));
+            })
             .child(scroll)
             .when(shift_holds, |d| d.child(crate::ui::trace_view::shift_scroll_layer(None, 1.)))
             .children(overlay)

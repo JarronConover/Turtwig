@@ -552,13 +552,13 @@
     "ChatTabs": {
       "about": "Tabs for the selected worktree's open chats (a chat is open while its Claude process runs; closing a tab stops it), a placeholder while a new chat starts, + for a new chat, and the worktree's closed chats under the clock. Drag tabs to reorder them.",
       "type": "row",
-      "style": { "height": 40, "shrink": 0, "padding": [0, 0, 0, 8], "align": "stretch" },
+      "style": { "height": 32, "shrink": 0, "padding": [0, 0, 0, 6], "align": "stretch" },
       "children": [
         {
           "for": ".selected.chats | map(select(.open))", "as": "c", "key": ".c.id", "id": "chat-tab",
           "type": "row",
           "style": {
-            "position": "relative", "gap": 7, "padding": [0, 6, 0, 12], "align": "center", "font_size": 13, "cursor": "pointer",
+            "position": "relative", "gap": 6, "padding": [0, 4, 0, 10], "align": "center", "font_size": 13, "cursor": "pointer",
             "color": "{{ if .c.active then \"@text\" else \"@age\" end }}", "hover": { "color": "@text" }
           },
           "on": {
@@ -602,7 +602,7 @@
           "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 140 },
           "children": [{ "type": "spinner", "props": { "size": "xsmall" } }, { "type": "text", "props": { "text": "Starting…" } }]
         },
-        { "if": ".selected.worktree", "type": "divider", "props": { "axis": "y" }, "style": { "margin": [10, 4] } },
+        { "if": ".selected.worktree", "type": "divider", "props": { "axis": "y" }, "style": { "margin": [8, 4] } },
         {
           "if": ".selected.worktree",
           "id": "chat-tab-new",
@@ -619,7 +619,7 @@
           "type": "row",
           "style": { "position": "relative", "padding": [0, 12], "align": "center" },
           "children": [
-            { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "clock", "size": 26, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
+            { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "clock", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
             {
               "if": ".state.chat_history_open",
               "type": "box",
@@ -633,7 +633,7 @@
               "type": "scroll",
               "layer": "top",
               "style": {
-                "position": "absolute", "top": 36, "right": 8, "width": 320, "max_height": 380, "padding": 6, "gap": 2,
+                "position": "absolute", "top": 30, "right": 8, "width": 320, "max_height": 380, "padding": 6, "gap": 2,
                 "radius": 10, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg"
               },
               "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
