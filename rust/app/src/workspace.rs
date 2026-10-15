@@ -1020,8 +1020,10 @@ impl Workspace {
                 let from = self.transcripts.get(&chat.id).map(|t| t.lines).unwrap_or(0);
                 let remote = self.route(&Call::TranscriptUnwatch { chat_id: chat.id.clone() });
                 let id = chat.id.clone();
+                // Only the newest `chat.transcript_tail` entries on first load: dispatcher transcripts run to 80MB.
+                let tail = self.settings.chat.get("transcript_tail").and_then(Value::as_u64).map(|n| n as usize).filter(|_| from == 0);
                 cx.spawn(async move |this, cx| {
-                    if let Ok(v) = remote.call(Call::TranscriptRead { chat_id: id.clone(), from }).await {
+                    if let Ok(v) = remote.call(Call::TranscriptRead { chat_id: id.clone(), from, tail }).await {
                         let entries = v["entries"].as_array().cloned().unwrap_or_default();
                         let start = v["from"].as_u64().unwrap_or(from as u64) as usize;
                         this.update(cx, |ws, cx| {

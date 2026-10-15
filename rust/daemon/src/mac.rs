@@ -363,7 +363,11 @@ pub fn build(caches: &Arc<Caches>, last_seq: i64) -> Model {
                         let m = meta.get(id);
                         sections.push(Section {
                             id: id.clone(),
-                            name: m.and_then(|m| m.get("name")?.as_str()).unwrap_or("Section").to_string(),
+                            name: m
+                                .and_then(|m| m.get("name")?.as_str())
+                                .or_else(|| section_title(&ws, id))
+                                .unwrap_or("Section")
+                                .to_string(),
                             collapsed: m.and_then(|m| m.get("collapsed")?.as_bool()).unwrap_or(false),
                             items: vec![],
                         });
@@ -578,4 +582,12 @@ pub fn worktree_delete(path: &str) -> Result<Value, String> {
     let id = items(&ws).into_iter().find(|(_, it)| str_of(it, "path").as_deref() == Some(path))
         .and_then(|(_, it)| str_of(&it, "id")).ok_or("no such worktree in super.engineering")?;
     sc(&["worktree", "delete", &id, "--json"], None, None)
+}
+
+/** A manual section's title as `workspace list` reports it. */
+fn section_title<'a>(ws: &'a Value, id: &str) -> Option<&'a str> {
+    ws.pointer("/response/workspaces")?.as_array()?.iter().flat_map(|w| w.get("sections").and_then(|s| s.as_array()).into_iter().flatten())
+        .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(id))?
+        .get("title")?
+        .as_str()
 }

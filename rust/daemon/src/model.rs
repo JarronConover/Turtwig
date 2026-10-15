@@ -299,7 +299,7 @@ pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model 
                     sections.push(Section {
                         name: m
                             .and_then(|m| m.get("name")?.as_str())
-                            .or_else(|| sec.get("name")?.as_str())
+                            .or_else(|| sec.get("name").or_else(|| sec.get("title"))?.as_str())
                             .unwrap_or("Section")
                             .to_string(),
                         collapsed: m.and_then(|m| m.get("collapsed")?.as_bool()).unwrap_or(false),

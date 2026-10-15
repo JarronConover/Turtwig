@@ -20,7 +20,13 @@ pub enum Call {
     /** Receive `Event::Model` now and on every change, plus hook events after `from_seq`. */
     Subscribe { from_seq: Option<i64> },
     /** Transcript entries from line `from` on; also starts `Event::Transcript` pushes for the chat. */
-    TranscriptRead { chat_id: String, from: usize },
+    /** With `tail` (and `from` 0), only the last `tail` entries; `from` in the reply says where they start. */
+    TranscriptRead {
+        chat_id: String,
+        from: usize,
+        #[serde(default)]
+        tail: Option<usize>,
+    },
     TranscriptUnwatch { chat_id: String },
     ChatNew {
         name: String,

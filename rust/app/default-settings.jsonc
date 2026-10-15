@@ -10,7 +10,7 @@
   // This Mac: its worktrees, sections, and chats (super.engineering's, in place), through a local
   // agent-boxd. Chats here run on the Mac; the sidebar marks them with the mac host icon.
   "local": {
-    "enabled": false,
+    "enabled": true,
     "daemon": "~/dev/agent-box/rust/target/release/agent-boxd"
   },
 
@@ -906,9 +906,9 @@
               "style": { "font_size": 12.5, "color": "@warning" }
             },
             { "if": ".selected.worktree.uncommitted > 0 and .selected.chat", "type": "Pill", "props": { "text": "Commit and push", "icon": "git-commit-horizontal", "do": { "do": "chat.send", "text": "Commit and push your changes." } } },
-            { "if": "(.selected.worktree.is_primary | not) and .selected.worktree.branch", "type": "Pill", "props": { "text": "Test on Mac", "icon": "laptop", "tooltip": "Check this branch out on the Mac with the box's latest work", "do": { "do": "worktree.test_local", "branch": "{{ .selected.worktree.branch }}" } } },
+            { "if": "(.selected.worktree.is_primary | not) and .selected.worktree.branch and .selected.worktree.host == \"box\"", "type": "Pill", "props": { "text": "Test on Mac", "icon": "laptop", "tooltip": "Check this branch out on the Mac with the box's latest work", "do": { "do": "worktree.test_local", "branch": "{{ .selected.worktree.branch }}" } } },
             {
-              "if": ".selected.chat",
+              "if": ".selected.chat and .selected.worktree.host == \"box\"",
               "type": "Pill",
               "props": {
                 "text": "Move chat to {{ if .selected.chat.host == \"box\" then \"Mac\" else \"box\" end }}",
@@ -1073,7 +1073,7 @@
     { "label": "Commit and push", "if": ".selected.chat", "do": { "do": "chat.send", "text": "Commit and push your changes." } },
     { "label": "Test this branch on the Mac", "if": ".selected.worktree.branch and (.selected.worktree.is_primary | not)", "do": { "do": "worktree.test_local", "branch": "{{ .selected.worktree.branch }}" } },
     { "label": "Move chat to the Mac", "if": ".selected.chat.host == \"box\"", "do": { "do": "chat.move", "to": "mac" } },
-    { "label": "Move chat to the box", "if": ".selected.chat.host == \"mac\"", "do": { "do": "chat.move", "to": "box" } },
+    { "label": "Move chat to the box", "if": ".selected.chat.host == \"mac\" and .selected.worktree.host == \"box\"", "do": { "do": "chat.move", "to": "box" } },
     { "label": "Stop chat", "if": ".selected.chat.alive", "do": "chat.stop" },
     { "label": "Start chat", "if": ".selected.chat and (.selected.chat.alive | not)", "do": "chat.start" },
     { "label": "Archive chat", "if": ".selected.chat", "do": "chat.archive" },
@@ -1092,6 +1092,8 @@
     // Trace-style transcript (after shadcn's Trace): user turns as bubbles, replies as text, steps as quiet lines.
     "fold_steps_after": 5,
     "step_detail_lines": 40,
+    // How many of a chat's newest transcript entries to load when it opens (long chats run to 40,000+).
+    "transcript_tail": 600,
     // Selecting a worktree opens its live chat, if any: "open" (default) shows no chat when none is
     // running; "recent" shows the newest chat even when it isn't.
     "open_on_select": "open",

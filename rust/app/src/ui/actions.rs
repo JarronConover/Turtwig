@@ -193,8 +193,13 @@ impl Workspace {
                     self.closed.insert(id.clone());
                     self.opened.remove(&id);
                     self.active_chat.retain(|_, c| c != &id);
+                    let host = self.host_of_chat(&id);
                     if self.chat(&id).is_some_and(|c| c.host == "mac") && !self.remotes.contains_key("mac") {
                         self.run_local(vec!["chat".into(), "stop".into(), id], window, cx);
+                    } else if host == "mac" {
+                        // On the Mac, stopping only ends the turn; archiving closes super.engineering's tab
+                        // (and its process). The chat stays in History.
+                        self.call(Call::ChatArchive { chat_id: id }, cx);
                     } else {
                         self.call(Call::ChatStop { chat_id: id }, cx);
                     }
@@ -247,7 +252,11 @@ impl Workspace {
             "history.load" => self.load_history(cx),
             "chat.interrupt" => {
                 if let Some(id) = chat() {
-                    self.call(Call::ChatKeys { chat_id: id, keys: vec!["Escape".into()] }, cx);
+                    if self.host_of_chat(&id) == "mac" {
+                        self.call(Call::ChatStop { chat_id: id }, cx);
+                    } else {
+                        self.call(Call::ChatKeys { chat_id: id, keys: vec!["Escape".into()] }, cx);
+                    }
                 }
             }
             "if" => {

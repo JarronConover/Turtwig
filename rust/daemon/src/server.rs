@@ -177,6 +177,23 @@ fn read_lines(w: &mut Watch) -> Vec<Value> {
     out
 }
 
+/** The last `n` entries of a transcript and the line they start at; leaves `w` at the end of the file. */
+fn read_tail(w: &mut Watch, n: usize) -> (usize, Vec<Value>) {
+    let Ok(buf) = std::fs::read(&w.path) else { return (0, vec![]) };
+    let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return (0, vec![]) };
+    let body = &buf[..end];
+    let total = body.split(|b| *b == b'\n').count();
+    let skip = total.saturating_sub(n);
+    let entries = body
+        .split(|b| *b == b'\n')
+        .skip(skip)
+        .map(|l| serde_json::from_slice(l).unwrap_or(Value::Null))
+        .collect();
+    w.offset = end as u64 + 1;
+    w.next_line = total;
+    (skip, entries)
+}
+
 fn transcript_loop(shared: &Arc<Shared>) {
     std::thread::sleep(Duration::from_millis(300));
     for c in shared.conns.lock().unwrap().iter() {
@@ -306,7 +323,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             conn.subscribed.store(true, Ordering::SeqCst);
             return Ok(json!({ "last_seq": last }));
         }
-        Call::TranscriptRead { chat_id, from } => {
+        Call::TranscriptRead { chat_id, from, tail } => {
             let (id, path) = if mac::is_mac() {
                 (chat_id.clone(), mac::transcript_for(&chat_id).ok_or("no transcript for this chat yet")?)
             } else {
@@ -317,8 +334,11 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                 (id, path)
             };
             let mut w = Watch { path: path.clone(), offset: 0, next_line: 0 };
-            let all = read_lines(&mut w);
-            let entries: Vec<Value> = all.into_iter().skip(from).collect();
+            let (from, entries) = match tail.filter(|_| from == 0) {
+                // Long transcripts run to tens of megabytes; parse only the lines asked for.
+                Some(n) => read_tail(&mut w, n),
+                None => (from, read_lines(&mut w).into_iter().skip(from).collect()),
+            };
             let next = w.next_line;
             conn.watches.lock().unwrap().insert(id, w);
             return Ok(json!({ "entries": entries, "from": from, "next": next, "path": path }));
