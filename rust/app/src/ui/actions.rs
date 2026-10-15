@@ -17,8 +17,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.keys", "{chat, keys: [..]}: press keys in the chat's session (Enter, Escape, Up, 1, ...)"),
     ("chat.archive / chat.stop / chat.start", "{chat}"),
     ("chat.close", "{chat}: close its tab and stop its Claude process (wherever it runs)"),
-    ("chat.open", "{chat}: open a chat as a tab, resuming its process if it isn't running"),
+    ("chat.open", "{chat, host?}: open a chat as a tab, resuming its process if it isn't running (host: where a chat from `.history` lives)"),
     ("tab.move", "{chat?, target: chat id, zone: before|after}: reorder a worktree's tabs (chat defaults to `dragged`)"),
+    ("chat.interrupt", "{chat}: stop what the agent is doing (Esc), keeping the chat open"),
+    ("history.load", "fetch past chats from every host into `.history` (`.app.history_loading` while it runs)"),
     ("if", "{cond, then, else?}: run `then` when cond is truthy (true, a non-empty string other than \"false\"), else `else`"),
     ("confirm", "{title, text?, confirm?, cancel?, then}: ask first; `then` runs if they confirm. Shown by the Confirm component (`.app.confirm`)"),
     ("confirm.accept / confirm.cancel", "answer the open confirm dialog"),
@@ -191,7 +193,7 @@ impl Workspace {
                     self.closed.insert(id.clone());
                     self.opened.remove(&id);
                     self.active_chat.retain(|_, c| c != &id);
-                    if self.chat(&id).is_some_and(|c| c.host == "mac") {
+                    if self.chat(&id).is_some_and(|c| c.host == "mac") && !self.remotes.contains_key("mac") {
                         self.run_local(vec!["chat".into(), "stop".into(), id], window, cx);
                     } else {
                         self.call(Call::ChatStop { chat_id: id }, cx);
@@ -209,8 +211,21 @@ impl Workspace {
                         self.select(p, window, cx);
                     }
                     match alive {
-                        Some((false, host)) if host == "mac" => self.run_local(vec!["chat".into(), "start".into(), id], window, cx),
+                        Some((false, host)) if host == "mac" && !self.remotes.contains_key("mac") => {
+                            self.run_local(vec!["chat".into(), "start".into(), id], window, cx)
+                        }
                         Some((false, _)) => self.call(Call::ChatStart { chat_id: id }, cx),
+                        // Not in any worktree we know yet (from history): start it on its host and
+                        // select it when it shows up.
+                        None => {
+                            let host = s("host").unwrap_or_else(|| "box".into());
+                            self.pending_select = Some(id.clone());
+                            let remote = self.remote_for_host(&host);
+                            cx.spawn(async move |_, _| {
+                                let _ = remote.call(Call::ChatStart { chat_id: id }).await;
+                            })
+                            .detach();
+                        }
                         _ => {}
                     }
                 }
@@ -227,6 +242,12 @@ impl Workspace {
                         order.insert(w.path.clone(), serde_json::json!(ids));
                         self.set_state("tab_order".into(), Value::Object(order));
                     }
+                }
+            }
+            "history.load" => self.load_history(cx),
+            "chat.interrupt" => {
+                if let Some(id) = chat() {
+                    self.call(Call::ChatKeys { chat_id: id, keys: vec!["Escape".into()] }, cx);
                 }
             }
             "if" => {

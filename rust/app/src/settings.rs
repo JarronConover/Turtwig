@@ -11,6 +11,8 @@ pub const DEFAULTS: &str = include_str!("../default-settings.jsonc");
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
     pub connection: Connection,
+    #[serde(default)]
+    pub local: LocalConnection,
     /** Named colors, fonts, and sizes; nodes refer to them as `@name`. */
     pub theme: Map<String, Value>,
     /** UI state and its starting values; actions change it, expressions read it as `.state`. */
@@ -41,6 +43,9 @@ pub struct Settings {
     /** A sound per event (`chat.finished`, `chat.question`, `chat.waiting`, ...), plus `volume`, `when`, `enabled`. */
     #[serde(default)]
     pub sounds: Value,
+    /** The designer agent: `add_dirs` (folders it may read besides the settings folder), `tools`, `permission_mode`. */
+    #[serde(default)]
+    pub designer: Value,
     /** The logo (art, colors, tile) drawn by `logo` nodes, the Dock, and the bundle icon; see SETTINGS.md, Logo. */
     #[serde(default)]
     pub logo: Value,
@@ -58,6 +63,15 @@ pub struct Connection {
     pub ssh_host: String,
     pub daemon: String,
     pub retry_seconds: u64,
+}
+
+/** The daemon on this Mac (its worktrees and chats, from super.engineering), run locally without ssh. */
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalConnection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub daemon: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

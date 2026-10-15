@@ -31,7 +31,19 @@ pub struct Drag {
 }
 
 pub struct Workspace {
-    _remote_guard: RemoteGuard,
+    _remote_guards: Vec<RemoteGuard>,
+    /** One daemon connection per host: "box" over ssh, "mac" run locally. */
+    pub(crate) remotes: HashMap<String, Remote>,
+    /** Each host's latest model; `model` is them merged (this Mac's first). */
+    pub(crate) models: HashMap<String, Model>,
+    pub(crate) host_up: HashMap<String, bool>,
+    /** Where each merged project and section came from, by index and id. */
+    pub(crate) project_hosts: Vec<String>,
+    pub(crate) section_hosts: HashMap<String, String>,
+    /** Past chats from every host's `History`, for the history panel. */
+    pub(crate) history: Vec<Value>,
+    pub(crate) history_loading: bool,
+    pub(crate) inputs: HashMap<String, Entity<gpui_kit::component::input::InputState>>,
     pub(crate) settings: Settings,
     pub(crate) settings_error: Option<String>,
     pub(crate) remote: Remote,
@@ -55,7 +67,7 @@ pub struct Workspace {
     pub(crate) scroll_handles: HashMap<String, ScrollHandle>,
     pub(crate) drag: Option<Drag>,
     pub(crate) pending_actions: Vec<Value>,
-    pending_select: Option<String>,
+    pub(crate) pending_select: Option<String>,
     /** Chats opened as tabs this session (their process may still be starting). */
     pub(crate) opened: HashSet<String>,
     /** Chats closed this session: no tab even while their process winds down. */
@@ -68,7 +80,7 @@ pub struct Workspace {
     watching: HashSet<String>,
     pub(crate) composers: HashMap<String, Entity<TextareaState>>,
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
-    term_by_id: HashMap<u64, Entity<TerminalView>>,
+    term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
     pub(crate) expanded_tools: HashSet<String>,
     pub(crate) images: HashMap<String, Option<std::sync::Arc<Image>>>,
     pub(crate) diffs: HashMap<String, crate::ui::diff_view::DiffData>,
@@ -98,7 +110,7 @@ pub struct Workspace {
     pub(crate) diff_scroll: UniformListScrollHandle,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
-    _subscriptions: Vec<Subscription>,
+    pub(crate) _subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
@@ -108,18 +120,25 @@ impl Workspace {
             Err(e) => (Settings::default(), Some(format!("{e:#}"))),
         };
         crate::ui::docs::write_reference();
-        let (remote, incoming, guard) = Remote::start(
-            settings.connection.ssh_host.clone(),
-            settings.connection.daemon.clone(),
-            Duration::from_secs(settings.connection.retry_seconds),
-        );
-        let listen = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(msg) = incoming.recv_async().await {
-                if this.update_in(cx, |ws, window, cx| ws.on_incoming(msg, window, cx)).is_err() {
-                    break;
+        let retry = Duration::from_secs(settings.connection.retry_seconds);
+        let mut conns = vec![("box".to_string(), settings.connection.ssh_host.clone(), settings.connection.daemon.clone())];
+        if settings.local.enabled && !settings.local.daemon.is_empty() {
+            conns.insert(0, ("mac".to_string(), String::new(), settings.local.daemon.clone()));
+        }
+        let (mut remotes, mut guards, mut listeners) = (HashMap::new(), vec![], vec![]);
+        for (host, ssh, daemon) in conns {
+            let (r, incoming, guard) = Remote::start(ssh, daemon, retry);
+            remotes.insert(host.clone(), r);
+            guards.push(guard);
+            listeners.push(cx.spawn_in(window, async move |this, cx| {
+                while let Ok(msg) = incoming.recv_async().await {
+                    if this.update_in(cx, |ws, window, cx| ws.on_incoming(&host, msg, window, cx)).is_err() {
+                        break;
+                    }
                 }
-            }
-        });
+            }));
+        }
+        let remote = remotes.get("box").cloned().expect("the box connection");
         let watch = Self::watch_settings(window, cx);
         let env_push = cx.spawn(async move |_, cx| loop {
             let home = std::env::var("HOME").unwrap_or_default();
@@ -159,7 +178,15 @@ impl Workspace {
         let mut state = settings.state.clone();
         state.extend(user_state.clone());
         let ws = Self {
-            _remote_guard: guard,
+            _remote_guards: guards,
+            remotes,
+            models: HashMap::new(),
+            host_up: HashMap::new(),
+            project_hosts: vec![],
+            section_hosts: HashMap::new(),
+            history: vec![],
+            history_loading: false,
+            inputs: HashMap::new(),
             settings,
             settings_error,
             remote,
@@ -219,7 +246,7 @@ impl Workspace {
             diff_collapsed: HashSet::new(),
             diff_scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
-            _tasks: [listen, watch, env_push, designer_listen].into_iter().chain(clicks).collect(),
+            _tasks: [watch, env_push, designer_listen].into_iter().chain(listeners).chain(clicks).collect(),
             _subscriptions: vec![],
         };
         let mut ws = ws;
@@ -329,7 +356,11 @@ impl Workspace {
             }
             "box" => {
                 let call = serde_json::from_value::<Call>(json!({"method": m["method"], "params": m["params"]}));
-                let remote = self.remote.clone();
+                let remote = match (m["host"].as_str(), &call) {
+                    (Some(h), _) => self.remote_for_host(h),
+                    (None, Ok(c)) => self.route(c),
+                    _ => self.remote.clone(),
+                };
                 cx.spawn_in(window, async move |this, cx| {
                     let (result, error) = match call {
                         Ok(call) => match remote.call(call).await {
@@ -626,14 +657,15 @@ impl Workspace {
         let _ = std::fs::write(settings::dir().join("ui-state.json"), serde_json::to_string_pretty(&self.user_state).unwrap_or_default());
     }
 
-    fn on_incoming(&mut self, msg: Incoming, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_incoming(&mut self, host: &str, msg: Incoming, window: &mut Window, cx: &mut Context<Self>) {
         self.ctx_rev += 1;
         match msg {
             Incoming::Connected => {
-                self.connected = true;
+                self.host_up.insert(host.to_string(), true);
+                self.connected = self.host_up.values().any(|u| *u);
                 self.status = "Connected".into();
                 self.watching.clear();
-                let remote = self.remote.clone();
+                let remote = self.remote_for_host(host);
                 cx.spawn(async move |_, _| {
                     let _ = remote.call(Call::Hello { client: "agent-box-app".into() }).await;
                     let _ = remote.call(Call::Subscribe { from_seq: None }).await;
@@ -641,14 +673,16 @@ impl Workspace {
                 .detach();
             }
             Incoming::Disconnected(why) => {
-                self.connected = false;
-                self.status = format!("Reconnecting… ({why})");
-                self.terminals.clear();
-                self.term_by_id.clear();
+                self.host_up.insert(host.to_string(), false);
+                self.connected = self.host_up.values().any(|u| *u);
+                self.status = format!("Reconnecting to {host}… ({why})");
+                self.terminals.retain(|_, t| t.read(cx).host != host);
+                self.term_by_id.retain(|(h, _), _| h != host);
             }
             Incoming::Event(Event::Model(m)) => {
                 let before: HashMap<String, String> = self.model.chats.iter().map(|c| (c.id.clone(), c.state.clone())).collect();
-                self.model = m;
+                self.models.insert(host.to_string(), m);
+                self.merge_models();
                 if !before.is_empty() {
                     self.fire_chat_events(&before, window, cx);
                 }
@@ -685,7 +719,7 @@ impl Workspace {
                 }
             }
             Incoming::Event(Event::TermOutput { term_id, data }) => {
-                if let Some(t) = self.term_by_id.get(&term_id).cloned() {
+                if let Some(t) = self.term_by_id.get(&(host.to_string(), term_id)).cloned() {
                     t.update(cx, |t, cx| t.output(&data, cx));
                 }
                 return;
@@ -694,6 +728,112 @@ impl Workspace {
         }
         self.flush(window, cx);
         cx.notify();
+    }
+
+    /** Every host's model in one: this Mac's projects and sections first, then the box's. */
+    fn merge_models(&mut self) {
+        let mut hosts: Vec<&String> = self.models.keys().collect();
+        hosts.sort_by_key(|h| if h.as_str() == "mac" { 0 } else { 1 });
+        let mut merged = Model { host: "all".into(), ..Default::default() };
+        let (mut project_hosts, mut section_hosts) = (vec![], HashMap::new());
+        for h in hosts {
+            let m = &self.models[h];
+            if h == "box" {
+                merged.ssh_host = m.ssh_host.clone();
+            }
+            merged.last_seq = merged.last_seq.max(m.last_seq);
+            for p in &m.projects {
+                let mut p = p.clone();
+                for w in &mut p.items {
+                    w.host = h.clone();
+                }
+                merged.projects.push(p);
+                project_hosts.push(h.clone());
+            }
+            for s in &m.sections {
+                let mut s = s.clone();
+                for w in &mut s.items {
+                    w.host = h.clone();
+                }
+                section_hosts.insert(s.id.clone(), h.clone());
+                merged.sections.push(s);
+            }
+            merged.chats.extend(m.chats.iter().cloned());
+        }
+        self.model = merged;
+        self.project_hosts = project_hosts;
+        self.section_hosts = section_hosts;
+    }
+
+    /** Asks every connected host for its past chats; `.history` holds them newest first. */
+    pub(crate) fn load_history(&mut self, cx: &mut Context<Self>) {
+        self.history_loading = true;
+        let remotes: Vec<(String, Remote)> = self.remotes.iter().filter(|(h, _)| self.host_up.get(*h) == Some(&true)).map(|(h, r)| (h.clone(), r.clone())).collect();
+        cx.spawn(async move |this, cx| {
+            let mut all: Vec<Value> = vec![];
+            for (host, r) in remotes {
+                if let Ok(v) = r.call(Call::History { limit: Some(300) }).await {
+                    for mut c in v["chats"].as_array().cloned().unwrap_or_default() {
+                        if let Value::Object(o) = &mut c {
+                            o.entry("host").or_insert(Value::String(host.clone()));
+                            let age = o.get("last_activity").and_then(Value::as_f64);
+                            o.insert("age_text".into(), Value::String(age_text(age)));
+                            let folder = o.get("dir").and_then(Value::as_str).and_then(|d| d.rsplit('/').next()).unwrap_or("").to_string();
+                            o.insert("folder".into(), Value::String(folder));
+                        }
+                        all.push(c);
+                    }
+                }
+            }
+            all.sort_by(|a, b| b["last_activity"].as_f64().unwrap_or(0.).total_cmp(&a["last_activity"].as_f64().unwrap_or(0.)));
+            this.update(cx, |ws, cx| {
+                ws.history = all;
+                ws.history_loading = false;
+                ws.ctx_rev += 1;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn remote_for_host(&self, host: &str) -> Remote {
+        self.remotes.get(host).cloned().unwrap_or_else(|| self.remote.clone())
+    }
+
+    pub(crate) fn host_of_path(&self, path: &str) -> String {
+        self.worktree(path).map(|w| w.host.clone()).unwrap_or_else(|| "box".into())
+    }
+
+    /** A chat's daemon: the host whose worktree holds it, else the chat's own host if connected. */
+    pub(crate) fn host_of_chat(&self, id: &str) -> String {
+        if let Some(w) = self.all_worktrees().into_iter().find(|w| w.chat_ids.iter().any(|c| c == id)) {
+            return w.host.clone();
+        }
+        self.chat(id).map(|c| c.host.clone()).filter(|h| self.remotes.contains_key(h)).unwrap_or_else(|| "box".into())
+    }
+
+    /** The daemon a call belongs to, from the chat, worktree, or section it names. */
+    pub(crate) fn route(&self, call: &Call) -> Remote {
+        let host = match call {
+            Call::TranscriptRead { chat_id, .. }
+            | Call::TranscriptUnwatch { chat_id }
+            | Call::ChatStart { chat_id }
+            | Call::ChatStop { chat_id }
+            | Call::ChatArchive { chat_id }
+            | Call::ChatSend { chat_id, .. }
+            | Call::ChatKeys { chat_id, .. } => self.host_of_chat(chat_id),
+            Call::ChatNew { dir: Some(d), .. } => self.host_of_path(d),
+            Call::SectionRename { id, .. } | Call::SectionDelete { id } | Call::SectionMove { id, .. } => {
+                self.section_hosts.get(id).cloned().unwrap_or_else(|| "box".into())
+            }
+            Call::SectionAssign { path, .. } | Call::WorktreeDelete { path } | Call::WorktreeMove { path, .. } | Call::WorktreeDiff { path, .. } => {
+                self.host_of_path(path)
+            }
+            Call::TermOpen { cwd: Some(c), .. } => self.host_of_path(c),
+            _ => "box".into(),
+        };
+        self.remote_for_host(&host)
     }
 
     pub(crate) fn all_worktrees(&self) -> Vec<&Worktree> {
@@ -757,8 +897,10 @@ impl Workspace {
             .model
             .projects
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 json!({"name": p.name, "repo": p.repo, "hue": p.hue, "letter": letter(&p.name),
+                       "host": self.project_hosts.get(i).cloned().unwrap_or_else(|| "box".into()),
                        "items": p.items.iter().map(|w| self.worktree_json(w, Value::Null)).collect::<Vec<_>>()})
             })
             .collect();
@@ -768,6 +910,7 @@ impl Workspace {
             .iter()
             .map(|s| {
                 json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
+                       "host": self.section_hosts.get(&s.id).cloned().unwrap_or_else(|| "box".into()),
                        "items": s.items.iter().map(|w| self.worktree_json(w, json!({"id": s.id, "name": s.name}))).collect::<Vec<_>>()})
             })
             .collect();
@@ -785,9 +928,12 @@ impl Workspace {
             "state": self.state,
             "theme": self.settings.theme,
             "hosts": self.settings.hosts,
+            "history": self.history,
             "app": {
                 "confirm": self.confirm.as_ref().map(|c| { let mut c = c.clone(); if let Value::Object(o) = &mut c { o.remove("then"); } c }),
                 "starting": self.starting,
+                "hosts_up": self.host_up,
+                "history_loading": self.history_loading,
                 "connected": self.connected,
                 "dragging": self.dragging,
                 "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
@@ -834,7 +980,7 @@ impl Workspace {
             "uncommitted": w.uncommitted, "unpushed": w.unpushed, "behind": w.behind, "mr": w.mr,
             "age": w.age, "age_text": age_text(w.age), "status": status, "section": section,
             "selected": self.selected.as_deref() == Some(&w.path),
-            "host": "box",
+            "host": w.host,
             "chats": chats.iter().map(|c| self.chat_json(c)).collect::<Vec<_>>(),
         })
     }
@@ -868,7 +1014,7 @@ impl Workspace {
             if !self.watching.contains(&chat.id) {
                 self.watching.insert(chat.id.clone());
                 let from = self.transcripts.get(&chat.id).map(|t| t.lines).unwrap_or(0);
-                let remote = self.remote.clone();
+                let remote = self.route(&Call::TranscriptUnwatch { chat_id: chat.id.clone() });
                 let id = chat.id.clone();
                 cx.spawn(async move |this, cx| {
                     if let Ok(v) = remote.call(Call::TranscriptRead { chat_id: id.clone(), from }).await {
@@ -889,10 +1035,11 @@ impl Workspace {
             self.ensure_composer(&chat.id, window, cx);
         }
         if !self.terminals.contains_key(&w.path) && self.connected {
-            let remote = self.remote.clone();
+            let remote = self.remote_for_host(&w.host);
             let ts = self.settings.terminal.clone();
             let path = w.path.clone();
-            let view = cx.new(|cx| TerminalView::new(remote, None, Some(path.clone()), &ts, cx));
+            let host = w.host.clone();
+            let view = cx.new(|cx| TerminalView::new(remote, host, None, Some(path.clone()), &ts, cx));
             self.terminals.insert(w.path.clone(), view);
         }
     }
@@ -905,13 +1052,14 @@ impl Workspace {
         let key = if designer { "designer_placeholder" } else { "placeholder" };
         let fallback = if designer { "Describe a change to the app…" } else { "Message the agent…" };
         let placeholder = self.settings.chat.get(key).and_then(Value::as_str).unwrap_or(fallback).to_string();
-        let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(placeholder));
+        // enter_sends: Enter sends and Shift+Enter starts a new line; otherwise Enter is a new line.
+        // Cmd+Enter always sends.
+        let enter_sends = self.settings.chat.get("enter_sends").and_then(Value::as_bool).unwrap_or(true);
+        let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(placeholder).submit_on_enter(enter_sends));
         let id = chat_id.to_string();
-        self._subscriptions.push(cx.subscribe_in(&state, window, move |ws, state, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { secondary, .. } = ev {
-                let enter_sends = ws.settings.chat.get("enter_sends").and_then(Value::as_bool).unwrap_or(true);
-                if *secondary != enter_sends {
-                    let _ = state;
+        self._subscriptions.push(cx.subscribe_in(&state, window, move |ws, _, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { secondary, shift } = ev {
+                if *secondary || (enter_sends && !*shift) {
                     ws.send_composer(&id, window, cx);
                 }
             }
@@ -935,21 +1083,23 @@ impl Workspace {
         if id == crate::designer::CHAT_ID {
             self.designer_send(text, cx);
         } else {
-            self.remote.send(Call::ChatSend { chat_id: id.to_string(), text });
+            let call = Call::ChatSend { chat_id: id.to_string(), text };
+            self.route(&call).send(call);
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
     }
 
     fn register_terminals(&mut self, cx: &mut Context<Self>) {
         for t in self.terminals.values() {
-            if let Some(id) = t.read(cx).term_id.filter(|id| *id != 0) {
-                self.term_by_id.entry(id).or_insert_with(|| t.clone());
+            let t_ref = t.read(cx);
+            if let Some(id) = t_ref.term_id.filter(|id| *id != 0) {
+                self.term_by_id.entry((t_ref.host.clone(), id)).or_insert_with(|| t.clone());
             }
         }
     }
 
     pub(crate) fn call(&self, call: Call, cx: &mut Context<Self>) {
-        let remote = self.remote.clone();
+        let remote = self.route(&call);
         cx.spawn(async move |_, _| {
             let _ = remote.call(call).await;
         })
@@ -957,7 +1107,7 @@ impl Workspace {
     }
 
     pub(crate) fn start_chat(&mut self, call: Call, cx: &mut Context<Self>) {
-        let remote = self.remote.clone();
+        let remote = self.route(&call);
         self.status = "Starting a chat…".into();
         cx.spawn(async move |this, cx| {
             let res = remote.call(call).await;
@@ -1028,7 +1178,7 @@ impl Workspace {
 
     pub(crate) fn new_section(&mut self, assign: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.name_dialog("New section", "", window, cx, move |ws, name, cx| {
-            let remote = ws.remote.clone();
+            let remote = assign.as_deref().map(|p| ws.remote_for_host(&ws.host_of_path(p))).unwrap_or_else(|| ws.remote.clone());
             let assign = assign.clone();
             cx.spawn(async move |this, cx| {
                 if remote.call(Call::SectionCreate { name: name.clone() }).await.is_ok() {
@@ -1243,10 +1393,8 @@ impl Workspace {
             let chat = paste_chat.clone();
             paste_view.update(cx, |ws, cx| ws.attach(chat, files, window, cx)).is_ok()
         });
-        let drop_bg = style::color(&Value::from("@accent"), &self.settings.theme).map(|mut c| {
-            c.a = 0.15;
-            c
-        }).unwrap_or(transparent_black());
+        let drop_style = self.settings.chat.get("composer_drop").and_then(Value::as_object).cloned().unwrap_or_default();
+        let drop_theme = self.settings.theme.clone();
         let chips = if props.get("attachments").and_then(Value::as_bool) == Some(false) { None } else { self.attachments_view(Some(chat.clone()), props, cx) };
         Some(
             div()
@@ -1257,7 +1405,12 @@ impl Workspace {
                 .children(chips)
                 .child(textarea)
                 .rounded(px(6.))
-                .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_bg))
+                .border_1()
+                .border_color(transparent_black())
+                .drag_over::<ExternalPaths>(move |mut s, _, _, _| {
+                    style::refine(&mut s, &drop_style, &drop_theme);
+                    s
+                })
                 .on_drop(move |paths: &ExternalPaths, window, cx| {
                     let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
                     let chat = chat.clone();

@@ -7,6 +7,13 @@
     "retry_seconds": 3
   },
 
+  // This Mac: its worktrees, sections, and chats (super.engineering's, in place), through a local
+  // agent-boxd. Chats here run on the Mac; the sidebar marks them with the mac host icon.
+  "local": {
+    "enabled": false,
+    "daemon": "~/dev/agent-box/rust/target/release/agent-boxd"
+  },
+
   "theme": {
     "animations": true,
     "font_ui": ".SystemUIFont",
@@ -164,6 +171,7 @@
                         { "type": "DropLine", "props": { "key": "proj:{{ .p.repo }}" } },
                         { "type": "Badge", "props": { "letter": "{{ .p.letter }}", "hue": "{{ .p.hue }}", "size": 22 } },
                         { "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "grow": 1, "font_size": 14 } },
+                        { "id": "project-host", "type": "HostIcon", "props": { "host": "{{ .p.host }}", "size": 12 } },
                         { "id": "project-new-chat", "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "repo": "{{ .p.repo }}" } } }
                       ]
                     },
@@ -334,9 +342,19 @@
                   "style": { "shrink": 0, "padding": [4, 12, 12, 12] },
                   "children": [
                     {
-                      "type": "box",
-                      "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6, "gap": 6 },
-                      "children": [{ "type": "composer", "props": { "chat": "designer" } }]
+                      "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6, "gap": 6, "align": "end" },
+                      "type": "row",
+                      "children": [
+                        { "type": "composer", "props": { "chat": "designer" }, "style": { "grow": 1, "min_width": 0 } },
+                        {
+                          "id": "designer-send",
+                          "type": "box",
+                          "tooltip": "Send  ↩   (⇧↩ new line)",
+                          "style": { "width": 28, "height": 28, "shrink": 0, "radius": 14, "align": "center", "justify": "center", "background": "@accent", "cursor": "pointer", "opacity": "{{ if .designer.working then 0.4 else 1 end }}", "hover": { "opacity": 0.85 } },
+                          "on": { "click": { "do": "composer.send", "chat": "designer" } },
+                          "children": [{ "type": "icon", "props": { "name": "arrow-up", "size": 15, "color": "#ffffff" } }]
+                        }
+                      ]
                     }
                   ]
                 }
@@ -382,7 +400,7 @@
         { "separator": true },
         { "label": "New chat here", "do": { "do": "chat.new", "dir": "{{ .props.w.path }}" } },
         { "for": ".props.w.chats", "as": "c", "label": "Archive chat “{{ .c.name }}”", "do": { "do": "chat.archive", "chat": "{{ .c.id }}" } },
-        { "label": "Open in Cursor", "do": { "do": "open", "url": "cursor://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .props.w.path }}" } },
+        { "label": "Open in Cursor", "do": { "do": "open", "url": "{{ if .props.w.host == \"mac\" then \"cursor://file\" + .props.w.path else \"cursor://vscode-remote/ssh-remote+\" + .app.ssh_host + .props.w.path end }}" } },
         { "if": ".props.w.is_primary | not", "separator": true },
         { "if": ".props.w.is_primary | not", "label": "Delete worktree", "do": { "do": "worktree.delete", "path": "{{ .props.w.path }}" } }
       ],
@@ -518,9 +536,75 @@
           ]
         },
         { "id": "toolbar-drag", "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } },
+        {
+          "id": "history",
+          "type": "box",
+          "style": { "position": "relative" },
+          "children": [
+            { "type": "IconButton", "id": "history-button", "props": { "icon": "clock", "size": 26, "tooltip": "History: past and closed chats on every machine", "do": [{ "do": "state.toggle", "key": "history_open" }, "history.load"] } },
+            {
+              "if": ".state.history_open",
+              "type": "box",
+              "layer": "top",
+              "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
+              "on": { "click": { "do": "state.set", "key": "history_open", "value": false } }
+            },
+            {
+              "if": ".state.history_open",
+              "id": "history-panel",
+              "type": "column",
+              "layer": "top",
+              "style": {
+                "position": "absolute", "top": 32, "right": -6, "width": 460, "max_height": 560, "padding": 8, "gap": 6,
+                "radius": 12, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg"
+              },
+              "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
+              "children": [
+                {
+                  "type": "row",
+                  "style": { "gap": 8, "align": "center", "padding": [2, 4] },
+                  "children": [
+                    { "type": "icon", "props": { "name": "search", "size": 14, "color": "@text_faint" } },
+                    { "id": "history-search", "type": "input", "props": { "state": "history_query", "placeholder": "Search chats by name or folder", "autofocus": true, "appearance": false }, "style": { "grow": 1 } },
+                    { "if": ".app.history_loading", "type": "spinner", "props": { "size": "xsmall" } }
+                  ]
+                },
+                { "type": "divider" },
+                {
+                  "type": "scroll",
+                  "style": { "max_height": 480, "gap": 1 },
+                  "children": [
+                    { "if": "(.history | length) == 0 and (.app.history_loading | not)", "type": "text", "props": { "text": "No past chats yet." }, "style": { "padding": 10, "font_size": 13, "color": "@text_faint" } },
+                    {
+                      "for": "(.state.history_query // \"\" | ascii_downcase) as $q | [.history[] | select($q == \"\" or ((.name // \"\") | ascii_downcase | contains($q)) or ((.folder // \"\") | ascii_downcase | contains($q)))] | .[:150]",
+                      "as": "h", "key": ".h.host + .h.id",
+                      "type": "row",
+                      "style": { "height": 40, "padding": [0, 8], "gap": 10, "align": "center", "radius": 8, "cursor": "pointer", "hover": { "background": "@hover" } },
+                      "tooltip": "{{ .h.dir // \"\" }}",
+                      "on": { "click": [{ "do": "chat.open", "chat": "{{ .h.id }}", "host": "{{ .h.host }}" }, { "do": "state.set", "key": "history_open", "value": false }] },
+                      "children": [
+                        { "type": "HostIcon", "props": { "host": "{{ .h.host }}", "size": 13 } },
+                        {
+                          "type": "column",
+                          "style": { "grow": 1, "min_width": 0 },
+                          "children": [
+                            { "type": "text", "props": { "text": "{{ .h.name }}" }, "style": { "font_size": 13, "truncate": true } },
+                            { "type": "text", "props": { "text": "{{ .h.folder }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "truncate": true } }
+                          ]
+                        },
+                        { "if": ".h.closed | not", "type": "text", "props": { "text": "open" }, "style": { "font_size": 11, "color": "@accent" } },
+                        { "type": "text", "props": { "text": "{{ .h.age_text }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "shrink": 0 } }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
         { "id": "status-pill", "type": "Pill", "props": { "text": "{{ if .app.connected then \"a.box\" else .app.status end }}", "mono": true, "tooltip": "{{ .app.status }}", "do": "palette.open" } },
-        { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "square-terminal", "tooltip": "Open in Cursor", "do": { "do": "open", "url": "cursor://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } } },
-        { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "code", "tooltip": "Open in VS Code", "do": { "do": "open", "url": "vscode://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } } },
+        { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "square-terminal", "tooltip": "Open in Cursor", "do": { "do": "open", "url": "{{ if .selected.worktree.host == \"mac\" then \"cursor://file\" + .selected.worktree.path else \"cursor://vscode-remote/ssh-remote+\" + .app.ssh_host + .selected.worktree.path end }}" } } },
+        { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "code", "tooltip": "Open in VS Code", "do": { "do": "open", "url": "{{ if .selected.worktree.host == \"mac\" then \"vscode://file\" + .selected.worktree.path else \"vscode://vscode-remote/ssh-remote+\" + .app.ssh_host + .selected.worktree.path end }}" } } },
         { "if": ".selected.worktree.mr", "type": "Pill", "props": { "text": "!{{ .selected.worktree.mr.number }}", "icon": "git-pull-request", "tooltip": "Open the merge request", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } } }
       ]
     },
@@ -555,9 +639,30 @@
               "style": { "shrink": 0, "padding": [4, 20, 14, 20], "width": "full", "max_width": 900, "self": "center" },
               "children": [
                 {
-                  "type": "box",
-                  "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6, "gap": 6 },
-                  "children": [{ "type": "composer" }]
+                  "id": "composer-frame",
+                  "type": "row",
+                  "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6, "gap": 6, "align": "end" },
+                  "children": [
+                    { "type": "composer", "style": { "grow": 1, "min_width": 0 } },
+                    {
+                      "if": ".selected.chat.state == \"working\"",
+                      "id": "composer-stop",
+                      "type": "box",
+                      "tooltip": "Stop the agent (Esc in the chat)",
+                      "style": { "width": 28, "height": 28, "shrink": 0, "radius": 14, "align": "center", "justify": "center", "background": "@text", "cursor": "pointer", "hover": { "opacity": 0.85 } },
+                      "on": { "click": { "do": "chat.interrupt", "chat": "{{ .selected.chat.id }}" } },
+                      "children": [{ "type": "box", "style": { "width": 10, "height": 10, "radius": 2, "background": "@composer" } }]
+                    },
+                    {
+                      "if": ".selected.chat.state != \"working\"",
+                      "id": "composer-send",
+                      "type": "box",
+                      "tooltip": "Send  ↩   (⇧↩ new line)",
+                      "style": { "width": 28, "height": 28, "shrink": 0, "radius": 14, "align": "center", "justify": "center", "background": "@accent", "cursor": "pointer", "hover": { "opacity": 0.85 } },
+                      "on": { "click": { "do": "composer.send", "chat": "{{ .selected.chat.id }}" } },
+                      "children": [{ "type": "icon", "props": { "name": "arrow-up", "size": 15, "color": "#ffffff" } }]
+                    }
+                  ]
                 }
               ]
             }
@@ -636,7 +741,7 @@
           "type": "row",
           "style": { "position": "relative", "padding": [0, 12], "align": "center" },
           "children": [
-            { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "clock", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
+            { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
             {
               "if": ".state.chat_history_open",
               "type": "box",
@@ -904,6 +1009,15 @@
     }
   },
 
+  // The designer (the palette button's agent that edits these settings). It runs without a terminal, so
+  // it can't ask for permissions: add_dirs are the folders it may read besides this one (uploads hold
+  // the images you paste or drop into it).
+  "designer": {
+    "add_dirs": ["~/.agent-box/uploads", "~/Desktop", "~/Downloads"],
+    "tools": ["Read", "Edit", "Write", "Glob", "Grep"],
+    "permission_mode": "acceptEdits"
+  },
+
   // Where chats and worktrees run. Tabs, worktree rows, and the closed-chats list show the host's icon.
   "hosts": {
     "box": { "label": "On the box (tj-agents)", "icon": "cloud", "color": "@text_faint" },
@@ -953,7 +1067,7 @@
     { "label": "Sidebar: worktrees only", "if": ".state.sidebar_rows == \"chats\"", "do": { "do": "state.set", "key": "sidebar_rows", "value": "worktrees" } },
     { "label": "Toggle sidebar", "do": { "do": "state.toggle", "key": "sidebar_open" } },
     { "label": "Toggle terminal", "do": { "do": "state.toggle", "key": "terminal_open" } },
-    { "label": "Open in Cursor", "if": ".selected.worktree", "do": { "do": "open", "url": "cursor://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } },
+    { "label": "Open in Cursor", "if": ".selected.worktree", "do": { "do": "open", "url": "{{ if .selected.worktree.host == \"mac\" then \"cursor://file\" + .selected.worktree.path else \"cursor://vscode-remote/ssh-remote+\" + .app.ssh_host + .selected.worktree.path end }}" } },
     { "label": "Open in VS Code", "if": ".selected.worktree", "do": { "do": "open", "url": "vscode://vscode-remote/ssh-remote+{{ .app.ssh_host }}{{ .selected.worktree.path }}" } },
     { "label": "Open merge request", "if": ".selected.worktree.mr", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } },
     { "label": "Commit and push", "if": ".selected.chat", "do": { "do": "chat.send", "text": "Commit and push your changes." } },
@@ -984,6 +1098,10 @@
     // Code in expanded steps: long lines scroll sideways with a horizontal swipe, or with shift + scroll
     // (shift), which holds the transcript still. shift_holds_transcript: shift + scroll elsewhere in the
     // transcript doesn't scroll it either. scrollbar: hover | always | scrolling | never.
+    // Shown over a chat while files are dragged onto it, naming the chat they'll attach to.
+    "drop_overlay": { "radius": 12, "border": 2, "border_color": "@accent", "background": "#488efc1f", "gap": 8, "font_size": 14, "color": "@text" },
+    // The message box while files are dragged over it.
+    "composer_drop": { "border_color": "@accent", "background": "#488efc26" },
     "code_scroll": { "shift": true, "speed": 1, "shift_holds_transcript": true, "scrollbar": "hover" },
     "list": { "gap": 22, "padding": [20, 28], "width": "full", "max_width": 780, "self": "center" },
     "user": { "max_width": "80%", "padding": [8, 14], "radius": 16, "background": "@user_bubble", "font_size": 14, "line_height": 1.5, "gap": 6 },

@@ -88,11 +88,23 @@ impl Designer {
 
     fn start(&mut self, tx: flume::Sender<Out>) -> Result<(), String> {
         let home = std::env::var("HOME").unwrap_or_default();
+        // settings `designer`: what it may touch. It runs headless, so it can't stop to ask for a permission;
+        // anything not allowed here is refused outright.
+        let cfg = settings::load().map(|s| s.designer).unwrap_or_default();
+        let list = |k: &str, d: &[&str]| -> Vec<String> {
+            cfg.get(k).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_else(|| d.iter().map(|x| x.to_string()).collect())
+        };
+        let mode = cfg.get("permission_mode").and_then(|v| v.as_str()).unwrap_or("acceptEdits").to_string();
         let mut cmd = Command::new(format!("{home}/.local/bin/claude"));
         cmd.current_dir(settings::dir())
             .env("PATH", format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"))
             .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
-            .args(["--permission-mode", "acceptEdits", "--tools", "Read", "Edit", "Write", "Glob", "Grep"])
+            .args(["--permission-mode", &mode, "--tools"])
+            .args(list("tools", &["Read", "Edit", "Write", "Glob", "Grep"]));
+        for dir in list("add_dirs", &["~/.agent-box/uploads"]) {
+            cmd.args(["--add-dir", &crate::script::expand(&dir)]);
+        }
+        cmd
             .args(["--append-system-prompt", PROMPT])
             // The app plays its own sounds (settings `sounds`); without this, Claude Code hooks (such as a
             // Stop sound) fire on every designer reply too.

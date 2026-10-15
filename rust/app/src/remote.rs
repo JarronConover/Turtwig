@@ -1,5 +1,5 @@
-/*! The connection to `agent-boxd` on the box: `ssh <host> <daemon> connect`, JSON lines both ways,
-reconnecting forever. Responses resolve the matching call; everything else arrives as `Incoming`. */
+/*! A connection to an `agent-boxd`: `ssh <host> <daemon> connect` for the box, or `<daemon> connect`
+run here when the host is empty (this Mac). JSON lines both ways, reconnecting forever. Responses resolve the matching call; everything else arrives as `Incoming`. */
 
 use agent_box_protocol::{encode, Call, Event, Request, ServerMessage};
 use anyhow::{anyhow, Result};
@@ -80,9 +80,21 @@ fn session(
     pending: &Pending,
     alive: &Arc<AtomicBool>,
 ) -> anyhow::Error {
-    let child = Command::new("/usr/bin/ssh")
-        .args(["-T", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", host, &format!("{daemon} connect")])
-        .env("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin")
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut cmd = if host.is_empty() {
+        let mut c = Command::new(crate::script::expand(daemon));
+        c.arg("connect").env(
+            "PATH",
+            format!("{home}/.super.engineering/bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
+        );
+        c
+    } else {
+        let mut c = Command::new("/usr/bin/ssh");
+        c.args(["-T", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", host, &format!("{daemon} connect")])
+            .env("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin");
+        c
+    };
+    let child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

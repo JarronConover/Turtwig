@@ -33,6 +33,8 @@ pub struct TerminalView {
     term: Term<VoidListener>,
     parser: Processor<StdSyncHandler>,
     remote: Remote,
+    /** Which daemon the PTY lives on ("box", "mac"); terminal ids are only unique per daemon. */
+    pub host: String,
     pub term_id: Option<u64>,
     pub session: Option<String>,
     pub cwd: Option<String>,
@@ -47,12 +49,13 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(remote: Remote, session: Option<String>, cwd: Option<String>, ts: &TerminalSettings, cx: &mut Context<Self>) -> Self {
+    pub fn new(remote: Remote, host: String, session: Option<String>, cwd: Option<String>, ts: &TerminalSettings, cx: &mut Context<Self>) -> Self {
         let size = Size { cols: 100, rows: 30 };
         Self {
             term: Term::new(Config::default(), &size, VoidListener),
             parser: Processor::new(),
             remote,
+            host,
             term_id: None,
             session,
             cwd,
@@ -97,7 +100,8 @@ impl TerminalView {
 
     fn write(&self, bytes: &[u8]) {
         if let Some(id) = self.term_id.filter(|id| *id != 0) {
-            self.remote.send(Call::TermInput { term_id: id, data: base64::engine::general_purpose::STANDARD.encode(bytes) });
+            // The daemon writes `data` to the PTY as is.
+            self.remote.send(Call::TermInput { term_id: id, data: String::from_utf8_lossy(bytes).into_owned() });
         }
     }
 

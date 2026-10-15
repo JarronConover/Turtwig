@@ -68,8 +68,8 @@ impl Workspace {
         }
         d.loading = true;
         d.stale = false;
-        let remote = self.remote.clone();
         let call = Call::WorktreeDiff { path: path.to_string(), base: Some(base.to_string()) };
+        let remote = self.route(&call);
         cx.spawn(async move |this, cx| {
             let res = remote.call(call).await;
             let parsed = cx
