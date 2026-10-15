@@ -163,14 +163,78 @@ pub fn needs_user(payload: &Value) -> bool {
     }
 }
 
-fn pane_waiting(session: &str) -> bool {
+/** A chat's tmux pane, with its colors. */
+fn capture(session: &str) -> Option<String> {
+    let o = util::run("tmux", &["capture-pane", "-p", "-e", "-t", &format!("={session}:")], &[], None, Duration::from_secs(5));
+    o.ok.then_some(o.stdout)
+}
+
+fn strip_ansi(s: &str) -> String {
+    static ANSI: OnceLock<Regex> = OnceLock::new();
+    let re = ANSI.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]").unwrap());
+    re.replace_all(s, "").into_owned()
+}
+
+fn pane_waiting(pane: &str) -> bool {
     static WAITING: OnceLock<Regex> = OnceLock::new();
     let re = WAITING
         .get_or_init(|| Regex::new(r"(?i)Enter to select|Esc to cancel|Do you want to proceed|❯ 1\. Yes").unwrap());
-    let o = util::run("tmux", &["capture-pane", "-pt", &format!("={session}:")], &[], None, Duration::from_secs(5));
-    let lines: Vec<&str> = o.stdout.lines().collect();
-    let tail = lines[lines.len().saturating_sub(25)..].join("\n");
-    o.ok && re.is_match(&tail)
+    let text = strip_ansi(pane);
+    let lines: Vec<&str> = text.lines().collect();
+    re.is_match(&lines[lines.len().saturating_sub(25)..].join("\n"))
+}
+
+/** The prompt suggestion in Claude Code's input box: the line after "❯\u{a0}" between two rules,
+when everything on it is drawn dim or grey (typed text is drawn plain). */
+pub(crate) fn suggestion(pane: &str) -> Option<String> {
+    let raw: Vec<&str> = pane.lines().collect();
+    let plain: Vec<String> = raw.iter().map(|l| strip_ansi(l)).collect();
+    let rule = |i: usize| plain.get(i).is_some_and(|l| l.trim_start().starts_with("──"));
+    let i = (1..plain.len()).rev().find(|&i| plain[i].trim_start().starts_with("❯\u{a0}") && rule(i - 1) && rule(i + 1))?;
+    let marker = "❯\u{a0}";
+    let rest = &raw[i][raw[i].find(marker)? + marker.len()..];
+    static SGR: OnceLock<Regex> = OnceLock::new();
+    let sgr = SGR.get_or_init(|| Regex::new(r"\x1b\[([0-9;]*)m").unwrap());
+    let (mut dim, mut grey, mut text, mut pos) = (false, false, String::new(), 0);
+    let visible = |chunk: &str, faint: bool, text: &mut String| -> Option<()> {
+        let chunk = strip_ansi(chunk);
+        if !faint && !chunk.trim().is_empty() {
+            return None;
+        }
+        text.push_str(&chunk);
+        Some(())
+    };
+    for m in sgr.captures_iter(rest) {
+        let whole = m.get(0)?;
+        visible(&rest[pos..whole.start()], dim || grey, &mut text)?;
+        pos = whole.end();
+        let params: Vec<u32> = m[1].split(';').map(|p| p.parse().unwrap_or(0)).collect();
+        let mut k = 0;
+        while k < params.len() {
+            match params[k] {
+                0 => (dim, grey) = (false, false),
+                2 => dim = true,
+                22 => dim = false,
+                90 => grey = true,
+                30..=37 | 39 | 91..=97 => grey = false,
+                38 if params.get(k + 1) == Some(&5) => {
+                    let n = params.get(k + 2).copied().unwrap_or(0);
+                    grey = n == 8 || (240..=250).contains(&n);
+                    k += 2;
+                }
+                38 if params.get(k + 1) == Some(&2) => {
+                    let c = &params[(k + 2).min(params.len())..(k + 5).min(params.len())];
+                    grey = c.len() == 3 && c[0] == c[1] && c[1] == c[2] && c[0] < 200;
+                    k += 4;
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+    }
+    visible(&rest[pos..], dim || grey, &mut text)?;
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 fn chats(states: &ChatStates) -> Vec<Chat> {
@@ -197,12 +261,15 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
         let is_alive = host == "box" && alive.contains(&tmux);
         let dir = s("dir");
         let last = dir.as_deref().and_then(|d| util::mtime(&util::transcript_path(d, &id)));
-        let (state, waiting_on) = match states.get(&id) {
+        let hook = states.get(&id).filter(|(st, _)| st != "stopped");
+        let pane = if is_alive && hook.is_none_or(|(st, _)| st == "idle") { capture(&tmux) } else { None };
+        let (state, waiting_on) = match hook {
             _ if !is_alive => ("stopped".to_string(), None),
-            Some((st, w)) if st != "stopped" => (st.clone(), w.clone()),
-            _ if pane_waiting(&tmux) => ("waiting".to_string(), None),
-            _ => ("idle".to_string(), None),
+            Some((st, w)) => (st.clone(), w.clone()),
+            None if pane.as_deref().is_some_and(pane_waiting) => ("waiting".to_string(), None),
+            None => ("idle".to_string(), None),
         };
+        let suggestion = if state == "idle" { pane.as_deref().and_then(suggestion) } else { None };
         out.push(Chat {
             id,
             name: s("name").unwrap_or_default(),
@@ -217,6 +284,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             waiting_on,
             last_activity: last,
             tmux,
+            suggestion,
         });
     }
     out
@@ -318,5 +386,27 @@ pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model 
         sections,
         chats,
         last_seq,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::suggestion;
+
+    fn pane(input: &str) -> String {
+        let rule = "─".repeat(20);
+        format!("⏺ done\n\x1b[38;5;244m{rule}\n\x1b[39m❯\u{a0}{input}\n\x1b[38;5;244m{rule}\n\x1b[39m  bypass permissions on")
+    }
+
+    #[test]
+    fn dim_input_is_a_suggestion() {
+        assert_eq!(suggestion(&pane("\x1b[2mcommit this\x1b[0m")).as_deref(), Some("commit this"));
+    }
+
+    #[test]
+    fn typed_or_empty_input_is_not() {
+        assert_eq!(suggestion(&pane("hello")), None);
+        assert_eq!(suggestion(&pane("")), None);
+        assert_eq!(suggestion(&pane("com\x1b[2mmit this\x1b[0m")), None);
     }
 }

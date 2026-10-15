@@ -334,6 +334,8 @@ pub fn build(caches: &Arc<Caches>, last_seq: i64) -> Model {
             waiting_on: None,
             last_activity: last,
             tmux: String::new(),
+            // sc reads super.engineering terminals as plain text, so a suggestion looks like typed text.
+            suggestion: None,
         });
     }
     *tabs().lock().unwrap() = found.into_iter().map(|t| (t.chat_id.clone(), t)).collect();

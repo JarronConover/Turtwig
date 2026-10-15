@@ -177,6 +177,9 @@ pub struct Chat {
     pub waiting_on: Option<Value>,
     pub last_activity: Option<f64>,
     pub tmux: String,
+    /** Claude Code's prompt suggestion (the dim text in its empty input box) while idle. */
+    #[serde(default)]
+    pub suggestion: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
