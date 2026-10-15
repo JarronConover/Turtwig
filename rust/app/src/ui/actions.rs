@@ -20,6 +20,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.open", "{chat, host?}: open a chat as a tab, resuming its process if it isn't running (host: where a chat from `.history` lives)"),
     ("tab.move", "{chat?, target: chat id, zone: before|after}: reorder a worktree's tabs (chat defaults to `dragged`)"),
     ("chat.interrupt", "{chat}: stop what the agent is doing (Esc), keeping the chat open"),
+    ("queue.remove / queue.edit / queue.send_now", "{chat, index}: drop a queued message, put it back in the composer to change, or send it now"),
+    ("clipboard.copy", "{text}: put text on the clipboard"),
+    ("chat.fork", "{chat}: a new tab in the same worktree that starts from a copy of this chat's conversation"),
+    ("completion.accept", "{index?}: take an entry from the composer's completion list (`.app.completion`)"),
     ("history.load", "fetch past chats from every host into `.history` (`.app.history_loading` while it runs)"),
     ("if", "{cond, then, else?}: run `then` when cond is truthy (true, a non-empty string other than \"false\"), else `else`"),
     ("confirm", "{title, text?, confirm?, cancel?, then}: ask first; `then` runs if they confirm. Shown by the Confirm component (`.app.confirm`)"),
@@ -250,6 +254,51 @@ impl Workspace {
                 }
             }
             "history.load" => self.load_history(cx),
+            "queue.remove" | "queue.edit" | "queue.send_now" => {
+                let index = a.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if let Some(id) = chat() {
+                    let text = self.queued.get_mut(&id).filter(|q| index < q.len()).map(|q| q.remove(index));
+                    if let Some(text) = text {
+                        match name {
+                            // Back into the composer (ahead of anything typed there), to change and send again.
+                            "queue.edit" => {
+                                if let Some(state) = self.composers.get(&id).cloned() {
+                                    state.update(cx, |s, cx| {
+                                        let rest = s.value().to_string();
+                                        let joined = if rest.trim().is_empty() { text.clone() } else { format!("{text}\n{rest}") };
+                                        s.set_value(joined, window, cx);
+                                        s.focus(window, cx);
+                                    });
+                                }
+                            }
+                            "queue.send_now" => {
+                                let call = Call::ChatSend { chat_id: id.clone(), text };
+                                self.route(&call).send(call);
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.ctx_rev += 1;
+                    cx.notify();
+                }
+            }
+            "clipboard.copy" => {
+                if let Some(t) = a.get("text").map(super::render::value_text) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(t));
+                    use gpui_kit::component::WindowExt as _;
+                    window.push_notification("Copied", cx);
+                }
+            }
+            "chat.fork" => {
+                if let Some(id) = chat() {
+                    self.starting = self.all_worktrees().into_iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone());
+                    self.start_chat(Call::ChatFork { chat_id: id }, cx);
+                }
+            }
+            "completion.accept" => {
+                let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize);
+                self.accept_completion(index, window, cx);
+            }
             "chat.interrupt" => {
                 if let Some(id) = chat() {
                     if self.host_of_chat(&id) == "mac" {
@@ -456,6 +505,7 @@ impl Workspace {
                         let replace = name == "composer.set";
                         c.update(cx, |st, cx| if replace { st.set_value(text, window, cx) } else { st.insert(text, window, cx) });
                     }
+                    self.update_completion(&id, cx);
                 }
             }
             "drop.preview" => {

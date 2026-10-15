@@ -55,6 +55,10 @@ impl Transcript {
             return;
         }
         let kind = e.get("type").and_then(Value::as_str).unwrap_or("");
+        // Text Claude Code adds for the model (a slash command's expanded skill, caveats): never typed.
+        if kind == "user" && e.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
         let content = &e["message"]["content"];
         match kind {
             "user" => {
@@ -122,6 +126,17 @@ impl Transcript {
 
     fn user_text(&mut self, text: &str) {
         let t = text.trim();
+        // A slash command shows as what was typed ("/loop /ship-feature X"), not its markup.
+        if let Some(name) = between(t, "<command-name>", "</command-name>") {
+            let args = between(t, "<command-args>", "</command-args>").unwrap_or("");
+            self.items.push(Item::User { text: format!("{name} {args}").trim().to_string() });
+            return;
+        }
+        if t.starts_with("<task-notification>") {
+            let summary = between(t, "<summary>", "</summary>").unwrap_or("A background task finished");
+            self.items.push(Item::Notice { text: summary.to_string() });
+            return;
+        }
         // Harness wrappers (command output, reminders) aren't things the user typed.
         if t.is_empty() || t.starts_with("<command-") || t.starts_with("<local-command") || t.starts_with("<system-reminder") {
             return;
@@ -176,4 +191,10 @@ fn summarize(name: &str, input: &Value) -> String {
             .unwrap_or_default(),
     };
     text.lines().next().unwrap_or("").chars().take(140).collect()
+}
+
+fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = text.find(open)? + open.len();
+    let end = text[start..].find(close)? + start;
+    Some(text[start..end].trim())
 }

@@ -342,7 +342,7 @@
                   "style": { "shrink": 0, "padding": [4, 12, 12, 12] },
                   "children": [
                     {
-                      "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6, "gap": 6, "align": "end" },
+                      "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": [6, 8, 6, 6], "gap": 6, "align": "center" },
                       "type": "row",
                       "children": [
                         { "type": "composer", "props": { "chat": "designer" }, "style": { "grow": 1, "min_width": 0 } },
@@ -636,12 +636,14 @@
               "if": ".selected.chat",
               "id": "composer-box",
               "type": "box",
-              "style": { "shrink": 0, "padding": [4, 20, 14, 20], "width": "full", "max_width": 900, "self": "center" },
+              "style": { "shrink": 0, "padding": [4, 20, 14, 20], "width": "full", "max_width": 900, "self": "center", "position": "relative" },
               "children": [
+                { "type": "Completions", "props": { "chat": "{{ .selected.chat.id }}" } },
+                { "type": "Queued", "props": { "c": "{{ .selected.chat }}" } },
                 {
                   "id": "composer-frame",
                   "type": "row",
-                  "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": 6, "gap": 6, "align": "end" },
+                  "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": [6, 8, 6, 6], "gap": 6, "align": "center" },
                   "children": [
                     { "type": "composer", "style": { "grow": 1, "min_width": 0 } },
                     {
@@ -677,43 +679,52 @@
       "style": { "height": 32, "shrink": 0, "padding": [0, 0, 0, 6], "align": "stretch" },
       "children": [
         {
-          "for": ".selected.chats | map(select(.open))", "as": "c", "key": ".c.id", "id": "chat-tab",
-          "type": "row",
-          "style": {
-            "position": "relative", "gap": 6, "padding": [0, 4, 0, 10], "align": "center", "font_size": 13, "cursor": "pointer",
-            "color": "{{ if .c.active then \"@text\" else \"@age\" end }}", "hover": { "color": "@text" }
-          },
-          "on": {
-            "click": { "do": "select", "chat": "{{ .c.id }}" },
-            "drop_item": { "accept": "chat", "valid": ".dragged != .c.id", "do": { "do": "tab.move", "target": "{{ .c.id }}" } }
-          },
-          "drag": { "kind": "chat", "value": "{{ .c.id }}", "label": "{{ .c.name }}" },
-          "drop_key": "tab:{{ .c.id }}",
-          "drop_zones": "edges_x",
-          "tooltip": "{{ .hosts[.c.host].label // .c.host }} · {{ .c.state }}",
-          "menu": [
-            { "label": "Move to {{ if .c.host == \"box\" then \"Mac\" else \"box\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
-            { "if": ".c.alive | not", "label": "Start", "do": { "do": "chat.start", "chat": "{{ .c.id }}" } },
-            { "separator": true },
-            { "label": "Close tab", "do": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its Claude process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
-            { "label": "Archive", "do": { "do": "chat.archive", "chat": "{{ .c.id }}" } }
-          ],
-          "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 140 },
+          "id": "chat-tabs-scroll",
+          "type": "scroll",
+          "props": { "axis": "x", "handle": "chat_tabs" },
+          "style": { "direction": "row", "align": "stretch", "basis": "auto", "shrink": 1, "min_width": 0 },
           "children": [
-            { "type": "DropLineX", "props": { "key": "tab:{{ .c.id }}" } },
-            { "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 12 } },
-            { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "max_width": 240, "truncate": true } },
-            { "if": ".c.state == \"working\"", "type": "spinner", "props": { "size": "xsmall" } },
-            { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" } },
             {
-              "id": "chat-tab-close",
-              "type": "box",
-              "style": { "width": 18, "height": 18, "radius": 4, "align": "center", "justify": "center", "opacity": "{{ if .c.active then 0.9 else 0.45 end }}", "hover": { "background": "@hover", "opacity": 1 } },
-              "tooltip": "Close tab (stops the chat)",
-              "on": { "click": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its Claude process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
-              "children": [{ "type": "icon", "props": { "name": "x", "size": 11, "color": "@text_muted" } }]
-            },
-            { "if": ".c.active", "type": "box", "style": { "position": "absolute", "left": 0, "right": 0, "bottom": 0, "height": 2, "background": "@accent" } }
+              "for": ".selected.chats | map(select(.open))", "as": "c", "key": ".c.id", "id": "chat-tab",
+              "type": "row",
+              "style": {
+                "position": "relative", "gap": 6, "padding": [0, 4, 0, 10], "align": "center", "font_size": 13, "cursor": "pointer", "shrink": 0,
+                "color": "{{ if .c.active then \"@text\" else \"@age\" end }}", "hover": { "color": "@text" }
+              },
+              "on": {
+                "click": { "do": "select", "chat": "{{ .c.id }}" },
+                "drop_item": { "accept": "chat", "valid": ".dragged != .c.id", "do": { "do": "tab.move", "target": "{{ .c.id }}" } }
+              },
+              "drag": { "kind": "chat", "value": "{{ .c.id }}", "label": "{{ .c.name }}" },
+              "drop_key": "tab:{{ .c.id }}",
+              "drop_zones": "edges_x",
+              "tooltip": "{{ .hosts[.c.host].label // .c.host }} · {{ .c.state }}",
+              "menu": [
+                { "label": "Move to {{ if .c.host == \"box\" then \"Mac\" else \"box\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
+                { "if": ".c.alive | not", "label": "Start", "do": { "do": "chat.start", "chat": "{{ .c.id }}" } },
+                { "label": "Fork chat", "do": { "do": "chat.fork", "chat": "{{ .c.id }}" } },
+                { "separator": true },
+                { "label": "Close tab", "do": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its Claude process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
+                { "label": "Archive", "do": { "do": "chat.archive", "chat": "{{ .c.id }}" } }
+              ],
+              "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 140 },
+              "children": [
+                { "type": "DropLineX", "props": { "key": "tab:{{ .c.id }}" } },
+                { "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 12 } },
+                { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "max_width": 240, "truncate": true } },
+                { "if": ".c.state == \"working\"", "type": "spinner", "props": { "size": "xsmall" } },
+                { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" } },
+                {
+                  "id": "chat-tab-close",
+                  "type": "box",
+                  "style": { "width": 18, "height": 18, "radius": 4, "align": "center", "justify": "center", "opacity": "{{ if .c.active then 0.9 else 0.45 end }}", "hover": { "background": "@hover", "opacity": 1 } },
+                  "tooltip": "Close tab (stops the chat)",
+                  "on": { "click": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its Claude process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
+                  "children": [{ "type": "icon", "props": { "name": "x", "size": 11, "color": "@text_muted" } }]
+                },
+                { "if": ".c.active", "type": "box", "style": { "position": "absolute", "left": 0, "right": 0, "bottom": 0, "height": 2, "background": "@accent" } }
+              ]
+            }
           ]
         },
         {
@@ -729,17 +740,16 @@
           "if": ".selected.worktree",
           "id": "chat-tab-new",
           "type": "row",
-          "style": { "padding": [0, 10], "gap": 4, "align": "center", "color": "@text_muted", "cursor": "pointer", "hover": { "color": "@text" } },
+          "style": { "padding": [0, 10], "gap": 4, "align": "center", "shrink": 0, "color": "@text_muted", "cursor": "pointer", "hover": { "color": "@text" } },
           "tooltip": "New chat here  ⌘N",
           "on": { "click": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
           "children": [{ "type": "icon", "props": { "name": "plus", "size": 13 } }]
         },
-        { "type": "spacer" },
         {
           "if": ".selected.chats | any(.open | not)",
           "id": "chat-history",
           "type": "row",
-          "style": { "position": "relative", "padding": [0, 12], "align": "center" },
+          "style": { "position": "relative", "padding": [0, 4], "align": "center", "shrink": 0 },
           "children": [
             { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
             {
@@ -755,7 +765,7 @@
               "type": "scroll",
               "layer": "top",
               "style": {
-                "position": "absolute", "top": 30, "right": 8, "width": 320, "max_height": 380, "padding": 6, "gap": 2,
+                "position": "absolute", "top": 30, "left": 0, "width": 320, "max_height": 380, "padding": 6, "gap": 2,
                 "radius": 10, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg"
               },
               "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
@@ -814,6 +824,73 @@
           "style": { "height": 24, "padding": "{{ [0, 10, 0, ((.props.indent // 40) + 13)] }}", "align": "center", "font_size": 12, "color": "@text_faint", "cursor": "pointer", "radius": 6, "hover": { "color": "@text" } },
           "on": { "click": { "do": "state.set", "key": "chats_more:{{ .props.w.path }}", "value": "{{ .state[\"chats_more:\" + .props.w.path] | not }}" } },
           "children": [{ "type": "text", "props": { "text": "{{ if .state[\"chats_more:\" + .props.w.path] then \"Show fewer\" else \"Show \\((.props.w.chats | length) - 5) more\" end }}" } }]
+        }
+      ]
+    },
+
+    "Completions": {
+      "about": "The list the composer shows while you type a trigger word (\"/\" for commands and skills): up/down to move, Tab or Enter to fill it in, Esc to close. props: chat.",
+      "if": ".app.completion and .app.completion.chat == .props.chat",
+      "type": "column",
+      "layer": "top",
+      "style": {
+        "position": "absolute", "left": 20, "right": 20, "bottom": "full", "max_height": 340, "padding": 5, "gap": 1,
+        "radius": 10, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg"
+      },
+      "children": [
+        {
+          "for": ".app.completion.selected as $sel | .app.completion.items | to_entries | map(.value + {index: .key, selected: (.key == $sel)})",
+          "as": "e", "key": ".e.name",
+          "type": "row",
+          "style": {
+            "height": 30, "padding": [0, 10], "gap": 10, "align": "center", "radius": 6, "cursor": "pointer", "font_size": 13,
+            "background": "{{ if .e.selected then \"@selection\" else \"transparent\" end }}", "hover": { "background": "@hover" }
+          },
+          "on": { "click": { "do": "completion.accept", "index": "{{ .e.index }}" } },
+          "children": [
+            { "type": "icon", "props": { "name": "{{ if .e.kind == \"skill\" then \"sparkles\" else \"square-slash\" end }}", "size": 13, "color": "@text_faint" } },
+            { "type": "text", "props": { "text": "{{ .app.completion.trigger }}{{ .e.name }}" }, "style": { "shrink": 0, "font_family": "@font_mono", "font_size": 12.5 } },
+            { "type": "text", "props": { "text": "{{ .e.description }}" }, "style": { "grow": 1, "min_width": 0, "truncate": true, "color": "@text_faint", "font_size": 12 } },
+            {
+              "type": "text",
+              "props": { "text": "{{ if .e.source == \"project\" then \"repo\" elif .e.source == \"personal\" then \"personal\" else \"built-in\" end }}" },
+              "tooltip": "{{ if .e.source == \"project\" then \"From this repository (.claude or .agents in the worktree)\" elif .e.source == \"personal\" then \"Yours (~/.claude, ~/.agents)\" else \"Claude Code command\" end }}",
+              "style": {
+                "shrink": 0, "padding": [1, 7], "radius": 9, "font_size": 11, "border": 1,
+                "border_color": "{{ if .e.source == \"project\" then \"@accent\" elif .e.source == \"personal\" then \"@success\" else \"@line\" end }}",
+                "color": "{{ if .e.source == \"project\" then \"@accent\" elif .e.source == \"personal\" then \"@success\" else \"@text_faint\" end }}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+
+    "Queued": {
+      "about": "Messages waiting to send (state chat.queue): each goes out when the agent finishes its turn. Click one to edit it in the composer. props: c (a chat).",
+      "if": "(.props.c.queued | length) > 0",
+      "type": "column",
+      "style": { "gap": 4, "padding": [0, 4, 8, 4] },
+      "children": [
+        { "type": "text", "props": { "text": "Queued · sends when the agent finishes" }, "style": { "font_size": 11.5, "color": "@text_faint", "padding": [0, 4] } },
+        {
+          "for": ".props.c.queued | to_entries", "as": "q", "key": ".q.key",
+          "id": "queued-message",
+          "type": "row",
+          "style": { "gap": 8, "padding": [6, 6, 6, 10], "align": "center", "radius": 8, "border": 1, "border_color": "@line", "background": "@user_bubble", "font_size": 13 },
+          "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 140 },
+          "children": [
+            { "type": "icon", "props": { "name": "clock", "size": 12, "color": "@text_faint" } },
+            {
+              "type": "text", "props": { "text": "{{ .q.value }}" },
+              "style": { "grow": 1, "min_width": 0, "truncate": true, "cursor": "pointer" },
+              "tooltip": "Edit (back into the message box)",
+              "on": { "click": { "do": "queue.edit", "chat": "{{ .props.c.id }}", "index": "{{ .q.key }}" } }
+            },
+            { "type": "IconButton", "props": { "icon": "pencil", "size": 22, "tooltip": "Edit", "do": { "do": "queue.edit", "chat": "{{ .props.c.id }}", "index": "{{ .q.key }}" } } },
+            { "type": "IconButton", "props": { "icon": "send", "size": 22, "tooltip": "Send now", "do": { "do": "queue.send_now", "chat": "{{ .props.c.id }}", "index": "{{ .q.key }}" } } },
+            { "type": "IconButton", "props": { "icon": "x", "size": 22, "tooltip": "Remove", "do": { "do": "queue.remove", "chat": "{{ .props.c.id }}", "index": "{{ .q.key }}" } } }
+          ]
         }
       ]
     },
@@ -1094,6 +1171,40 @@
     "step_detail_lines": 40,
     // How many of a chat's newest transcript entries to load when it opens (long chats run to 40,000+).
     "transcript_tail": 600,
+    // Typing one of these at the start of a word opens a list of matches under the composer.
+    // Messages sent while the agent is working wait here and go out one per turn as it finishes.
+    "queue": true,
+    // Typing with nothing focused goes to the selected chat's message box.
+    "type_to_focus": true,
+    // Copy and Fork under each message while you hover it.
+    "message_actions": true,
+    // Select and copy message text with the mouse.
+    "selectable": true,
+    // How replies' Markdown looks. Style objects take the usual style keys (padding, radius, font_size,
+    // font_family, background, overflow_x...). Tables scroll sideways instead of squeezing.
+    "markdown": {
+      "paragraph_gap": 0.75,
+      "heading_sizes": [20, 17, 15, 14, 13, 13],
+      "code_block": { "radius": 8, "padding": [10, 12], "font_family": "@font_mono", "font_size": 12.5 },
+      "table": { "overflow_x": "scroll" },
+      "table_head": {},
+      "table_cell": { "padding": [6, 10] }
+    },
+    "completion_triggers": ["/"],
+    // What "/" offers: these commands, then the skills and commands in skill_dirs ({worktree}: the chat's
+    // worktree; box worktrees read this Mac's checkout of the same repo).
+    "slash_commands": [
+      { "name": "clear", "description": "Start a fresh conversation" },
+      { "name": "compact", "description": "Summarize the conversation to free up context" },
+      { "name": "model", "description": "Switch the model" },
+      { "name": "loop", "description": "Run a prompt on a schedule or self-paced" },
+      { "name": "review", "description": "Review the current changes" },
+      { "name": "context", "description": "Show what's using the context window" },
+      { "name": "cost", "description": "Show this session's cost and usage" },
+      { "name": "resume", "description": "Resume an earlier conversation" },
+      { "name": "init", "description": "Write a CLAUDE.md for this repo" }
+    ],
+    "skill_dirs": ["{worktree}/.claude/skills", "{worktree}/.claude/commands", "{worktree}/.agents/skills", "~/.claude/skills", "~/.claude/commands", "~/.agents/skills"],
     // Selecting a worktree opens its live chat, if any: "open" (default) shows no chat when none is
     // running; "recent" shows the newest chat even when it isn't.
     "open_on_select": "open",

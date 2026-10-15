@@ -153,18 +153,98 @@ impl Workspace {
                         }
                     })
                     .collect();
-                let body = (!rest.is_empty()).then(|| rest.clone());
+                let body = (!rest.is_empty()).then(|| self.markdown(&format!("{key}:u"), &rest, theme));
                 let bubble = style::apply(v_flex(), &st("user"), theme).children(body).children(thumbs);
-                Some(h_flex().w_full().justify_end().child(bubble).into_any_element())
+                let row = h_flex().w_full().justify_end().child(bubble).into_any_element();
+                Some(self.with_message_actions(chat_id, &key, text, true, row, theme))
             }
             Item::Image { media_type, data } => {
                 let image = self.images.entry(key.clone()).or_insert_with(|| crate::workspace::decode_image(media_type, data)).clone();
                 image.map(|i| h_flex().w_full().justify_end().child(style::apply(img(i).object_fit(ObjectFit::Contain), &st("image"), theme)).into_any_element())
             }
-            Item::Assistant { text } => Some(style::apply(div(), &st("assistant"), theme).child(TextView::markdown(SharedString::from(key), text.clone())).into_any_element()),
+            Item::Assistant { text } => {
+                let body = style::apply(div(), &st("assistant"), theme).child(self.markdown(&key, text, theme));
+                Some(self.with_message_actions(chat_id, &key, text, false, body.into_any_element(), theme))
+            }
             Item::Notice { text } => Some(style::apply(div(), &st("notice"), theme).child(text.clone()).into_any_element()),
             _ => None,
         }
+    }
+
+    fn markdown(&self, key: &str, text: &str, theme: &Map<String, Value>) -> TextView {
+        let selectable = self.settings.chat.get("selectable").and_then(Value::as_bool) != Some(false);
+        let view = TextView::markdown(SharedString::from(key.to_string()), text.to_string()).selectable(selectable);
+        match self.markdown_style(theme) {
+            Some(st) => view.style(st),
+            None => view,
+        }
+    }
+
+    /** settings `chat.markdown`: paragraph_gap (rem), heading_sizes (h1..h6 points), and style objects
+    for code_block, table, table_head, table_cell. Unset: the built-in look. */
+    pub(crate) fn markdown_style(&self, theme: &Map<String, Value>) -> Option<gpui_kit::component::text::TextViewStyle> {
+        let md = self.settings.chat.get("markdown").and_then(Value::as_object)?;
+        let refine = |k: &str| {
+            let mut r = StyleRefinement::default();
+            if let Some(o) = md.get(k).and_then(Value::as_object) {
+                style::refine(&mut r, o, theme);
+            }
+            r
+        };
+        let mut st = gpui_kit::component::text::TextViewStyle {
+            code_block: refine("code_block"),
+            table: refine("table"),
+            table_head: refine("table_head"),
+            table_cell: refine("table_cell"),
+            is_dark: true,
+            highlight_theme: gpui_kit::component::highlighter::HighlightTheme::default_dark(),
+            ..Default::default()
+        };
+        if let Some(g) = md.get("paragraph_gap").and_then(Value::as_f64) {
+            st.paragraph_gap = rems(g as f32);
+        }
+        if let Some(sizes) = md.get("heading_sizes").and_then(Value::as_array) {
+            let sizes: Vec<f32> = sizes.iter().filter_map(Value::as_f64).map(|x| x as f32).collect();
+            st = st.heading_font_size(move |level, base| sizes.get(level.saturating_sub(1) as usize).map(|s| px(*s)).unwrap_or(base));
+        }
+        Some(st)
+    }
+
+    /** A message with Copy and Fork under it while hovered (`chat.message_actions`: false hides them). */
+    fn with_message_actions(&self, chat_id: &str, key: &str, text: &str, mine: bool, body: AnyElement, theme: &Map<String, Value>) -> AnyElement {
+        if self.settings.chat.get("message_actions").and_then(Value::as_bool) == Some(false) || chat_id == crate::designer::CHAT_ID {
+            return body;
+        }
+        let muted = style::color(&Value::from("@text_faint"), theme).unwrap_or(gpui_kit::black());
+        let hover = style::color(&Value::from("@hover"), theme).unwrap_or(gpui_kit::black());
+        let group = SharedString::from(format!("msg:{key}"));
+        let view = self.view_handle.clone();
+        let button = |id: String, icon: &str, tip: &'static str, action: Value| {
+            let view = view.clone();
+            div()
+                .id(SharedString::from(id))
+                .p(px(4.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
+                .child(Icon::empty().path(format!("icons/{icon}.svg")).size(px(13.)).text_color(muted))
+                .on_click(move |_, window, cx| {
+                    if let Some(v) = view.as_ref().and_then(|v| v.upgrade()) {
+                        let action = action.clone();
+                        v.update(cx, |ws, cx| ws.run_action(&action, window, cx));
+                    }
+                })
+        };
+        let bar = h_flex()
+            .gap(px(2.))
+            .h(px(22.))
+            .when(mine, |d| d.justify_end())
+            .invisible()
+            .group_hover(group.clone(), |s| s.visible())
+            .child(button(format!("{key}:copy"), "copy", "Copy", serde_json::json!({"do": "clipboard.copy", "text": text})))
+            .child(button(format!("{key}:fork"), "git-fork", "Fork this chat (a new tab that starts from this conversation)", serde_json::json!({"do": "chat.fork", "chat": chat_id})));
+        v_flex().w_full().group(group).child(body).child(bar).into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]

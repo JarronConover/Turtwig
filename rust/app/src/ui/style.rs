@@ -31,7 +31,7 @@ pub const STYLE_KEYS: &[(&str, &str)] = &[
     ("line_height", "number (multiplier when < 4, else points)"),
     ("text_align", "left | center | right"),
     ("truncate", "bool: one line with an ellipsis"),
-    ("overflow", "hidden | visible (use a `scroll` node to scroll)"),
+    ("overflow / overflow_x / overflow_y", "hidden | visible | scroll (for nodes, a `scroll` node scrolls; `scroll` here is for markdown parts like tables)"),
     ("position", "relative | absolute"),
     ("top / right / bottom / left", "number (for position: absolute)"),
     ("cursor", "pointer | text | default | col_resize | row_resize | grab"),
@@ -68,6 +68,16 @@ fn length(v: &Value) -> Option<Length> {
         Value::Number(n) => Some(px(n.as_f64()? as f32).into()),
         Value::String(s) if s == "full" => Some(relative(1.).into()),
         Value::String(s) if s == "auto" => Some(Length::Auto),
+        Value::String(s) if s.ends_with('%') => s.trim_end_matches('%').parse::<f32>().ok().map(|p| relative(p / 100.).into()),
+        _ => None,
+    }
+}
+
+/** An inset: points, or "full" / "50%" of the parent (so `"bottom": "full"` sits just above it). */
+fn inset(v: &Value) -> Option<Length> {
+    match v {
+        Value::Number(n) => Some(px(n.as_f64()? as f32).into()),
+        Value::String(s) if s == "full" => Some(relative(1.).into()),
         Value::String(s) if s.ends_with('%') => s.trim_end_matches('%').parse::<f32>().ok().map(|p| relative(p / 100.).into()),
         _ => None,
     }
@@ -246,16 +256,24 @@ pub fn refine(s: &mut StyleRefinement, style: &Map<String, Value>, theme: &Map<S
                     s.text.text_overflow = Some(TextOverflow::Truncate("…".into()));
                 }
             }
-            "overflow" => {
-                let o = if v.as_str() == Some("hidden") { Overflow::Hidden } else { Overflow::Visible };
-                s.overflow.x = Some(o);
-                s.overflow.y = Some(o);
+            "overflow" | "overflow_x" | "overflow_y" => {
+                let o = match v.as_str() {
+                    Some("hidden") => Overflow::Hidden,
+                    Some("scroll") => Overflow::Scroll,
+                    _ => Overflow::Visible,
+                };
+                if k != "overflow_y" {
+                    s.overflow.x = Some(o);
+                }
+                if k != "overflow_x" {
+                    s.overflow.y = Some(o);
+                }
             }
             "position" => s.position = Some(if v.as_str() == Some("absolute") { Position::Absolute } else { Position::Relative }),
-            "top" => s.inset.top = num(Some(v)).map(|x| px(x).into()),
-            "right" => s.inset.right = num(Some(v)).map(|x| px(x).into()),
-            "bottom" => s.inset.bottom = num(Some(v)).map(|x| px(x).into()),
-            "left" => s.inset.left = num(Some(v)).map(|x| px(x).into()),
+            "top" => s.inset.top = inset(v),
+            "right" => s.inset.right = inset(v),
+            "bottom" => s.inset.bottom = inset(v),
+            "left" => s.inset.left = inset(v),
             "shadow" => {
                 s.box_shadow = match v.as_str() {
                     Some("sm") => Some(vec![BoxShadow { color: hsla(0., 0., 0., 0.25), offset: point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.), inset: false }]),

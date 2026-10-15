@@ -1,3 +1,4 @@
+mod completions;
 mod designer;
 mod diff;
 mod jsc;

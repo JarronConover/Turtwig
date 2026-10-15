@@ -44,6 +44,14 @@ pub struct Workspace {
     pub(crate) history: Vec<Value>,
     pub(crate) history_loading: bool,
     pub(crate) inputs: HashMap<String, Entity<gpui_kit::component::input::InputState>>,
+    /** The open completion list under a composer: (chat, trigger, entries, selected). */
+    pub(crate) completion: Option<(String, String, Vec<crate::completions::Entry>, usize)>,
+    /** Messages typed while a chat was working, sent one per turn as it finishes (`chat.queue`). */
+    pub(crate) queued: HashMap<String, Vec<String>>,
+    /** This view, for click handlers built without a `cx` (message actions). */
+    pub(crate) view_handle: Option<WeakEntity<Workspace>>,
+    /** When a queued message last went out, so it isn't sent twice before the chat turns busy. */
+    queue_sent: HashMap<String, std::time::Instant>,
     pub(crate) settings: Settings,
     pub(crate) settings_error: Option<String>,
     pub(crate) remote: Remote,
@@ -187,6 +195,10 @@ impl Workspace {
             history: vec![],
             history_loading: false,
             inputs: HashMap::new(),
+            completion: None,
+            queued: HashMap::new(),
+            view_handle: None,
+            queue_sent: HashMap::new(),
             settings,
             settings_error,
             remote,
@@ -689,6 +701,7 @@ impl Workspace {
                 self.merge_models();
                 if !before.is_empty() {
                     self.fire_chat_events(&before, window, cx);
+                    self.flush_queue();
                 }
                 let ctx = self.context();
                 self.update_badge(&ctx);
@@ -820,6 +833,7 @@ impl Workspace {
     /** The daemon a call belongs to, from the chat, worktree, or section it names. */
     pub(crate) fn route(&self, call: &Call) -> Remote {
         let host = match call {
+            Call::ChatFork { chat_id } => self.host_of_chat(chat_id),
             Call::TranscriptRead { chat_id, .. }
             | Call::TranscriptUnwatch { chat_id }
             | Call::ChatStart { chat_id }
@@ -937,6 +951,9 @@ impl Workspace {
                 "confirm": self.confirm.as_ref().map(|c| { let mut c = c.clone(); if let Value::Object(o) = &mut c { o.remove("then"); } c }),
                 "starting": self.starting,
                 "hosts_up": self.host_up,
+                "completion": self.completion.as_ref().map(|(chat, trigger, items, selected)| json!({
+                    "chat": chat, "trigger": trigger, "items": crate::completions::to_json(items), "selected": selected
+                })),
                 "history_loading": self.history_loading,
                 "connected": self.connected,
                 "dragging": self.dragging,
@@ -994,6 +1011,7 @@ impl Workspace {
         if let Value::Object(o) = &mut v {
             o.insert("active".into(), Value::Bool(self.current_chat().map(|x| x.id == c.id).unwrap_or(false)));
             o.insert("open".into(), Value::Bool(self.chat_open(c)));
+            o.insert("queued".into(), json!(self.queued.get(&c.id).cloned().unwrap_or_default()));
             o.insert("age_text".into(), Value::String(age_text(c.last_activity)));
             o.insert("attachments".into(), self.attachments_json(&c.id));
             let last = self.transcripts.get(&c.id).and_then(|t| t.items.iter().rev().find_map(|i| if let Item::Assistant { text } = i { Some(text.clone()) } else { None }));
@@ -1064,13 +1082,92 @@ impl Workspace {
         let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(placeholder).submit_on_enter(enter_sends));
         let id = chat_id.to_string();
         self._subscriptions.push(cx.subscribe_in(&state, window, move |ws, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { secondary, shift } = ev {
-                if *secondary || (enter_sends && !*shift) {
-                    ws.send_composer(&id, window, cx);
+            match ev {
+                InputEvent::PressEnter { secondary, shift } => {
+                    if ws.completion.as_ref().is_some_and(|c| c.0 == id) && !*shift {
+                        ws.accept_completion(None, window, cx);
+                    } else if *secondary || (enter_sends && !*shift) {
+                        ws.send_composer(&id, window, cx);
+                    }
                 }
+                InputEvent::Change => ws.update_completion(&id, cx),
+                _ => {}
             }
         }));
         self.composers.insert(chat_id.to_string(), state);
+    }
+
+    /** Opens, narrows, or closes the completion list from the word being typed (settings
+    `chat.completion_triggers`, default "/"). */
+    pub(crate) fn update_completion(&mut self, chat: &str, cx: &mut Context<Self>) {
+        let Some(state) = self.composers.get(chat) else { return };
+        let text = state.read(cx).value().to_string();
+        let triggers: Vec<String> = self
+            .settings
+            .chat
+            .get("completion_triggers")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_else(|| vec!["/".into()]);
+        let found = if chat == crate::designer::CHAT_ID { None } else { crate::completions::token(&text, &triggers) };
+        let before = self.completion.as_ref().map(|c| (c.0.clone(), c.2.len()));
+        self.completion = found.and_then(|(trigger, query)| {
+            let w = self.all_worktrees().into_iter().find(|w| w.chat_ids.iter().any(|c| c == chat)).cloned();
+            let local = w.as_ref().filter(|w| w.host != "mac").map(|w| format!("~/dev/{}", w.project));
+            let all = crate::completions::entries(&self.settings, w.as_ref().map(|w| w.path.as_str()), local.as_deref());
+            let items = crate::completions::filter(&all, &query, 12);
+            let keep = self.completion.as_ref().filter(|c| c.0 == chat).map(|c| c.3).unwrap_or(0);
+            (!items.is_empty()).then(|| (chat.to_string(), trigger, items.clone(), keep.min(items.len().saturating_sub(1))))
+        });
+        if before != self.completion.as_ref().map(|c| (c.0.clone(), c.2.len())) || self.completion.is_some() {
+            self.ctx_rev += 1;
+            cx.notify();
+        }
+    }
+
+    /** Replaces the word being typed with the chosen entry (`index`, default the highlighted one). */
+    pub(crate) fn accept_completion(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((chat, trigger, items, selected)) = self.completion.take() else { return };
+        let Some(entry) = items.get(index.unwrap_or(selected)) else { return };
+        let Some(state) = self.composers.get(&chat).cloned() else { return };
+        let text = state.read(cx).value().to_string();
+        let cut = text.rfind(|c: char| c.is_whitespace()).map(|i| i + 1).unwrap_or(0);
+        let next = format!("{}{}{} ", &text[..cut], trigger, entry.name);
+        state.update(cx, |s, cx| {
+            s.set_value(next, window, cx);
+            s.focus(window, cx);
+        });
+        self.completion = None;
+        self.ctx_rev += 1;
+        cx.notify();
+    }
+
+    pub(crate) fn move_completion(&mut self, by: i64, cx: &mut Context<Self>) {
+        if let Some(c) = &mut self.completion {
+            let n = c.2.len() as i64;
+            c.3 = ((c.3 as i64 + by).rem_euclid(n.max(1))) as usize;
+            self.ctx_rev += 1;
+            cx.notify();
+        }
+    }
+
+    /** Sends the next queued message to each chat that's idle again. */
+    pub(crate) fn flush_queue(&mut self) {
+        let ready: Vec<String> = self
+            .queued
+            .iter()
+            .filter(|(_, q)| !q.is_empty())
+            .filter(|(id, _)| self.chat(id).is_some_and(|c| c.alive && c.state == "idle"))
+            .filter(|(id, _)| self.queue_sent.get(*id).map_or(true, |t| t.elapsed() > Duration::from_secs(8)))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ready {
+            let Some(text) = self.queued.get_mut(&id).filter(|q| !q.is_empty()).map(|q| q.remove(0)) else { continue };
+            self.queue_sent.insert(id.clone(), std::time::Instant::now());
+            let call = Call::ChatSend { chat_id: id.clone(), text };
+            self.route(&call).send(call);
+            self.ctx_rev += 1;
+        }
     }
 
     pub(crate) fn send_composer(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1086,13 +1183,19 @@ impl Workspace {
         if text.is_empty() {
             return;
         }
+        let busy = self.chat(id).is_some_and(|c| c.state == "working" || c.state == "waiting") || self.queued.get(id).is_some_and(|q| !q.is_empty());
+        let queue = self.settings.chat.get("queue").and_then(Value::as_bool) != Some(false);
         if id == crate::designer::CHAT_ID {
             self.designer_send(text, cx);
+        } else if busy && queue {
+            self.queued.entry(id.to_string()).or_default().push(text);
+            self.ctx_rev += 1;
         } else {
             let call = Call::ChatSend { chat_id: id.to_string(), text };
             self.route(&call).send(call);
         }
         state.update(cx, |s, cx| s.set_value("", window, cx));
+        cx.notify();
     }
 
     fn register_terminals(&mut self, cx: &mut Context<Self>) {
@@ -1389,6 +1492,16 @@ impl Workspace {
             self.ensure_composer(&chat, window, cx);
         }
         let c = self.composers.get(&chat)?.clone();
+        // The list closes once the trigger word is gone or the message box loses focus (a click elsewhere).
+        if self.completion.as_ref().is_some_and(|x| x.0 == chat) {
+            let text = c.read(cx).value().to_string();
+            let triggers = vec![self.completion.as_ref().map(|x| x.1.clone()).unwrap_or_default()];
+            let focused = c.read(cx).focus_handle(cx).is_focused(window);
+            if crate::completions::token(&text, &triggers).is_none() || !focused {
+                self.completion = None;
+                self.ctx_rev += 1;
+            }
+        }
         let view = cx.entity().downgrade();
         let (paste_view, paste_chat) = (view.clone(), chat.clone());
         let textarea = Textarea::new(&c).appearance(false).on_paste(move |item, window, cx| {
@@ -1402,9 +1515,30 @@ impl Workspace {
         let drop_style = self.settings.chat.get("composer_drop").and_then(Value::as_object).cloned().unwrap_or_default();
         let drop_theme = self.settings.theme.clone();
         let chips = if props.get("attachments").and_then(Value::as_bool) == Some(false) { None } else { self.attachments_view(Some(chat.clone()), props, cx) };
+        let key_view = cx.entity().downgrade();
+        let key_chat = chat.clone();
         Some(
             div()
                 .id(SharedString::from(format!("composer:{chat}")))
+                .capture_key_down(move |e: &KeyDownEvent, window, cx| {
+                    let _ = key_view.update(cx, |ws, cx| {
+                        if !ws.completion.as_ref().is_some_and(|c| c.0 == key_chat) || e.keystroke.modifiers.modified() {
+                            return;
+                        }
+                        match e.keystroke.key.as_str() {
+                            "up" => ws.move_completion(-1, cx),
+                            "down" => ws.move_completion(1, cx),
+                            "tab" | "enter" => ws.accept_completion(None, window, cx),
+                            "escape" => {
+                                ws.completion = None;
+                                ws.ctx_rev += 1;
+                                cx.notify();
+                            }
+                            _ => return,
+                        }
+                        cx.stop_propagation();
+                    });
+                })
                 .flex()
                 .flex_col()
                 .gap(px(6.))
@@ -1523,6 +1657,7 @@ impl Render for Workspace {
         }
         self.focused = window.is_window_active();
         let ctx = self.context();
+        self.view_handle = Some(cx.entity().downgrade());
         let body = self.render_view("main", &ctx, window, cx);
         self.write_inspect(&ctx, window, cx);
         self.write_problems();
@@ -1539,6 +1674,7 @@ impl Render for Workspace {
             .text_color(fg)
             .font_family(font)
             .capture_key_down(cx.listener(Self::handle_keys))
+            .on_key_down(cx.listener(Self::type_to_focus))
             .on_action(cx.listener(|ws, _: &OpenSettings, w, cx| ws.open_settings(w, cx)))
             .on_action(cx.listener(|ws, _: &Palette, w, cx| ws.open_palette(w, cx)))
             .on_mouse_move(cx.listener(|ws, e: &MouseMoveEvent, _, cx| {
@@ -1557,6 +1693,30 @@ impl Render for Workspace {
                 }
             }))
             .child(body)
+    }
+}
+
+impl Workspace {
+    /** Typing with nothing focused (not a shortcut) goes to the selected chat's message box
+    (`chat.type_to_focus`). */
+    fn type_to_focus(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &e.keystroke.modifiers;
+        if m.platform || m.control || self.settings.chat.get("type_to_focus").and_then(Value::as_bool) == Some(false) {
+            return;
+        }
+        if window.focused(cx).is_some_and(|f| f != self.focus) {
+            return;
+        }
+        let Some(text) = e.keystroke.key_char.clone().filter(|t| !t.chars().any(char::is_control)) else { return };
+        let Some(chat) = self.current_chat().map(|c| c.id.clone()) else { return };
+        self.ensure_composer(&chat, window, cx);
+        let Some(state) = self.composers.get(&chat).cloned() else { return };
+        state.update(cx, |s, cx| {
+            s.focus(window, cx);
+            s.insert(text, window, cx);
+        });
+        self.update_completion(&chat, cx);
+        cx.stop_propagation();
     }
 }
 
