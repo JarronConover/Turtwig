@@ -16,6 +16,12 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.send", "{chat, text}: send a message"),
     ("chat.keys", "{chat, keys: [..]}: press keys in the chat's session (Enter, Escape, Up, 1, ...)"),
     ("chat.archive / chat.stop / chat.start", "{chat}"),
+    ("chat.close", "{chat}: close its tab and stop its Claude process (wherever it runs)"),
+    ("chat.open", "{chat}: open a chat as a tab, resuming its process if it isn't running"),
+    ("tab.move", "{chat?, target: chat id, zone: before|after}: reorder a worktree's tabs (chat defaults to `dragged`)"),
+    ("if", "{cond, then, else?}: run `then` when cond is truthy (true, a non-empty string other than \"false\"), else `else`"),
+    ("confirm", "{title, text?, confirm?, cancel?, then}: ask first; `then` runs if they confirm. Shown by the Confirm component (`.app.confirm`)"),
+    ("confirm.accept / confirm.cancel", "answer the open confirm dialog"),
     ("chat.attach", "{chat, paths: [..]}: attach files to a chat (preview chips above its composer; uploaded to the box for box chats; sent with the next message). An `on.drop` action gets the dropped files as `paths`."),
     ("composer.send", "{chat}: send what's in a chat's composer"),
     ("chat.move", "{chat, to: mac|box}: move a chat between machines"),
@@ -156,6 +162,7 @@ impl Workspace {
                 }
             }
             "chat.new" => {
+                self.starting = s("dir").filter(|_| s("branch").is_none());
                 let call = Call::ChatNew {
                     name: s("name").unwrap_or("New chat".into()),
                     kind: s("kind").unwrap_or(if s("dir").is_some() && s("branch").is_none() { "primary".into() } else { "orchestrator".into() }),
@@ -178,6 +185,76 @@ impl Workspace {
                 if let Some(id) = chat() {
                     self.call(Call::ChatKeys { chat_id: id, keys }, cx);
                 }
+            }
+            "chat.close" => {
+                if let Some(id) = chat() {
+                    self.closed.insert(id.clone());
+                    self.opened.remove(&id);
+                    self.active_chat.retain(|_, c| c != &id);
+                    if self.chat(&id).is_some_and(|c| c.host == "mac") {
+                        self.run_local(vec!["chat".into(), "stop".into(), id], window, cx);
+                    } else {
+                        self.call(Call::ChatStop { chat_id: id }, cx);
+                    }
+                    self.sync_selection(window, cx);
+                }
+            }
+            "chat.open" => {
+                if let Some(id) = chat() {
+                    self.closed.remove(&id);
+                    self.opened.insert(id.clone());
+                    let alive = self.chat(&id).map(|c| (c.alive, c.host.clone()));
+                    if let Some(p) = self.all_worktrees().iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone()) {
+                        self.active_chat.insert(p.clone(), id.clone());
+                        self.select(p, window, cx);
+                    }
+                    match alive {
+                        Some((false, host)) if host == "mac" => self.run_local(vec!["chat".into(), "start".into(), id], window, cx),
+                        Some((false, _)) => self.call(Call::ChatStart { chat_id: id }, cx),
+                        _ => {}
+                    }
+                }
+            }
+            "tab.move" => {
+                let dragged = s("chat").or_else(|| a.get("dragged").and_then(Value::as_str).map(str::to_string));
+                if let (Some(id), Some(target)) = (dragged, s("target")) {
+                    if let Some(w) = self.all_worktrees().into_iter().find(|w| w.chat_ids.contains(&target)).cloned() {
+                        let mut ids: Vec<String> = self.chats_of_path(&w.path);
+                        ids.retain(|x| x != &id);
+                        let at = ids.iter().position(|x| x == &target).map(|i| if s("zone").as_deref() == Some("after") { i + 1 } else { i }).unwrap_or(ids.len());
+                        ids.insert(at, id);
+                        let mut order = self.state.get("tab_order").and_then(Value::as_object).cloned().unwrap_or_default();
+                        order.insert(w.path.clone(), serde_json::json!(ids));
+                        self.set_state("tab_order".into(), Value::Object(order));
+                    }
+                }
+            }
+            "if" => {
+                let truthy = match a.get("cond") {
+                    Some(Value::Bool(b)) => *b,
+                    Some(Value::String(t)) => !t.is_empty() && t != "false" && t != "null",
+                    Some(Value::Null) | None => false,
+                    Some(Value::Number(n)) => n.as_f64() != Some(0.),
+                    Some(_) => true,
+                };
+                let next = if truthy { a.get("then") } else { a.get("else") };
+                if let Some(next) = next.cloned() {
+                    self.run_action(&next, window, cx);
+                }
+            }
+            "confirm" => {
+                self.confirm = Some(Value::Object(a.clone()));
+                cx.notify();
+            }
+            "confirm.accept" => {
+                if let Some(next) = self.confirm.take().and_then(|c| c.get("then").cloned()) {
+                    self.run_action(&next, window, cx);
+                }
+                cx.notify();
+            }
+            "confirm.cancel" => {
+                self.confirm = None;
+                cx.notify();
             }
             "chat.archive" | "chat.stop" | "chat.start" => {
                 if let Some(id) = chat() {

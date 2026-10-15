@@ -56,6 +56,14 @@ pub struct Workspace {
     pub(crate) drag: Option<Drag>,
     pub(crate) pending_actions: Vec<Value>,
     pending_select: Option<String>,
+    /** Chats opened as tabs this session (their process may still be starting). */
+    pub(crate) opened: HashSet<String>,
+    /** Chats closed this session: no tab even while their process winds down. */
+    pub(crate) closed: HashSet<String>,
+    /** The open `confirm` dialog: {title, text, confirm, cancel, do}. */
+    pub(crate) confirm: Option<Value>,
+    /** Worktree a `chat.new` is starting in, for a placeholder tab until the chat shows up. */
+    pub(crate) starting: Option<String>,
     pub(crate) transcripts: HashMap<String, Transcript>,
     watching: HashSet<String>,
     pub(crate) composers: HashMap<String, Entity<TextareaState>>,
@@ -175,6 +183,10 @@ impl Workspace {
             drag: None,
             pending_actions: vec![],
             pending_select: None,
+            opened: HashSet::new(),
+            closed: HashSet::new(),
+            confirm: None,
+            starting: None,
             transcripts,
             watching: HashSet::new(),
             composers: HashMap::new(),
@@ -646,9 +658,11 @@ impl Workspace {
                 self.mark_diffs_stale();
                 if let Some(id) = self.pending_select.clone() {
                     if let Some(path) = self.all_worktrees().iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone()) {
+                        self.opened.insert(id.clone());
                         self.active_chat.insert(path.clone(), id);
                         self.selected = Some(path);
                         self.pending_select = None;
+                        self.starting = None;
                     }
                 }
                 if self.selected.as_ref().map_or(true, |p| self.worktree(p).is_none()) {
@@ -694,8 +708,24 @@ impl Workspace {
         self.model.chats.iter().find(|c| c.id == id)
     }
 
+    /** A worktree's chats in tab order (`state.tab_order[path]`, set by dragging tabs), the rest after. */
     fn chats_of(&self, w: &Worktree) -> Vec<&Chat> {
-        w.chat_ids.iter().filter_map(|id| self.chat(id)).collect()
+        let mut chats: Vec<&Chat> = w.chat_ids.iter().filter_map(|id| self.chat(id)).collect();
+        if let Some(order) = self.state.get("tab_order").and_then(|o| o.get(&w.path)).and_then(Value::as_array) {
+            let rank = |id: &str| order.iter().position(|x| x.as_str() == Some(id)).unwrap_or(usize::MAX);
+            chats.sort_by_key(|c| rank(&c.id));
+        }
+        chats
+    }
+
+    pub(crate) fn chats_of_path(&self, path: &str) -> Vec<String> {
+        self.worktree(path).map(|w| self.chats_of(w).into_iter().map(|c| c.id.clone()).collect()).unwrap_or_default()
+    }
+
+    /** Whether a chat shows as a tab: its process is running (or starting, or was just opened), and it
+    wasn't closed. Worktrees open with no tabs unless a chat there is live. */
+    pub(crate) fn chat_open(&self, c: &Chat) -> bool {
+        !self.closed.contains(&c.id) && (self.opened.contains(&c.id) || c.alive || c.state == "working" || c.state == "waiting")
     }
 
     pub(crate) fn current_worktree(&self) -> Option<&Worktree> {
@@ -706,7 +736,11 @@ impl Workspace {
         let w = self.current_worktree()?;
         let chats = self.chats_of(w);
         let active = self.active_chat.get(&w.path);
-        active.and_then(|id| chats.iter().find(|c| &c.id == id).copied()).or_else(|| chats.first().copied())
+        let recent = self.settings.chat.get("open_on_select").and_then(Value::as_str) == Some("recent");
+        active
+            .and_then(|id| chats.iter().find(|c| &c.id == id && !self.closed.contains(&c.id)).copied())
+            .or_else(|| chats.iter().find(|c| self.chat_open(c)).copied())
+            .or_else(|| if recent { chats.first().copied() } else { None })
     }
 
     /** Everything expressions can read, rebuilt each frame: model, state, theme, selection, app. */
@@ -750,7 +784,10 @@ impl Workspace {
             "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here, "diff": selected_diff},
             "state": self.state,
             "theme": self.settings.theme,
+            "hosts": self.settings.hosts,
             "app": {
+                "confirm": self.confirm.as_ref().map(|c| { let mut c = c.clone(); if let Value::Object(o) = &mut c { o.remove("then"); } c }),
+                "starting": self.starting,
                 "connected": self.connected,
                 "dragging": self.dragging,
                 "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
@@ -797,6 +834,7 @@ impl Workspace {
             "uncommitted": w.uncommitted, "unpushed": w.unpushed, "behind": w.behind, "mr": w.mr,
             "age": w.age, "age_text": age_text(w.age), "status": status, "section": section,
             "selected": self.selected.as_deref() == Some(&w.path),
+            "host": "box",
             "chats": chats.iter().map(|c| self.chat_json(c)).collect::<Vec<_>>(),
         })
     }
@@ -805,6 +843,7 @@ impl Workspace {
         let mut v = serde_json::to_value(c).unwrap_or(Value::Null);
         if let Value::Object(o) = &mut v {
             o.insert("active".into(), Value::Bool(self.current_chat().map(|x| x.id == c.id).unwrap_or(false)));
+            o.insert("open".into(), Value::Bool(self.chat_open(c)));
             o.insert("age_text".into(), Value::String(age_text(c.last_activity)));
             o.insert("attachments".into(), self.attachments_json(&c.id));
             let last = self.transcripts.get(&c.id).and_then(|t| t.items.iter().rev().find_map(|i| if let Item::Assistant { text } = i { Some(text.clone()) } else { None }));
@@ -930,7 +969,10 @@ impl Workspace {
                         }
                         ws.status = "Connected".into();
                     }
-                    Err(e) => ws.status = format!("Couldn't start the chat: {e}"),
+                    Err(e) => {
+                        ws.status = format!("Couldn't start the chat: {e}");
+                        ws.starting = None;
+                    }
                 }
                 cx.notify();
             })

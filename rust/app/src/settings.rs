@@ -35,6 +35,9 @@ pub struct Settings {
     /** `badge`: a template for the Dock icon's badge (empty or null hides it). */
     #[serde(default)]
     pub dock: Value,
+    /** Where chats and worktrees run, by host (`box`, `mac`): `label`, `icon`, `color`. Read as `.hosts`. */
+    #[serde(default)]
+    pub hosts: Value,
     /** A sound per event (`chat.finished`, `chat.question`, `chat.waiting`, ...), plus `volume`, `when`, `enabled`. */
     #[serde(default)]
     pub sounds: Value,

@@ -43,6 +43,7 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `state` | UI state and starting values. Read as `.state.key`; change with `state.set` / `state.toggle` / `state.cycle`. |
 | `events` | Actions to run when things happen: `chat.waiting`, `chat.finished`, `chat.stopped` (the chat is `.chat`; `.chat.asks` is true when its last reply ends in a question), `designer.finished`. Each is `{"if": jq, "do": action}`. |
 | `dock` | `badge`: a template for the Dock icon's badge; empty or 0 hides it. |
+| `hosts` | Where things run, by host (`box`, `mac`): `label`, `icon`, `color`. Read as `.hosts`; every chat has `.host` and every worktree `.host`. |
 | `sounds` | A sound per event: `chat.finished`, `chat.question` (a finished turn ending in a question), `chat.waiting`, `chat.stopped`, `designer.finished`. Values are macOS sound names or audio file paths; null silences one. Also `volume` (0-1), `when` (`always` or `unfocused`), `enabled`. The `sound` action plays one anywhere. |
 | `logo` | The logo shown by `logo` nodes, the Dock while the app runs, and the app bundle's icon. See Logo. |
 | `keys` | `[{"key": "cmd-k", "do": <action>, "if": <jq>}]`. Key names: `cmd`, `ctrl`, `alt`, `shift` + `-` + key (`cmd-shift-p`, `ctrl-\``, `cmd-\\`). |
@@ -141,10 +142,13 @@ A node is an object (or a string, shorthand for a text node, or an array of node
   "drag": { "kind": "worktree", "value": "{{ .w.path }}", "label": "{{ .w.title }}" },  // makes the node draggable
   // and on a drop target: "on": { "drop_item": { "accept": "worktree", "do": {"do": "worktree.move", "before": "{{ .w.path }}"} } }
   // (the dragged value arrives as the action's `dragged`, the pointer's zone as `zone`; add "valid": a jq
-  // test on .dragged/.zone so impossible or no-op drops show nothing and do nothing)
+  // test on .dragged/.zone so impossible or no-op drops show nothing and do nothing; "drop_zones": "edges"
+  // (before/after by height), "edges_x" (by width, for rows of tabs), "edges+inside", or per kind {kind: mode})
   "animate": { "from": {"opacity": 0, "y": 6}, "duration": 160 },   // plays when the node first appears
   "transition": { "width": 200 },     // these style keys (numbers or colors) ease to their new value (ms)
   "motion": false,                    // opt this node out of gliding, enter animation, and style easing
+  "layer": "top",                     // paint above everything else and keep clicks off what's under it (popovers, dialogs)
+  "occlude": true,                    // keep clicks and hover off whatever is under this node
   "children": [ ... ]
 }
 ```

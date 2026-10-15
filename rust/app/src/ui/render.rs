@@ -350,8 +350,10 @@ impl Workspace {
                         _ => "inside".into(),
                     };
                     let rel = (f32::from(e.event.position.y - e.bounds.origin.y) / f32::from(e.bounds.size.height).max(1.)).clamp(0., 1.);
+                    let rel_x = (f32::from(e.event.position.x - e.bounds.origin.x) / f32::from(e.bounds.size.width).max(1.)).clamp(0., 1.);
                     let zone = match mode.as_str() {
                         "edges" => if rel < 0.5 { "before" } else { "after" },
+                        "edges_x" => if rel_x < 0.5 { "before" } else { "after" },
                         "edges+inside" => if rel < 0.25 { "before" } else if rel > 0.75 { "after" } else { "inside" },
                         _ => "inside",
                     };
@@ -427,7 +429,10 @@ impl Workspace {
                 el = el.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx));
             }
         }
-        let el = el.children(content).children(kids);
+        let mut el = el.children(content).children(kids);
+        if obj.get("layer").and_then(Value::as_str) == Some("top") || obj.get("occlude").and_then(Value::as_bool) == Some(true) {
+            el = el.occlude();
+        }
         let el: AnyElement = if let Some(Value::Array(menu)) = obj.get("menu") {
             let entries = self.menu_entries(menu, ctx);
             let view = cx.entity();
@@ -450,7 +455,12 @@ impl Workspace {
             el.into_any_element()
         };
         let moves = self.motion.borrow().enabled && obj.get("motion").and_then(Value::as_bool) != Some(false);
-        vec![if moves { crate::ui::motion::Motion::new(id, el, self.motion.clone()).into_any_element() } else { el }]
+        let el = if moves { crate::ui::motion::Motion::new(id, el, self.motion.clone()).into_any_element() } else { el };
+        // "layer": "top" paints the node above everything else (popovers, dialogs) and keeps clicks off what's under it.
+        if obj.get("layer").and_then(Value::as_str) == Some("top") {
+            return vec![deferred(el).with_priority(1).into_any_element()];
+        }
+        vec![el]
     }
 
     /** Menu entries with `if` applied and `for` expanded: (label, action, is_separator). */
