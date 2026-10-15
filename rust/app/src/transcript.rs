@@ -132,6 +132,21 @@ impl Transcript {
             self.items.push(Item::User { text: format!("{name} {args}").trim().to_string() });
             return;
         }
+        // Another Claude session talking to this one (SendMessage, teammates): a collapsed step, not you.
+        if t.contains("<teammate-message") || t.contains("<cross-session-message") || t.starts_with("Another Claude session sent a message") {
+            for (from, summary, body) in agent_messages(t) {
+                let id = format!("agent-msg:{}", self.lines);
+                self.items.push(Item::Tool {
+                    summary: summary.clone(),
+                    id,
+                    name: "AgentMessage".into(),
+                    input: serde_json::json!({ "from": from }),
+                    result: Some(body),
+                    is_error: false,
+                });
+            }
+            return;
+        }
         if t.starts_with("<task-notification>") {
             let summary = between(t, "<summary>", "</summary>").unwrap_or("A background task finished");
             self.items.push(Item::Notice { text: summary.to_string() });
@@ -197,4 +212,56 @@ fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
     let start = text.find(open)? + open.len();
     let end = text[start..].find(close)? + start;
     Some(text[start..end].trim())
+}
+
+/** (from, summary, body) for each `<teammate-message teammate_id=.. summary=..>body</teammate-message>`
+(or cross-session message) in a user turn; idle notices with a JSON body use its `result`. */
+fn agent_messages(text: &str) -> Vec<(String, String, String)> {
+    let mut out = vec![];
+    for tag in ["teammate-message", "cross-session-message"] {
+        let open = format!("<{tag}");
+        let close = format!("</{tag}>");
+        let mut rest = text;
+        while let Some(start) = rest.find(&open) {
+            let after = &rest[start..];
+            let Some(head_end) = after.find('>') else { break };
+            let head = &after[..head_end];
+            let attr = |k: &str| {
+                let key = format!("{k}=\"");
+                head.find(&key).and_then(|i| head[i + key.len()..].split('"').next()).unwrap_or("").to_string()
+            };
+            let body_start = head_end + 1;
+            let body_end = after.find(&close).unwrap_or(after.len());
+            let mut body = after[body_start..body_end.max(body_start)].trim().to_string();
+            let mut summary = attr("summary");
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(r) = v.get("result").and_then(|x| x.as_str()) {
+                    if summary.is_empty() {
+                        summary = v.get("type").and_then(|x| x.as_str()).unwrap_or("update").replace('_', " ");
+                    }
+                    body = r.to_string();
+                }
+            }
+            let from = [attr("teammate_id"), attr("from"), attr("session")].into_iter().find(|x| !x.is_empty()).unwrap_or_else(|| "another session".into());
+            out.push((from, summary, body));
+            rest = &after[(body_end + close.len()).min(after.len())..];
+        }
+    }
+    if out.is_empty() {
+        out.push(("another session".into(), String::new(), text.to_string()));
+    }
+    out
+}
+
+#[cfg(test)]
+mod agent_message_tests {
+    #[test]
+    fn reads_teammate_messages() {
+        let t = "Another Claude session sent a message:\n<teammate-message teammate_id=\"box-migrate\" color=\"blue\" summary=\"Done\">\nAll good.\n</teammate-message>\n\n<teammate-message teammate_id=\"box-migrate\">\n{\"type\":\"idle_notification\",\"result\":\"Idle now\"}\n</teammate-message>\nThis came from another Claude session";
+        let m = super::agent_messages(t);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0], ("box-migrate".to_string(), "Done".to_string(), "All good.".to_string()));
+        assert_eq!(m[1].1, "idle notification");
+        assert_eq!(m[1].2, "Idle now");
+    }
 }

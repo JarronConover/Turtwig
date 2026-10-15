@@ -212,11 +212,13 @@ impl TerminalView {
     }
 
     /** One row of the grid as text plus color runs; a run changes wherever the cell style does. */
-    fn rows(&self) -> Vec<(String, Vec<(usize, Hsla, Option<Hsla>, bool)>)> {
+    /** Each screen row as text plus style runs of (bytes, cells, fg, bg, bold). A wide character's
+    spacer cell becomes a space, so text columns stay lined up with the grid (and the cursor). */
+    fn rows(&self) -> Vec<(String, Vec<(usize, usize, Hsla, Option<Hsla>, bool)>)> {
         let content = self.term.renderable_content();
         let rows = self.term.screen_lines();
         let cols = self.term.columns();
-        let mut lines: Vec<(String, Vec<(usize, Hsla, Option<Hsla>, bool)>)> = vec![(String::new(), vec![]); rows];
+        let mut lines: Vec<(String, Vec<(usize, usize, Hsla, Option<Hsla>, bool)>)> = vec![(String::new(), vec![]); rows];
         let offset = content.display_offset as i32;
         for indexed in content.display_iter {
             let row = (indexed.point.line.0 + offset) as usize;
@@ -224,9 +226,6 @@ impl TerminalView {
                 continue;
             }
             let cell = indexed.cell;
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                continue;
-            }
             let (mut fg, mut bg) = (self.color(cell.fg), self.color(cell.bg));
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
@@ -234,12 +233,15 @@ impl TerminalView {
             let bg = (bg != self.bg).then_some(bg);
             let bold = cell.flags.contains(Flags::BOLD);
             let (text, runs) = &mut lines[row];
-            let c = if cell.c == '\0' { ' ' } else { cell.c };
+            let c = if cell.c == '\0' || cell.flags.contains(Flags::WIDE_CHAR_SPACER) { ' ' } else { cell.c };
             let len = c.len_utf8();
             text.push(c);
             match runs.last_mut() {
-                Some(last) if last.1 == fg && last.2 == bg && last.3 == bold => last.0 += len,
-                _ => runs.push((len, fg, bg, bold)),
+                Some(last) if last.2 == fg && last.3 == bg && last.4 == bold => {
+                    last.0 += len;
+                    last.1 += 1;
+                }
+                _ => runs.push((len, 1, fg, bg, bold)),
             }
         }
         lines
@@ -290,8 +292,8 @@ impl Render for TerminalView {
                         for (i, (text, runs)) in rows.iter().enumerate() {
                             let y = origin.y + line_height * i as f32;
                             let mut x = origin.x;
-                            for (len, _, bg, _) in runs.iter() {
-                                let n = *len as f32;
+                            for (_, cells, _, bg, _) in runs.iter() {
+                                let n = *cells as f32;
                                 if let Some(bg) = bg {
                                     window.paint_quad(fill(Bounds::new(point(x, y), size(cell_width * n, line_height)), *bg));
                                 }
@@ -304,7 +306,7 @@ impl Render for TerminalView {
                             let mut left = trimmed.len();
                             let text_runs: Vec<TextRun> = runs
                                 .iter()
-                                .filter_map(|(len, color, _, bold)| {
+                                .filter_map(|(len, _, color, _, bold)| {
                                     if left == 0 {
                                         return None;
                                     }

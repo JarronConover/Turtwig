@@ -42,6 +42,10 @@ fn describe(name: &str, input: &Value, summary: &str) -> (String, String, String
         "Agent" | "Task" => three("Delegating:", "Delegated:", "Delegation failed:", s("description"), "bot"),
         "TodoWrite" => ("Updating the plan".into(), "Updated the plan".into(), "Couldn't update the plan".into(), "list-todo"),
         "Skill" => three("Loading", "Loaded", "Couldn't load", format!("the {} skill", s("skill")), "sparkles"),
+        "AgentMessage" => {
+            let what = format!("Message from {}{}", s("from"), if summary.is_empty() { String::new() } else { format!(": {summary}") });
+            (what.clone(), what.clone(), what, "message-square")
+        }
         _ => {
             let label = name.trim_start_matches("mcp__").replace("__", " · ");
             let rest = if summary.is_empty() { label.clone() } else { format!("{label}: {summary}") };
@@ -271,6 +275,10 @@ impl Workspace {
 
     /** What a step did: an edit as -/+ lines, a command with its output, or the tool's result. */
     fn step_detail(&mut self, id: &str, name: &str, input: &Value, result: Option<&str>, is_error: bool, st: Styles, theme: &Map<String, Value>) -> Vec<AnyElement> {
+        if name == "AgentMessage" {
+            let body = self.markdown(&format!("{id}:msg"), result.unwrap_or(""), theme);
+            return vec![style::apply(div(), &st("agent_message"), theme).child(body).into_any_element()];
+        }
         let max_lines = self.settings.chat.get("step_detail_lines").and_then(Value::as_u64).unwrap_or(40) as usize;
         let c = |k: &str| style::color(&Value::from(format!("@{k}")), theme);
         let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("").to_string();
