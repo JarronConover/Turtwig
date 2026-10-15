@@ -103,14 +103,34 @@ fn rounded(x: f32, y: f32, side: f32, r: f32) -> Option<tiny_skia::Path> {
 /** Renders the logo as a `px`-square PNG. Keys: `art`, `ink` (replaces an SVG's `currentColor`; with
 `tint`, also recolors an image, keeping its transparency), `tile` (a color, or null for none), `corner` and `padding` (fractions of the tile's side), `margin` (fraction of the image). */
 pub fn png(spec: &Map<String, Value>, theme: &Map<String, Value>, px: u32) -> Option<Vec<u8>> {
-    let f = |k: &str, d: f32| spec.get(k).and_then(Value::as_f64).map(|v| v as f32).unwrap_or(d);
     let (mut svg, image) = art(spec.get("art").and_then(Value::as_str).unwrap_or("logo.png"));
     let ink = color(spec.get("ink"), theme);
     if let Some(ink) = &ink {
         svg = svg.replace("currentColor", ink);
     }
-    let tint = ink.as_deref().and_then(rgba).filter(|_| image && spec.get("tint").and_then(Value::as_bool) == Some(true));
     let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).ok()?;
+    // Image art drawn straight down to icon size skips most of its pixels and looks jagged: draw it
+    // large, then halve with smoothing until it's the size asked for.
+    let native = tree.size().width().min(tree.size().height()) as u32;
+    let mut factor = 1;
+    while image && px * factor * 2 <= native.min(2048) {
+        factor *= 2;
+    }
+    let mut pm = draw(spec, theme, px * factor, &tree, image, ink.as_deref())?;
+    while factor > 1 {
+        let half = pm.width() / 2;
+        let mut next = tiny_skia::Pixmap::new(half, half)?;
+        let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+        next.draw_pixmap(0, 0, pm.as_ref(), &paint, tiny_skia::Transform::from_scale(0.5, 0.5), None);
+        pm = next;
+        factor /= 2;
+    }
+    pm.encode_png().ok()
+}
+
+fn draw(spec: &Map<String, Value>, theme: &Map<String, Value>, px: u32, tree: &usvg::Tree, image: bool, ink: Option<&str>) -> Option<tiny_skia::Pixmap> {
+    let f = |k: &str, d: f32| spec.get(k).and_then(Value::as_f64).map(|v| v as f32).unwrap_or(d);
+    let tint = ink.and_then(rgba).filter(|_| image && spec.get("tint").and_then(Value::as_bool) == Some(true));
     let mut pm = tiny_skia::Pixmap::new(px, px)?;
     let size = px as f32;
     let margin = f("margin", 0.) * size;
@@ -136,7 +156,7 @@ pub fn png(spec: &Map<String, Value>, theme: &Map<String, Value>, px: u32) -> Op
     let scale = (inner.1 / ts.width()).min(inner.1 / ts.height());
     let (dx, dy) = (inner.0 + (inner.1 - ts.width() * scale) / 2., inner.0 + (inner.1 - ts.height() * scale) / 2.);
     let mut art = tiny_skia::Pixmap::new(px, px)?;
-    resvg::render(&tree, tiny_skia::Transform::from_row(scale, 0., 0., scale, dx, dy), &mut art.as_mut());
+    resvg::render(tree, tiny_skia::Transform::from_row(scale, 0., 0., scale, dx, dy), &mut art.as_mut());
     if let Some(c) = tint {
         let (r, g, b) = (c.red(), c.green(), c.blue());
         for p in art.pixels_mut() {
@@ -147,7 +167,7 @@ pub fn png(spec: &Map<String, Value>, theme: &Map<String, Value>, px: u32) -> Op
         }
     }
     pm.draw_pixmap(0, 0, art.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), clip.as_ref());
-    pm.encode_png().ok()
+    Some(pm)
 }
 
 thread_local! {

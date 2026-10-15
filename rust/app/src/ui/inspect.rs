@@ -9,6 +9,37 @@ use std::io::Write as _;
 
 const ACTIVITY_LINES: usize = 400;
 
+/** Recent frames: when each started, how long building the element tree took, and the whole frame. */
+#[derive(Default)]
+pub struct Perf {
+    frames: std::collections::VecDeque<(std::time::Instant, f32, f32)>,
+    pub spans: std::collections::BTreeMap<&'static str, f32>,
+}
+
+impl Perf {
+    pub fn record(&mut self, started: std::time::Instant, render: std::time::Duration) {
+        self.frames.push_back((started, render.as_secs_f32() * 1000., started.elapsed().as_secs_f32() * 1000.));
+        while self.frames.len() > 240 {
+            self.frames.pop_front();
+        }
+    }
+
+    pub fn summary(&self) -> Value {
+        let recent: Vec<_> = self.frames.iter().filter(|f| f.0.elapsed().as_secs_f32() < 2.).collect();
+        let avg = |k: fn(&(std::time::Instant, f32, f32)) -> f32| if recent.is_empty() { 0. } else { recent.iter().map(|f| k(f)).sum::<f32>() / recent.len() as f32 };
+        let last = self.frames.back();
+        json!({
+            "frames_per_sec": recent.len() as f32 / 2.,
+            "avg_render_ms": avg(|f| f.1),
+            "avg_frame_ms": avg(|f| f.2),
+            "max_frame_ms": recent.iter().map(|f| f.2).fold(0., f32::max),
+            "last_render_ms": last.map(|f| f.1),
+            "last_frame_ms": last.map(|f| f.2),
+            "spans_ms": self.spans,
+        })
+    }
+}
+
 impl Workspace {
     /** Rewrites inspect.json when what it describes changed (checked at most twice a second). */
     pub(crate) fn write_inspect(&mut self, ctx: &jaq_json::Val, window: &Window, cx: &App) {
@@ -23,6 +54,8 @@ impl Workspace {
         let doc = json!({
             "about": "The running app as of `at`: `context` is what settings expressions see; `layout` is where nodes with ids are (x, y, w, h in points); see SETTINGS.md.",
             "window": {"width": f32::from(size.width), "height": f32::from(size.height), "focused": self.focused, "number": window_number()},
+            "perf": self.perf.borrow().summary(),
+            "transcripts": self.lists.iter().map(|(chat, l)| (chat.clone(), json!({"following": l.state.is_following_tail(), "at_end": l.state.is_scrolled_to_end(), "rows": l.state.item_count(), "top": l.state.logical_scroll_top().item_ix, "kinds": l.kinds()}))).collect::<serde_json::Map<_, _>>(),
             "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
             "context": ctx,
             "clickable": self.clickables.iter().map(|(id, label, _)| json!({"id": id, "label": label})).collect::<Vec<_>>(),

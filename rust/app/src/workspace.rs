@@ -101,6 +101,15 @@ pub struct Workspace {
     pub(crate) drop_preview: bool,
     pub(crate) inspect_at: Option<std::time::Instant>,
     pub(crate) inspect_digest: u64,
+    pub(crate) perf: std::rc::Rc<std::cell::RefCell<crate::ui::inspect::Perf>>,
+    /** The redraw a looping animation (spinner, pulse) asked for, at `motion.animation_fps`. */
+    pub(crate) anim_tick: Option<Task<()>>,
+    pub(crate) anim_epoch: std::time::Instant,
+    /** Each chat's transcript list: only the rows on screen are built and laid out. */
+    pub(crate) lists: HashMap<String, TranscriptList>,
+    /** Virtual `scroll` nodes by id: list state, row keys, and each row's (node, context, path). */
+    #[allow(clippy::type_complexity)]
+    pub(crate) virtual_lists: HashMap<String, (ListState, Vec<String>, std::rc::Rc<Vec<(Value, jaq_json::Val, String)>>)>,
     pub(crate) activity: Vec<String>,
     /** What's clickable this frame: (node id, tooltip, action), for `ui.click` and inspect.json. */
     pub(crate) clickables: Vec<(String, String, Value)>,
@@ -244,6 +253,11 @@ impl Workspace {
             drop_preview: false,
             inspect_at: None,
             inspect_digest: 0,
+            perf: Default::default(),
+            anim_tick: None,
+            anim_epoch: std::time::Instant::now(),
+            lists: HashMap::new(),
+            virtual_lists: HashMap::new(),
             activity: vec![],
             clickables: vec![],
             scripts: None,
@@ -281,6 +295,9 @@ impl Workspace {
     /** Runs queued script messages, events, and actions now, so the app keeps working while its window
     is hidden and not rendering (agents drive it then too). */
     pub(crate) fn flush(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_script.is_empty() && self.pending_events.is_empty() && self.pending_actions.is_empty() {
+            return;
+        }
         for _ in 0..8 {
             if self.pending_script.is_empty() && self.pending_events.is_empty() && self.pending_actions.is_empty() {
                 break;
@@ -442,9 +459,6 @@ impl Workspace {
             }
             Out::Exited => self.designer.reset_process(),
         }
-        if let Some(h) = self.scroll_handles.get("designer") {
-            h.scroll_to_bottom();
-        }
         cx.notify();
     }
 
@@ -459,9 +473,7 @@ impl Workspace {
             let from = t.lines;
             t.append(from, &[json!({"type": "system", "level": "error", "content": e})]);
         }
-        if let Some(h) = self.scroll_handles.get("designer") {
-            h.scroll_to_bottom();
-        }
+        self.jump_to_latest(CHAT_ID);
         cx.notify();
     }
 
@@ -553,6 +565,9 @@ impl Workspace {
                 self.exprs = Exprs::default();
                 self.configure_motion();
                 self.load_scripts();
+                for l in self.lists.values() {
+                    l.state.remeasure();
+                }
                 self.pending_motion = true;
                 let ctx = self.context();
                 self.update_badge(&ctx);
@@ -735,11 +750,6 @@ impl Workspace {
             }
             Incoming::Event(Event::Transcript { chat_id, from, entries }) => {
                 self.transcripts.entry(chat_id.clone()).or_default().append(from, &entries);
-                if self.current_chat().map(|c| c.id == chat_id).unwrap_or(false) {
-                    if let Some(h) = self.scroll_handles.get("transcript") {
-                        h.scroll_to_bottom();
-                    }
-                }
             }
             Incoming::Event(Event::TermOutput { term_id, data }) => {
                 if let Some(t) = self.term_by_id.get(&(host.to_string(), term_id)).cloned() {
@@ -1067,9 +1077,6 @@ impl Workspace {
                         let start = v["from"].as_u64().unwrap_or(from as u64) as usize;
                         this.update(cx, |ws, cx| {
                             ws.transcripts.entry(id).or_default().append(start, &entries);
-                            if let Some(h) = ws.scroll_handles.get("transcript") {
-                                h.scroll_to_bottom();
-                            }
                             cx.notify();
                         })
                         .ok();
@@ -1259,6 +1266,7 @@ impl Workspace {
             let call = Call::ChatSend { chat_id: id.to_string(), text };
             self.route(&call).send(call);
         }
+        self.jump_to_latest(id);
         state.update(cx, |s, cx| s.set_value("", window, cx));
         cx.notify();
     }
@@ -1500,7 +1508,7 @@ impl Workspace {
 
     // ---------- built-in composites ----------
 
-    pub(crate) fn transcript_view(&mut self, chat: Option<String>, props: &Map<String, Value>, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn transcript_view(&mut self, chat: Option<String>, props: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.settings.theme.clone();
         let cs = self.settings.chat.clone();
         let st = |k: &str| match cs.get(k) {
@@ -1508,30 +1516,18 @@ impl Workspace {
             _ => Map::new(),
         };
         let designer = chat.as_deref() == Some(crate::designer::CHAT_ID);
-        let items = chat.as_ref().and_then(|id| self.transcripts.get(id)).map(|t| t.items.clone()).unwrap_or_default();
-        let Some(chat_id) = chat.filter(|id| self.chat(id).is_some() || (designer && !items.is_empty())) else {
+        let has_items = chat.as_ref().and_then(|id| self.transcripts.get(id)).is_some_and(|t| !t.items.is_empty());
+        let Some(chat_id) = chat.filter(|id| self.chat(id).is_some() || (designer && has_items)) else {
             let empty = props.get("empty").map(value_text).unwrap_or_else(|| "No chat here yet.".into());
             let overlay = if designer { self.drop_overlay(crate::designer::CHAT_ID, cx) } else { None };
             return div().relative().size_full().flex().items_center().justify_center().child(style::apply(div(), &st("empty"), &theme).child(empty)).children(overlay).into_any_element();
         };
         let working = if designer { self.designer.working } else { self.chat(&chat_id).map(|c| c.state == "working").unwrap_or(false) };
-        let list = style::apply(v_flex(), &st("list"), &theme).children(self.render_items(&chat_id, &items, working, cx));
-        let handle_key = if designer { "designer" } else { "transcript" };
-        let fresh = !self.scroll_handles.contains_key(handle_key);
-        let handle = self.scroll_handles.entry(handle_key.into()).or_default().clone();
-        if fresh {
-            handle.scroll_to_bottom();
-        }
+        let state = self.sync_list(&chat_id, working);
+        let row_view = chat_id.clone();
+        let rows = list(state.clone(), cx.processor(move |ws: &mut Workspace, ix: usize, _, cx| ws.transcript_row(&row_view, ix, cx))).size_full();
+        let jump = self.jump_chip(&chat_id, &state, &theme, window, cx);
         let overlay = self.drop_overlay(&chat_id, cx);
-        let scroll = div()
-            .id(SharedString::from(format!("transcript:{chat_id}")))
-            .size_full()
-            .flex()
-            .flex_col()
-            .overflow_y_scroll()
-            .restrict_scroll_to_axis()
-            .track_scroll(&handle)
-            .child(list);
         let shift_holds = cs.get("code_scroll").and_then(|c| c.get("shift_holds_transcript")).and_then(Value::as_bool) != Some(false);
         // Files dropped anywhere on the transcript attach to its chat, whether or not the overlay that
         // names the chat has rendered yet.
@@ -1545,10 +1541,120 @@ impl Workspace {
                 let chat = drop_chat.clone();
                 let _ = drop_view.update(cx, |ws, cx| ws.attach(chat, files, window, cx));
             })
-            .child(scroll)
+            .child(rows)
             .when(shift_holds, |d| d.child(crate::ui::trace_view::shift_scroll_layer(None, 1.)))
+            .children(jump)
             .children(overlay)
             .into_any_element()
+    }
+
+    /** `chat.follow`: "at_bottom" (stay at the newest message while you're there), "always", or "never". */
+    fn follow_mode(&self) -> String {
+        self.settings.chat.get("follow").and_then(Value::as_str).unwrap_or("at_bottom").to_string()
+    }
+
+    /** Brings a chat's list up to date with its transcript: rows are re-grouped when it changes, and the last
+    two are measured again (they're the ones that grow). */
+    fn sync_list(&mut self, chat_id: &str, working: bool) -> ListState {
+        let follow = self.follow_mode();
+        let (rev, len) = self.transcripts.get(chat_id).map(|t| (t.revision, t.items.len())).unwrap_or((0, 0));
+        let l = self.lists.entry(chat_id.to_string()).or_insert_with(|| {
+            let state = ListState::new(0, ListAlignment::Top, px(800.));
+            if follow != "never" {
+                state.set_follow_mode(FollowMode::Tail);
+            }
+            TranscriptList { state, blocks: Default::default(), rev: u64::MAX, working: false, items: 0, unseen: false }
+        });
+        if l.rev != rev || l.working != working {
+            let Some(t) = self.transcripts.get(chat_id) else { return l.state.clone() };
+            let blocks = crate::ui::trace_view::blocks_of(&t.items, working);
+            let (old, new) = (l.blocks.len(), blocks.len());
+            if len >= l.items && l.rev != u64::MAX {
+                let keep = old.saturating_sub(2).min(new);
+                l.state.splice(keep..old, new - keep);
+            } else {
+                l.state.reset(new);
+                if follow != "never" {
+                    l.state.set_follow_mode(FollowMode::Tail);
+                }
+            }
+            let grew = l.rev != u64::MAX && len > l.items;
+            if grew && !l.state.is_following_tail() {
+                l.unseen = true;
+            }
+            if follow == "always" && grew {
+                l.state.set_follow_mode(FollowMode::Tail);
+            }
+            l.blocks = std::rc::Rc::new(blocks);
+            (l.rev, l.working, l.items) = (rev, working, len);
+        }
+        if l.state.is_following_tail() {
+            l.unseen = false;
+        }
+        l.state.clone()
+    }
+
+    fn transcript_row(&mut self, chat_id: &str, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some((blocks, working)) = self.lists.get(chat_id).map(|l| (l.blocks.clone(), l.working)) else { return div().into_any_element() };
+        let Some(t) = self.transcripts.remove(chat_id) else { return div().into_any_element() };
+        let row = self.render_block(chat_id, &t.items, &blocks, ix, working, cx);
+        self.transcripts.insert(chat_id.to_string(), t);
+        // `chat.list` styles the column the rows sit in: its gap goes between rows, its padding around them.
+        let mut ls = self.settings.chat.get("list").and_then(Value::as_object).cloned().unwrap_or_default();
+        let gap = ls.remove("gap").and_then(|g| g.as_f64()).unwrap_or(0.);
+        let [top, right, bottom, left] = ls.remove("padding").and_then(|p| style::edges(&p)).unwrap_or_default();
+        let last = ix + 1 == blocks.len();
+        ls.insert("padding".into(), json!([if ix == 0 { top as f64 } else { gap }, right, if last { bottom } else { 0. }, left]));
+        let inner = style::apply(v_flex(), &ls, &self.settings.theme).children(row);
+        div().w_full().flex().flex_col().child(inner).into_any_element()
+    }
+
+    /** Scrolls a chat to its newest message and keeps it there (unless `chat.follow` is "never"). */
+    pub(crate) fn jump_to_latest(&mut self, chat_id: &str) {
+        let never = self.follow_mode() == "never";
+        if let Some(l) = self.lists.get_mut(chat_id) {
+            if never {
+                l.state.scroll_to_end();
+            } else {
+                l.state.set_follow_mode(FollowMode::Tail);
+            }
+            l.unseen = false;
+        }
+    }
+
+    /** The chip over a transcript scrolled up from the bottom: "New messages" once more arrive, and a click
+    jumps to the newest. Look: settings `chat.jump`; `chat.jump_labels` {new, latest}; false hides it. */
+    fn jump_chip(&mut self, chat_id: &str, state: &ListState, theme: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.settings.chat.get("jump").and_then(Value::as_bool) == Some(false) {
+            return None;
+        }
+        let unseen = self.lists.get(chat_id).is_some_and(|l| l.unseen);
+        let away = !state.is_following_tail() && state.is_scrolled_to_end() != Some(true) && state.item_count() > 0;
+        if away {
+            // Layout picks following back up when the view is at the bottom (or everything fits); redraw then.
+            let (s, view) = (state.clone(), cx.entity().downgrade());
+            window.on_next_frame(move |_, cx| {
+                if s.is_following_tail() {
+                    let _ = view.update(cx, |_, cx| cx.notify());
+                }
+            });
+        }
+        if !away && !unseen {
+            return None;
+        }
+        let labels = self.settings.chat.get("jump_labels").cloned().unwrap_or(Value::Null);
+        let label = |k: &str, d: &str| labels.get(k).and_then(Value::as_str).unwrap_or(d).to_string();
+        let text = if unseen { label("new", "New messages") } else { label("latest", "Jump to latest") };
+        let st = self.settings.chat.get("jump").and_then(Value::as_object).cloned().unwrap_or_default();
+        let id = chat_id.to_string();
+        let chip = style::apply(h_flex().id(SharedString::from(format!("jump:{chat_id}"))).gap(px(6.)).items_center().cursor_pointer(), &st, theme)
+            .child(gpui_kit::component::Icon::empty().path("icons/arrow-down.svg").size(px(13.)))
+            .child(text)
+            .on_click(cx.listener(move |ws, _, _, cx| {
+                ws.jump_to_latest(&id);
+                cx.notify();
+            }));
+        Some(div().absolute().bottom(px(14.)).left_0().right_0().flex().justify_center().child(chip).into_any_element())
     }
 
     pub(crate) fn composer_view(&mut self, chat: Option<String>, props: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1739,8 +1845,11 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = std::time::Instant::now();
         self.register_terminals(cx);
+        let t = std::time::Instant::now();
         self.flush(window, cx);
+        self.perf.borrow_mut().spans.insert("flush", t.elapsed().as_secs_f32() * 1000.);
         self.render_generation += 1;
         self.clickables.clear();
         let generation = self.render_generation;
@@ -1765,11 +1874,20 @@ impl Render for Workspace {
             self.drop_hint = None;
         }
         self.focused = window.is_window_active();
+        let t = std::time::Instant::now();
         let ctx = self.context();
+        self.perf.borrow_mut().spans.insert("context", t.elapsed().as_secs_f32() * 1000.);
         self.view_handle = Some(cx.entity().downgrade());
+        let t = std::time::Instant::now();
         let body = self.render_view("main", &ctx, window, cx);
+        self.perf.borrow_mut().spans.insert("tree", t.elapsed().as_secs_f32() * 1000.);
+        let t = std::time::Instant::now();
         self.write_inspect(&ctx, window, cx);
+        self.perf.borrow_mut().spans.insert("inspect", t.elapsed().as_secs_f32() * 1000.);
         self.write_problems();
+        let rendered = started.elapsed();
+        let perf = self.perf.clone();
+        let frame_end = canvas(|_, _, _| {}, move |_, _, _, _| perf.borrow_mut().record(started, rendered)).absolute().size_0();
         let theme = self.settings.theme.clone();
         let bg = style::color(&Value::from("@window"), &theme).unwrap_or(parse_color("#212122"));
         let fg = style::color(&Value::from("@text"), &theme).unwrap_or(parse_color("#f5f5f7"));
@@ -1802,6 +1920,7 @@ impl Render for Workspace {
                 }
             }))
             .child(body)
+            .child(frame_end)
     }
 }
 
@@ -1863,6 +1982,23 @@ fn age_text(ts: Option<f64>) -> String {
 
 fn load_state() -> Map<String, Value> {
     std::fs::read_to_string(settings::dir().join("ui-state.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+impl TranscriptList {
+    pub(crate) fn kinds(&self) -> Vec<String> {
+        use crate::ui::trace_view::Block;
+        self.blocks.iter().map(|b| match b { Block::One(i) => format!("one:{i}"), Block::Steps(v) => format!("steps:{}", v.len()), Block::Pending(t) => t.to_string() }).collect()
+    }
+}
+
+pub(crate) struct TranscriptList {
+    pub(crate) state: ListState,
+    blocks: std::rc::Rc<Vec<crate::ui::trace_view::Block>>,
+    rev: u64,
+    working: bool,
+    items: usize,
+    /** New messages came in while scrolled up. */
+    unseen: bool,
 }
 
 pub enum Attachment {

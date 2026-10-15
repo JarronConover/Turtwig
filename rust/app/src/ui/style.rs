@@ -83,7 +83,7 @@ fn inset(v: &Value) -> Option<Length> {
     }
 }
 
-fn edges(v: &Value) -> Option<[f32; 4]> {
+pub(crate) fn edges(v: &Value) -> Option<[f32; 4]> {
     match v {
         Value::Number(n) => {
             let x = n.as_f64()? as f32;

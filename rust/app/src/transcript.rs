@@ -20,6 +20,8 @@ pub struct Transcript {
     pub lines: usize,
     pub items: Vec<Item>,
     tool_index: HashMap<String, usize>,
+    /** How the newest compaction started ("auto" or "manual"), from its boundary line. */
+    compact_trigger: Option<String>,
     /** Bumped on every change so views can tell new content from a re-render. */
     pub revision: u64,
 }
@@ -60,6 +62,25 @@ impl Transcript {
             return;
         }
         let content = &e["message"]["content"];
+        if kind == "system" && e.get("subtype").and_then(Value::as_str) == Some("compact_boundary") {
+            self.compact_trigger = e["compactMetadata"]["trigger"].as_str().map(str::to_string);
+            return;
+        }
+        // The summary Claude Code writes when it compacts: a collapsed step, not something you typed.
+        if kind == "user" && e.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
+            let text = content.as_str().map(str::to_string).unwrap_or_else(|| {
+                content.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n")
+            });
+            self.items.push(Item::Tool {
+                id: format!("compact:{}", self.lines),
+                name: "Compaction".into(),
+                summary: String::new(),
+                input: serde_json::json!({ "trigger": self.compact_trigger.take() }),
+                result: Some(text),
+                is_error: false,
+            });
+            return;
+        }
         match kind {
             "user" => {
                 if let Some(text) = content.as_str() {
@@ -263,5 +284,31 @@ mod agent_message_tests {
         assert_eq!(m[0], ("box-migrate".to_string(), "Done".to_string(), "All good.".to_string()));
         assert_eq!(m[1].1, "idle notification");
         assert_eq!(m[1].2, "Idle now");
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::{Item, Transcript};
+    use serde_json::json;
+
+    #[test]
+    fn a_compaction_summary_is_a_step_not_a_user_message() {
+        let mut t = Transcript::default();
+        t.append(0, &[
+            json!({"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted", "compactMetadata": {"trigger": "auto"}}),
+            json!({"type": "user", "isCompactSummary": true, "message": {"role": "user", "content": "This session is being continued…\n\nSummary: x"}}),
+            json!({"type": "user", "message": {"role": "user", "content": "next question"}}),
+        ]);
+        assert_eq!(t.items.len(), 2);
+        match &t.items[0] {
+            Item::Tool { name, input, result, .. } => {
+                assert_eq!(name, "Compaction");
+                assert_eq!(input["trigger"], "auto");
+                assert!(result.as_deref().unwrap_or("").contains("Summary: x"));
+            }
+            other => panic!("expected a step, got {other:?}"),
+        }
+        assert!(matches!(&t.items[1], Item::User { text } if text == "next question"));
     }
 }

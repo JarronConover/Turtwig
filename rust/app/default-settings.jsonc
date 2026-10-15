@@ -71,7 +71,9 @@
     "enabled": true,
     "move": { "duration": 320, "easing": "spring" },
     "enter": { "from": { "opacity": 0, "y": 8 }, "duration": 260 },
-    "style": { "duration": 180 }
+    "style": { "duration": 180 },
+    // How often spinners and pulsing lines redraw (each redraw repaints the window). 0 holds them still.
+    "animation_fps": 30
   },
 
   "state": {
@@ -128,7 +130,7 @@
             {
               "id": "sidebar-list",
               "type": "scroll",
-              "props": { "handle": "sidebar" },
+              "props": { "virtual": true },
               "style": { "grow": 1, "min_height": 0, "padding": [0, 6, 10, 6] },
               "children": [
                 {
@@ -1241,6 +1243,11 @@
     "composer_drop": { "border_color": "@accent", "background": "#488efc26" },
     "code_scroll": { "shift": true, "speed": 1, "shift_holds_transcript": true, "scrollbar": "hover" },
     "list": { "gap": 22, "padding": [20, 28], "width": "full", "max_width": 780, "self": "center" },
+    // New messages: "at_bottom" keeps you at the newest while you're there (scroll up and it stays put),
+    // "always" jumps to each one, "never" doesn't move. Scrolled up, a chip offers to jump down (false hides it).
+    "follow": "at_bottom",
+    "jump": { "padding": [5, 12], "radius": 14, "background": "@pill", "border": 1, "border_color": "@line", "font_size": 12.5, "color": "@text", "hover": { "background": "@pill_hover" }, "shadow": "md" },
+    "jump_labels": { "new": "New messages", "latest": "Jump to latest" },
     "user": { "max_width": "80%", "padding": [8, 14], "radius": 16, "background": "@user_bubble", "font_size": 14, "line_height": 1.5, "gap": 6 },
     "assistant": { "font_size": 14, "line_height": 1.6 },
     "trace": { "gap": 8 },

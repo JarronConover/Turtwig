@@ -83,6 +83,30 @@ impl Exprs {
         }
     }
 
+    /** Like `resolve`, straight to a context value: a whole-string template keeps its value as computed,
+    without a round trip through JSON. */
+    pub fn resolve_val(&self, v: &Value, input: &Val) -> Val {
+        match v {
+            Value::String(s) if s.contains("{{") => {
+                let t = s.trim();
+                if t.starts_with("{{") && t.ends_with("}}") && t[2..].find("{{").is_none() {
+                    self.first(t[2..t.len() - 2].trim(), input)
+                } else {
+                    to_val(&self.template(s, input))
+                }
+            }
+            Value::Array(a) => Val::Arr(Rc::new(a.iter().map(|x| self.resolve_val(x, input)).collect())),
+            Value::Object(o) => {
+                let mut map = jaq_json::Map::default();
+                for (k, x) in o {
+                    map.insert(Val::from(k.clone()), if k == "then" { to_val(x) } else { self.resolve_val(x, input) });
+                }
+                Val::obj(map)
+            }
+            other => to_val(other),
+        }
+    }
+
     /** Actions resolve like any value; a `then` (anywhere) is left for later, when its input exists. */
     pub fn resolve_action(&self, v: &Value, input: &Val) -> Value {
         self.resolve(v, input)

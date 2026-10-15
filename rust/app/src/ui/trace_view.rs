@@ -9,11 +9,31 @@ use gpui_kit::component::{h_flex, v_flex, Icon};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Map, Value};
-use std::time::Duration;
 
-enum Block {
+/** One row of the transcript list: a message, a run of steps, or the "Thinking"/"Working" line. */
+pub(crate) enum Block {
     One(usize),
     Steps(Vec<usize>),
+    Pending(&'static str),
+}
+
+/** Groups items into rows: each run of thinking and tool calls is one row. */
+pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
+    let mut blocks: Vec<Block> = vec![];
+    for (i, item) in items.iter().enumerate() {
+        let step = matches!(item, Item::Tool { .. } | Item::Thinking { .. });
+        match (step, blocks.last_mut()) {
+            (true, Some(Block::Steps(v))) => v.push(i),
+            (true, _) => blocks.push(Block::Steps(vec![i])),
+            (false, _) => blocks.push(Block::One(i)),
+        }
+    }
+    let last_is_steps = matches!(blocks.last(), Some(Block::Steps(_)));
+    let tail_running = items.last().is_some_and(|i| matches!(i, Item::Tool { result: None, .. }));
+    if working && !(last_is_steps && tail_running) {
+        blocks.push(Block::Pending(if last_is_steps { "Working" } else { "Thinking" }));
+    }
+    blocks
 }
 
 /** (running, done, failed) titles and an icon for a tool call. */
@@ -42,6 +62,10 @@ fn describe(name: &str, input: &Value, summary: &str) -> (String, String, String
         "Agent" | "Task" => three("Delegating:", "Delegated:", "Delegation failed:", s("description"), "bot"),
         "TodoWrite" => ("Updating the plan".into(), "Updated the plan".into(), "Couldn't update the plan".into(), "list-todo"),
         "Skill" => three("Loading", "Loaded", "Couldn't load", format!("the {} skill", s("skill")), "sparkles"),
+        "Compaction" => {
+            let what = if input.get("trigger").and_then(Value::as_str) == Some("manual") { "Compacted the conversation" } else { "Compacted the conversation automatically" };
+            (what.to_string(), what.to_string(), what.to_string(), "fold-vertical")
+        }
         "AgentMessage" => {
             let what = format!("Message from {}{}", s("from"), if summary.is_empty() { String::new() } else { format!(": {summary}") });
             (what.clone(), what.clone(), what, "message-square")
@@ -65,7 +89,8 @@ fn upper_first(s: &str) -> String {
 type Styles<'a> = &'a dyn Fn(&str) -> Map<String, Value>;
 
 impl Workspace {
-    pub(crate) fn render_items(&mut self, chat_id: &str, items: &[Item], working: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /** Row `bi` of a chat's transcript. */
+    pub(crate) fn render_block(&mut self, chat_id: &str, items: &[Item], blocks: &[Block], bi: usize, working: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = self.settings.theme.clone();
         let cs = self.settings.chat.clone();
         let st = |k: &str| match cs.get(k) {
@@ -73,64 +98,43 @@ impl Workspace {
             _ => Map::new(),
         };
         let fold_after = cs.get("fold_steps_after").and_then(Value::as_u64).unwrap_or(5).max(1) as usize;
-
-        let mut blocks: Vec<Block> = vec![];
-        for (i, item) in items.iter().enumerate() {
-            let step = matches!(item, Item::Tool { .. } | Item::Thinking { .. });
-            match (step, blocks.last_mut()) {
-                (true, Some(Block::Steps(v))) => v.push(i),
-                (true, _) => blocks.push(Block::Steps(vec![i])),
-                (false, _) => blocks.push(Block::One(i)),
+        let n = blocks.len() - usize::from(matches!(blocks.last(), Some(Block::Pending(_))));
+        match blocks.get(bi)? {
+            Block::One(i) => self.render_message(chat_id, *i, &items[*i], &st, &theme),
+            Block::Pending(title) => {
+                let key = format!("{chat_id}:pending");
+                let line = self.trace_line(&key, "brain", title, true, false, false, false, vec![], &st, &theme, cx);
+                Some(style::apply(v_flex(), &st("trace"), &theme).child(line).into_any_element())
             }
-        }
-        let last_is_steps = matches!(blocks.last(), Some(Block::Steps(_)));
-        let mut out = vec![];
-        let n = blocks.len();
-        for (bi, block) in blocks.into_iter().enumerate() {
-            match block {
-                Block::One(i) => {
-                    if let Some(el) = self.render_message(chat_id, i, &items[i], &st, &theme) {
-                        out.push(el);
-                    }
-                }
-                Block::Steps(steps) => {
-                    let active = working && bi + 1 == n;
-                    let mut trace = style::apply(v_flex(), &st("trace"), &theme);
-                    let key = format!("{chat_id}:run:{}", steps[0]);
-                    let folded = steps.len() > fold_after;
-                    let plural = |n: usize| if n == 1 { "" } else { "s" };
-                    if folded && !active {
+            Block::Steps(steps) => {
+                let active = working && bi + 1 == n;
+                let mut trace = style::apply(v_flex(), &st("trace"), &theme);
+                let key = format!("{chat_id}:run:{}", steps[0]);
+                let folded = steps.len() > fold_after;
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                if folded && !active {
+                    let open = self.expanded_tools.contains(&key);
+                    let tools = steps.iter().filter(|i| matches!(items[**i], Item::Tool { .. })).count();
+                    let errors = steps.iter().filter(|i| matches!(items[**i], Item::Tool { is_error: true, .. })).count();
+                    let failed = if errors > 0 { format!(", {errors} failed") } else { String::new() };
+                    let title = format!("{tools} step{}{failed}", plural(tools));
+                    let lines = if open { steps.iter().map(|&i| self.render_step(chat_id, i, &items[i], false, &st, &theme, cx)).collect() } else { vec![] };
+                    trace = trace.child(self.trace_line(&key, "list-checks", &title, false, false, true, open, lines, &st, &theme, cx));
+                } else {
+                    let hidden = if active && folded { steps.len() - fold_after } else { 0 };
+                    if hidden > 0 {
                         let open = self.expanded_tools.contains(&key);
-                        let tools = steps.iter().filter(|i| matches!(items[**i], Item::Tool { .. })).count();
-                        let errors = steps.iter().filter(|i| matches!(items[**i], Item::Tool { is_error: true, .. })).count();
-                        let failed = if errors > 0 { format!(", {errors} failed") } else { String::new() };
-                        let title = format!("{tools} step{}{failed}", plural(tools));
-                        let lines = if open { steps.iter().map(|&i| self.render_step(chat_id, i, &items[i], false, &st, &theme, cx)).collect() } else { vec![] };
-                        trace = trace.child(self.trace_line(&key, "list-checks", &title, false, false, true, open, lines, &st, &theme, cx));
-                    } else {
-                        let hidden = if active && folded { steps.len() - fold_after } else { 0 };
-                        if hidden > 0 {
-                            let open = self.expanded_tools.contains(&key);
-                            let lines = if open { steps[..hidden].iter().map(|&i| self.render_step(chat_id, i, &items[i], false, &st, &theme, cx)).collect() } else { vec![] };
-                            trace = trace.child(self.trace_line(&key, "list-checks", &format!("{hidden} earlier step{}", plural(hidden)), false, false, true, open, lines, &st, &theme, cx));
-                        }
-                        let last = *steps.last().unwrap_or(&0);
-                        for &i in &steps[hidden..] {
-                            trace = trace.child(self.render_step(chat_id, i, &items[i], active && i == last, &st, &theme, cx));
-                        }
+                        let lines = if open { steps[..hidden].iter().map(|&i| self.render_step(chat_id, i, &items[i], false, &st, &theme, cx)).collect() } else { vec![] };
+                        trace = trace.child(self.trace_line(&key, "list-checks", &format!("{hidden} earlier step{}", plural(hidden)), false, false, true, open, lines, &st, &theme, cx));
                     }
-                    out.push(trace.into_any_element());
+                    let last = *steps.last().unwrap_or(&0);
+                    for &i in &steps[hidden..] {
+                        trace = trace.child(self.render_step(chat_id, i, &items[i], active && i == last, &st, &theme, cx));
+                    }
                 }
+                Some(trace.into_any_element())
             }
         }
-        let tail_running = items.last().is_some_and(|i| matches!(i, Item::Tool { result: None, .. }));
-        if working && !(last_is_steps && tail_running) {
-            let key = format!("{chat_id}:pending");
-            let title = if last_is_steps { "Working" } else { "Thinking" };
-            let line = self.trace_line(&key, "brain", title, true, false, false, false, vec![], &st, &theme, cx);
-            out.push(style::apply(v_flex(), &st("trace"), &theme).child(line).into_any_element());
-        }
-        out
     }
 
     fn render_message(&mut self, chat_id: &str, i: usize, item: &Item, st: Styles, theme: &Map<String, Value>) -> Option<AnyElement> {
@@ -275,7 +279,7 @@ impl Workspace {
 
     /** What a step did: an edit as -/+ lines, a command with its output, or the tool's result. */
     fn step_detail(&mut self, id: &str, name: &str, input: &Value, result: Option<&str>, is_error: bool, st: Styles, theme: &Map<String, Value>) -> Vec<AnyElement> {
-        if name == "AgentMessage" {
+        if name == "AgentMessage" || name == "Compaction" {
             let body = self.markdown(&format!("{id}:msg"), result.unwrap_or(""), theme);
             return vec![style::apply(div(), &st("agent_message"), theme).child(body).into_any_element()];
         }
@@ -369,8 +373,8 @@ impl Workspace {
         let icon_el = Icon::empty().path(format!("icons/{icon}.svg")).size(px(14.)).when_some(fg, |i, c| i.text_color(c));
         let title_el = div().min_w_0().truncate().child(title.to_string());
         let title_el: AnyElement = if running && self.motion.borrow().enabled {
-            let anim = Animation::new(Duration::from_millis(1400)).repeat().with_easing(pulsating_between(0.35, 1.));
-            title_el.with_animation(SharedString::from(format!("{key}:shimmer")), anim, |d, t| d.opacity(t)).into_any_element()
+            let t = self.anim_phase(1400., cx);
+            title_el.opacity(pulsating_between(0.35, 1.)(t)).into_any_element()
         } else {
             title_el.into_any_element()
         };
@@ -433,4 +437,25 @@ pub fn shift_scroll_layer(handle: Option<ScrollHandle>, speed: f32) -> impl Into
     .size_full()
     .top_0()
     .left_0()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{blocks_of, Block};
+    use crate::transcript::Item;
+
+    fn tool(done: bool) -> Item {
+        Item::Tool { id: "t".into(), name: "Bash".into(), summary: String::new(), input: serde_json::Value::Null, result: done.then(String::new), is_error: false }
+    }
+
+    #[test]
+    fn groups_steps_and_adds_the_working_line() {
+        let items = vec![Item::User { text: "hi".into() }, tool(true), tool(true), Item::Assistant { text: "ok".into() }, tool(true)];
+        let b = blocks_of(&items, true);
+        assert!(matches!(b.as_slice(), [Block::One(0), Block::Steps(s), Block::One(3), Block::Steps(_), Block::Pending("Working")] if s.len() == 2));
+        assert!(matches!(blocks_of(&items[..4], true).last(), Some(Block::Pending("Thinking"))));
+        let running = vec![Item::User { text: "hi".into() }, tool(false)];
+        assert!(matches!(blocks_of(&running, true).last(), Some(Block::Steps(_))), "a running tool shows its own progress");
+        assert!(!blocks_of(&items, false).iter().any(|b| matches!(b, Block::Pending(_))));
+    }
 }

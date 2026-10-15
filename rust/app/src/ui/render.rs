@@ -5,7 +5,6 @@ use super::expr::{to_json, to_val, with};
 use super::style;
 use crate::workspace::Workspace;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::*;
@@ -38,7 +37,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("row", "Children side by side."),
     ("column", "Children stacked."),
     ("stack", "Children layered on top of each other (later children on top); position them with `style.position: absolute`."),
-    ("scroll", "A scrolling container. `props.axis`: y (default) | x | both."),
+    ("scroll", "A scrolling container. `props.axis`: y (default) | x | both. `props.virtual`: true builds only the children on screen (each `for` item is one row), for long lists."),
     ("text", "Text. `props.text` (templates allowed); a plain string node is shorthand for this."),
     ("icon", "A Lucide icon. `props.name` (e.g. git-branch, panel-left, plus), `props.size` (points), `props.spin` (bool)."),
     ("logo", "The app's logo (settings `logo`) at `props.size` (24). Any `logo` key in props overrides it for this node, e.g. `{\"tile\": null}` for bare art."),
@@ -58,6 +57,42 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
 ];
 
 impl Workspace {
+    /** Where a looping animation of `period_ms` is now (0..1). Looping animations redraw at
+    `motion.animation_fps` (0: they hold still) instead of every display frame, since a frame redraws the whole window. */
+    pub(crate) fn anim_phase(&mut self, period_ms: f32, cx: &mut Context<Self>) -> f32 {
+        let fps = self.settings.motion.get("animation_fps").and_then(Value::as_f64).unwrap_or(30.);
+        if fps <= 0. {
+            return 0.;
+        }
+        if self.anim_tick.is_none() {
+            let wait = Duration::from_secs_f64(1. / fps.min(240.));
+            self.anim_tick = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |ws, cx| {
+                    ws.anim_tick = None;
+                    cx.notify();
+                });
+            }));
+        }
+        (self.anim_epoch.elapsed().as_secs_f32() * 1000. % period_ms) / period_ms
+    }
+
+    pub(crate) fn spinner(&mut self, size: Option<&str>, color: Option<Hsla>, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.anim_phase(800., cx);
+        let icon = Icon::new(gpui_kit::component::IconName::Loader);
+        let icon = match size {
+            Some("xsmall") => icon.xsmall(),
+            Some("small") => icon.small(),
+            Some("large") => icon.large(),
+            _ => icon,
+        };
+        let icon = match color {
+            Some(c) => icon.text_color(c),
+            None => icon,
+        };
+        div().child(icon.rotate(percentage(ease_in_out(t)))).into_any_element()
+    }
+
     pub(crate) fn render_view(&mut self, name: &str, ctx: &Val, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(node) = self.settings.views.get(name).cloned() else {
             return div().child(format!("No view named `{name}` in settings.views")).into_any_element();
@@ -107,8 +142,8 @@ impl Workspace {
         }
         let kind = obj.get("type").and_then(Value::as_str).unwrap_or("box").to_string();
         if let Some(comp) = self.settings.components.get(&kind).cloned() {
-            let props = self.exprs.resolve(obj.get("props").unwrap_or(&Value::Null), ctx);
-            let c = with(ctx, vec![("props".into(), to_val(&props))]);
+            let props = self.exprs.resolve_val(obj.get("props").unwrap_or(&Value::Null), ctx);
+            let c = with(ctx, vec![("props".into(), props)]);
             let mut comp = comp;
             if let Value::Object(base) = &mut comp {
                 if let Some(Value::Object(extra)) = obj.get("style") {
@@ -178,11 +213,8 @@ impl Workspace {
                     icon = icon.text_color(c);
                 }
                 if props.get("spin").and_then(Value::as_bool) == Some(true) {
-                    vec![icon
-                        .with_animation(SharedString::from(format!("{id}:spin")), Animation::new(Duration::from_millis(900)).repeat(), |i, d| {
-                            i.rotate(percentage(d))
-                        })
-                        .into_any_element()]
+                    let t = self.anim_phase(900., cx);
+                    vec![icon.rotate(percentage(t)).into_any_element()]
                 } else {
                     vec![icon.into_any_element()]
                 }
@@ -223,18 +255,8 @@ impl Workspace {
                 vec![Input::new(&entity).appearance(props.get("appearance").and_then(Value::as_bool).unwrap_or(true)).into_any_element()]
             }
             "spinner" => {
-                let s = Spinner::new();
-                let s = match props.get("size").and_then(Value::as_str) {
-                    Some("xsmall") => s.xsmall(),
-                    Some("small") => s.small(),
-                    Some("large") => s.large(),
-                    _ => s,
-                };
-                let s = match props.get("color").and_then(|c| style::color(c, &theme)) {
-                    Some(c) => s.color(c),
-                    None => s,
-                };
-                vec![s.into_any_element()]
+                let color = props.get("color").and_then(|c| style::color(c, &theme));
+                vec![self.spinner(props.get("size").and_then(Value::as_str), color, cx)]
             }
             "markdown" => {
                 let text = value_text(props.get("text").unwrap_or(&Value::Null));
@@ -266,10 +288,13 @@ impl Workspace {
             "scroll" => vec![],
             _ => vec![],
         };
-        let kids = children(self, window, cx);
+        let virtual_list = kind == "scroll" && props.get("virtual").and_then(Value::as_bool) == Some(true);
+        let kids = if virtual_list { vec![self.virtual_list(obj, ctx, path, &id, cx)] } else { children(self, window, cx) };
 
         let mut el = el.id(SharedString::from(id.clone()));
-        if kind == "scroll" {
+        if virtual_list {
+            el = el.overflow_hidden();
+        } else if kind == "scroll" {
             el = match props.get("axis").and_then(Value::as_str) {
                 Some("x") => el.overflow_x_scroll(),
                 Some("both") => el.overflow_scroll(),
@@ -461,9 +486,11 @@ impl Workspace {
             el = el.occlude();
         }
         let el: AnyElement = if let Some(Value::Array(menu)) = obj.get("menu") {
-            let entries = self.menu_entries(menu, ctx);
+            // Entries are worked out when the menu opens, not on every frame.
+            let (spec, menu_ctx) = (menu.clone(), ctx.clone());
             let view = cx.entity();
-            el.context_menu(move |menu, window, _| {
+            el.context_menu(move |menu, window, cx| {
+                let entries = view.read(cx).menu_entries(&spec, &menu_ctx);
                 let mut m = menu;
                 for (label, action, sep) in entries.iter() {
                     if *sep {
@@ -488,6 +515,58 @@ impl Workspace {
             return vec![deferred(el).with_priority(1).into_any_element()];
         }
         vec![el]
+    }
+
+    /** A `scroll` with `props.virtual`: its children (each `for` item counts as one) become rows of a list
+    that builds and lays out only the rows on screen. */
+    fn virtual_list(&mut self, obj: &Map<String, Value>, ctx: &Val, path: &str, id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let kids: Vec<Value> = match obj.get("children") {
+            Some(Value::Array(k)) => k.clone(),
+            Some(one) => vec![one.clone()],
+            None => vec![],
+        };
+        let mut rows: Vec<(Value, Val, String)> = vec![];
+        for (i, kid) in kids.iter().enumerate() {
+            let at = format!("{path}/{i}");
+            let Some(code) = kid.get("for").and_then(Value::as_str) else {
+                rows.push((kid.clone(), ctx.clone(), at));
+                continue;
+            };
+            let items: Vec<Val> = match self.exprs.run(code, ctx).as_slice() {
+                [Val::Arr(a)] => a.iter().cloned().collect(),
+                other => other.to_vec(),
+            };
+            let name = kid.get("as").and_then(Value::as_str).unwrap_or("item").to_string();
+            let mut one = kid.clone();
+            if let Value::Object(o) = &mut one {
+                o.remove("for");
+            }
+            for (j, item) in items.into_iter().enumerate() {
+                let c = with(ctx, vec![(name.clone(), item), ("index".into(), to_val(&Value::from(j)))]);
+                let key = kid.get("key").and_then(Value::as_str).map(|k| value_text(&to_json(&self.exprs.first(k, &c)))).unwrap_or(j.to_string());
+                rows.push((one.clone(), c, format!("{at}[{key}]")));
+            }
+        }
+        let keys: Vec<String> = rows.iter().map(|r| r.2.clone()).collect();
+        let entry = self.virtual_lists.entry(id.to_string()).or_insert_with(|| (ListState::new(0, ListAlignment::Top, px(400.)), vec![], Default::default()));
+        let state = entry.0.clone();
+        if entry.1 != keys {
+            let (old, new) = (&entry.1, &keys);
+            let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+            let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
+            state.splice(head..old.len() - tail, new.len() - tail - head);
+            entry.1 = keys;
+        }
+        // Rows off screen keep their last height until they scroll into view; content may have changed.
+        state.remeasure_items(0..rows.len());
+        entry.2 = std::rc::Rc::new(rows);
+        let list_id = id.to_string();
+        list(state, cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| {
+            let Some(row) = ws.virtual_lists.get(&list_id).and_then(|l| l.2.get(ix).cloned()) else { return div().into_any_element() };
+            div().flex().flex_col().children(ws.render(&row.0, &row.1, &row.2, window, cx)).into_any_element()
+        }))
+        .size_full()
+        .into_any_element()
     }
 
     /** Menu entries with `if` applied and `for` expanded: (label, action, is_separator). */
