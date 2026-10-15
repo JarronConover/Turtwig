@@ -10,4 +10,15 @@ if [ -n "${CODER_AGENT_URL:-}" ]; then
   export WT_PRIMARY="$HOME/dev/redo" WT_BASE="$HOME/dev/redo-worktrees"
   export REDO_GITLAB_USER_AUTH=1
 fi
+# Drop the session markers a tmux server started inside another Claude Code or
+# super.engineering session passes on (Claude would act as its child); keep auth.
+unset CLAUDECODE CLAUDE_PID CLAUDE_EFFORT AI_AGENT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION \
+  CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN \
+  CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_TUI_JUST_SWITCHED
+for v in $(compgen -e); do
+  case $v in SUPER_ENGINEERING_* | SUPERCONDUCTOR_*) unset "$v" ;; esac
+done
+# super.engineering's `claude` wrapper would otherwise shadow the real one.
+PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$HOME/.super.engineering/bin" | paste -sd: -)
+export PATH
 exec "$@"

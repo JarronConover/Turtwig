@@ -320,8 +320,7 @@ def launch(chat, resume, restore_from=None, wait_rc=True, fork_from=None):
         cmd += ["--model", chat["model"]]
     if not resume and chat.get("prompt"):
         cmd.append(chat["prompt"])
-    if ON_BOX:
-        cmd = [str(Path(__file__).parent / "agent-env")] + cmd
+    cmd = [str(Path(__file__).parent / "agent-env")] + cmd
     run(["tmux", "new-session", "-d", "-s", name, "-x", "220", "-y", "60", "-c", str(directory),
          shlex.join(cmd)])
     chat["dir"] = str(directory)
