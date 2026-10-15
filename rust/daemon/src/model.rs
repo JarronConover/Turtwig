@@ -234,7 +234,9 @@ pub(crate) fn suggestion(pane: &str) -> Option<String> {
     }
     visible(&rest[pos..], dim || grey, &mut text)?;
     let text = text.trim().to_string();
-    (!text.is_empty()).then_some(text)
+    // A session with no turns yet shows a placeholder (`Try "fix lint errors"`) in the same style.
+    let placeholder = text.starts_with("Try \"") && text.ends_with('"');
+    (!text.is_empty() && !placeholder).then_some(text)
 }
 
 fn chats(states: &ChatStates) -> Vec<Chat> {
@@ -408,5 +410,6 @@ mod tests {
         assert_eq!(suggestion(&pane("hello")), None);
         assert_eq!(suggestion(&pane("")), None);
         assert_eq!(suggestion(&pane("com\x1b[2mmit this\x1b[0m")), None);
+        assert_eq!(suggestion(&pane("\x1b[2mTry \"fix lint errors\"\x1b[0m")), None);
     }
 }
