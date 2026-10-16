@@ -108,7 +108,7 @@ impl Usage {
 
     /** `.usage` in the context: totals for the chat, its worktree and the worktree's tabs, then every
     conversation by window, and the plan's limits. */
-    pub fn context(&self, chat: Option<&str>, worktree: Option<(&str, &str)>, tabs: &[(String, String)]) -> Value {
+    pub fn context(&self, chat: Option<&str>, worktree: Option<(&str, &str)>, tabs: &[(String, String)], meter: &MeterOptions) -> Value {
         let money = |x: f64| format!("${}", thousands(x));
         let chat_cost = chat.and_then(|c| self.sessions.get(c)).map(|s| s.2).unwrap_or(0.);
         let wt_cost: f64 = worktree
@@ -131,8 +131,22 @@ impl Usage {
             "lifetime": self.windows[3], "lifetime_text": money(self.windows[3]),
             "unpriced_tokens": self.unpriced.0, "unpriced_models": self.unpriced.1,
             "rates_updated": self.rates_updated,
-            "plan": self.plan,
+            "plan": self.plan_with_meters(meter),
         })
+    }
+
+    /** `.plan` plus the gauge: `meter` for the chosen mode, `meters` for every mode (the picker's previews). */
+    fn plan_with_meters(&self, o: &MeterOptions) -> Value {
+        let mut plan = self.plan.clone();
+        let limits: Vec<Value> = plan["limits"].as_array().into_iter().flatten().map(|l| o.decorate(l.clone())).collect();
+        plan["limits"] = json!(limits);
+        let shown = |mode: &str| meter(&limits, mode).unwrap_or(Value::Null);
+        if let Some(p) = plan.as_object_mut() {
+            p.insert("meter_mode".into(), json!(o.mode));
+            p.insert("meter".into(), shown(&o.mode));
+            p.insert("meters".into(), json!({ "smart": shown("smart"), "session": shown("session"), "weekly": shown("weekly") }));
+        }
+        plan
     }
 
     /** The plan's limits from Claude Code's OAuth usage cache: [{name, used, left, resets_at, resets_in, severity}]. */
@@ -164,6 +178,63 @@ impl Usage {
         self.plan_updated = mtime;
         self.plan = json!({"limits": limits, "updated": mtime, "updated_text": mtime.map(|t| format!("{} ago", duration_text(now - t)))});
     }
+}
+
+/** Settings `usage.meter` (or state `usage_meter`) and `usage.meter_levels`. */
+pub struct MeterOptions {
+    pub mode: String,
+    pub warning_below: f64,
+    pub danger_below: f64,
+}
+
+impl MeterOptions {
+    fn decorate(&self, mut l: Value) -> Value {
+        let left = l["left"].as_f64().unwrap_or(0.);
+        let level = if left < self.danger_below { "danger" } else if left < self.warning_below { "warning" } else { "ok" };
+        l["level"] = json!(level);
+        l["icon"] = json!(format!("abx-gauge-{}", gauge_step(left)));
+        l
+    }
+}
+
+/** The limit a meter mode reports: smart is the one closest to running out, session the shortest
+window, weekly the longest (the all-models week before a per-model one). */
+pub fn meter(limits: &[Value], mode: &str) -> Option<Value> {
+    let left = |l: &&Value| l["left"].as_f64().unwrap_or(100.);
+    let least = |it: Vec<&Value>| it.into_iter().min_by(|a, b| left(a).total_cmp(&left(b))).cloned();
+    let kind = |k: &str| limits.iter().find(|l| l["kind"] == k).cloned();
+    let weekly = || kind("weekly_all").or_else(|| least(limits.iter().filter(|l| l["kind"].as_str().is_some_and(|k| k.starts_with("weekly"))).collect()));
+    match mode {
+        "session" => kind("session").or_else(weekly),
+        "weekly" => weekly().or_else(|| kind("session")),
+        _ => least(limits.iter().collect()),
+    }
+}
+
+/** Percent left, rounded to the 5% steps the gauge icons come in. */
+fn gauge_step(left: f64) -> u32 {
+    ((left.clamp(0., 100.) / 5.).round() * 5.) as u32
+}
+
+/** The toolbar gauge for `icons/abx-gauge-N.svg`: a faint 270° track, the arc filled to N% left, and
+a needle at its end. Drawn in currentColor, so the icon's color is the meter's level. */
+pub fn gauge_svg(name: &str) -> Option<String> {
+    let pct: f64 = name.strip_prefix("abx-gauge-")?.strip_suffix(".svg")?.parse().ok()?;
+    let (cx, cy, r) = (12., 13., 9.);
+    let at = |deg: f64, rr: f64| {
+        let a = deg.to_radians();
+        (cx + rr * a.cos(), cy + rr * a.sin())
+    };
+    let f = (pct / 100.).clamp(0., 1.);
+    let (sx, sy) = at(135., r);
+    let (tx, ty) = at(45., r);
+    let end = 135. + 270. * f;
+    let (ex, ey) = at(end, r);
+    let (nx, ny) = at(end, r - 4.);
+    let arc = if f > 0.005 { format!(r#"<path d="M{sx:.3} {sy:.3}A{r} {r} 0 {} 1 {ex:.3} {ey:.3}"/>"#, (270. * f > 180.) as u8) } else { String::new() };
+    Some(format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path stroke-opacity="0.3" d="M{sx:.3} {sy:.3}A{r} {r} 0 1 1 {tx:.3} {ty:.3}"/>{arc}<path d="M{cx} {cy}L{nx:.3} {ny:.3}"/></svg>"#
+    ))
 }
 
 /** 1234.5 -> "1,234.50" */
@@ -226,6 +297,27 @@ fn days_since(today: &i64) -> impl Fn(&str) -> Option<i64> + '_ {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn meter_modes_pick_their_window() {
+        use serde_json::json;
+        let limits = vec![
+            json!({"kind": "session", "left": 89.}),
+            json!({"kind": "weekly_all", "left": 12.}),
+            json!({"kind": "weekly_scoped", "left": 100.}),
+        ];
+        let kind = |mode: &str| super::meter(&limits, mode).unwrap()["kind"].clone();
+        assert_eq!(kind("smart"), "weekly_all");
+        assert_eq!(kind("session"), "session");
+        assert_eq!(kind("weekly"), "weekly_all");
+        assert_eq!(super::meter(&limits[..1], "weekly").unwrap()["kind"], "session");
+        assert!(super::meter(&[], "smart").is_none());
+        let o = super::MeterOptions { mode: "smart".into(), warning_below: 50., danger_below: 20. };
+        let m = o.decorate(limits[1].clone());
+        assert_eq!((m["level"].as_str(), m["icon"].as_str()), (Some("danger"), Some("abx-gauge-10")));
+        assert!(super::gauge_svg("abx-gauge-10.svg").unwrap().contains("<svg"));
+        assert!(super::gauge_svg("clock.svg").is_none());
+    }
+
     #[test]
     fn prices_rows_and_formats_money() {
         let mut u = super::Usage::default();

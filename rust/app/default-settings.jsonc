@@ -595,7 +595,7 @@
     },
 
     "IconButton": {
-      "about": "A square icon button. props: icon (Lucide name), do (action), tooltip, size (default 26).",
+      "about": "A square icon button. props: icon (Lucide name), do (action), tooltip, size (default 26), icon_size (15), icon_color (@text_muted).",
       "type": "box",
       "style": {
         "width": "{{ .props.size // 26 }}", "height": "{{ .props.size // 26 }}", "shrink": 0, "radius": 6,
@@ -603,7 +603,7 @@
       },
       "tooltip": "{{ .props.tooltip // \"\" }}",
       "on": { "click": "{{ .props.do }}" },
-      "children": [{ "type": "icon", "props": { "name": "{{ .props.icon }}", "size": 15, "color": "@text_muted" } }]
+      "children": [{ "type": "icon", "props": { "name": "{{ .props.icon }}", "size": "{{ .props.icon_size // 15 }}", "color": "{{ .props.icon_color // \"@text_muted\" }}" } }]
     },
 
     "Pill": {
@@ -1314,18 +1314,18 @@
     },
 
     "PlanButton": {
-      "about": "How much of the Claude plan is left (session, weekly, per-model weekly) from Claude Code's usage endpoint. `.usage.plan.limits`.",
+      "about": "How much of the Claude plan is left (session, weekly, per-model weekly) from Claude Code's usage endpoint. `.usage.plan.limits`; the gauge shows `.usage.plan.meter` (mode: state usage_meter, else settings usage.meter).",
       "type": "box",
       "style": { "position": "relative" },
       "children": [
         {
           "type": "IconButton", "id": "usage-plan-button",
           "props": {
-            "icon": "circle-gauge", "size": 26,
-            "tooltip": "{{ (.usage.plan.limits // []) | map(.name + \" \" + ((.left | floor) | tostring) + \"% left\") | join(\" · \") }}",
+            "icon_size": 18, "icon_color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.usage.plan.meter.level] // \"@text_muted\" }}",
+            "icon": "{{ .usage.plan.meter.icon // \"circle-gauge\" }}", "size": 26,
+            "tooltip": "{{ if .usage.plan.meter then .usage.plan.meter.name + \": \" + ((.usage.plan.meter.left | floor) | tostring) + \"% left\" else \"Claude plan usage\" end }}",
             "do": [{ "do": "state.toggle", "key": "usage_plan_open" }, { "do": "state.set", "key": "usage_cost_open", "value": false }]
-          },
-          "style": { "color": "{{ if ((.usage.plan.limits // []) | any(.left < 20)) then \"@danger\" elif ((.usage.plan.limits // []) | any(.left < 40)) then \"@warning\" else \"@text_muted\" end }}" }
+          }
         },
         {
           "if": ".state.usage_plan_open",
@@ -1356,14 +1356,24 @@
                   "type": "row", "style": { "gap": 8, "align": "center" },
                   "children": [
                     { "type": "text", "props": { "text": "{{ .l.name }}" }, "style": { "grow": 1 } },
-                    { "type": "text", "props": { "text": "{{ .l.left | floor }}% left" }, "style": { "color": "{{ if .l.left < 20 then \"@danger\" elif .l.left < 40 then \"@warning\" else \"@success\" end }}" } },
+                    { "type": "text", "props": { "text": "{{ .l.left | floor }}% left" }, "style": { "color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.l.level] // \"@text_muted\" }}" } },
                     { "if": ".l.resets_in", "type": "text", "props": { "text": "Resets in {{ .l.resets_in }}" }, "style": { "color": "@text_faint", "font_size": 12 } }
                   ]
                 },
                 {
                   "type": "box", "style": { "height": 6, "radius": 3, "background": "@hover" },
-                  "children": [{ "type": "box", "style": { "height": 6, "radius": 3, "width": "{{ (.l.left | floor | tostring) + \"%\" }}", "background": "{{ if .l.left < 20 then \"@danger\" elif .l.left < 40 then \"@warning\" else \"@success\" end }}" } }]
+                  "children": [{ "type": "box", "style": { "height": 6, "radius": 3, "width": "{{ (.l.left | floor | tostring) + \"%\" }}", "background": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.l.level] // \"@text_muted\" }}" } }]
                 }
+              ]
+            },
+            { "type": "divider" },
+            { "type": "text", "props": { "text": "Toolbar meter" }, "style": { "font_size": 12, "color": "@text_faint" } },
+            {
+              "id": "usage-meter-options", "type": "column", "style": { "gap": 2, "margin": [-4, -6, 0, -6] },
+              "children": [
+                { "type": "MeterOption", "props": { "mode": "smart", "text": "Smart", "about": "Whichever window is closest to running out." } },
+                { "type": "MeterOption", "props": { "mode": "session", "text": "Prefer session", "about": "Always the shortest window, such as the 5-hour cycle." } },
+                { "type": "MeterOption", "props": { "mode": "weekly", "text": "Prefer weekly", "about": "Always the longest window, such as the week." } }
               ]
             },
             { "type": "divider" },
@@ -1448,6 +1458,31 @@
       "children": [
         { "if": ".props.icon", "type": "icon", "props": { "name": "{{ .props.icon }}", "size": 13 } },
         { "type": "text", "props": { "text": "{{ .props.text }}" } }
+      ]
+    },
+
+    "MeterOption": {
+      "about": "One choice of what the toolbar gauge reports, previewed with that mode's own gauge. props: mode (smart | session | weekly), text, about.",
+      "type": "row",
+      "style": {
+        "gap": 10, "padding": [6, 6], "align": "center", "radius": 8, "cursor": "pointer",
+        "background": "{{ if .usage.plan.meter_mode == .props.mode then \"@selection\" else \"transparent\" end }}",
+        "hover": { "background": "@hover" }
+      },
+      "on": { "click": { "do": "state.set", "key": "usage_meter", "value": "{{ .props.mode }}" } },
+      "children": [
+        {
+          "type": "box", "style": { "width": 30, "height": 30, "shrink": 0, "radius": 15, "align": "center", "justify": "center", "background": "@window", "border": 1, "border_color": "@line" },
+          "children": [{ "type": "icon", "props": { "name": "{{ .usage.plan.meters[.props.mode].icon // \"circle-gauge\" }}", "size": 18, "color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.usage.plan.meters[.props.mode].level] // \"@text_muted\" }}" } }]
+        },
+        {
+          "type": "column", "style": { "grow": 1, "gap": 1 },
+          "children": [
+            { "type": "text", "props": { "text": "{{ .props.text }}" } },
+            { "type": "text", "props": { "text": "{{ .props.about }}" }, "style": { "font_size": 12, "color": "@text_faint" } }
+          ]
+        },
+        { "if": ".usage.plan.meter_mode == .props.mode", "type": "icon", "props": { "name": "check", "size": 14, "color": "@accent" } }
       ]
     },
 
@@ -1816,7 +1851,11 @@
   // dollars per million tokens {input, output, cache_read, cache_write, cache_write_1h}, over models.dev's.
   "usage": {
     "refresh_secs": 120, "rates_max_age_hours": 24, "rates_url": "https://models.dev/api.json", "rates_providers": ["anthropic"],
-    "rates": {}, "plan_max_age_secs": 300, "plan_command": null
+    "rates": {}, "plan_max_age_secs": 300, "plan_command": null,
+    // What the toolbar gauge reports: smart (the window closest to running out), session (the
+    // shortest window) or weekly (the longest). The popover's picker saves its choice in state
+    // usage_meter, which wins over this. The gauge turns warning/danger below these percents left.
+    "meter": "smart", "meter_levels": { "warning": 50, "danger": 20 }
   },
 
   // The macOS menu bar: `app` items join the a.box menu; each of `menus` is a menu of its own.

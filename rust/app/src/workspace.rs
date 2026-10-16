@@ -1219,7 +1219,7 @@ impl Workspace {
         let chats_here: Vec<Value> = self.current_worktree().map(|w| self.chats_of(w).into_iter().map(|c| self.chat_json(c)).collect()).unwrap_or_default();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
         let tabs: Vec<(String, String)> = self.current_worktree().map(|w| self.chats_of(w).into_iter().filter(|c| self.chat_open(c)).map(|c| (c.id.clone(), c.name.clone())).collect()).unwrap_or_default();
-        let usage = self.usage.context(self.current_chat().map(|c| c.id.as_str()), self.current_worktree().map(|w| (w.host.as_str(), w.path.as_str())), &tabs);
+        let usage = self.usage.context(self.current_chat().map(|c| c.id.as_str()), self.current_worktree().map(|w| (w.host.as_str(), w.path.as_str())), &tabs, &self.meter_options());
         to_val(&json!({
             "projects": projects,
             "sections": sections,
@@ -1740,6 +1740,16 @@ impl Workspace {
 
     /** Fetches every connected machine's token usage, reloads the plan's limits (refreshing them from
     Claude Code's endpoint when stale or `force`), and models.dev rates once a day. */
+    /** The gauge's mode: state `usage_meter` (the popover's picker) over settings `usage.meter`. */
+    fn meter_options(&self) -> crate::usage::MeterOptions {
+        let mode = self.state.get("usage_meter").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| self.settings.text("usage.meter", "smart"));
+        crate::usage::MeterOptions {
+            mode,
+            warning_below: self.settings.num("usage.meter_levels.warning", 50.),
+            danger_below: self.settings.num("usage.meter_levels.danger", 20.),
+        }
+    }
+
     pub(crate) fn refresh_usage(&mut self, force: bool, cx: &mut Context<Self>) {
         let rates_path = settings::dir().join("usage-rates.json");
         if self.usage.rates.is_empty() {

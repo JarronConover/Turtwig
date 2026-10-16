@@ -52,6 +52,9 @@ impl gpui_kit::AssetSource for Assets {
             if let Ok(bytes) = std::fs::read(settings::dir().join("icons").join(name)) {
                 return Ok(Some(bytes.into()));
             }
+            if let Some(svg) = usage::gauge_svg(name) {
+                return Ok(Some(svg.into_bytes().into()));
+            }
             if name == "gitlab.svg" {
                 return Ok(Some(GITLAB_SVG.into()));
             }
