@@ -514,6 +514,7 @@ impl Workspace {
                     self.exprs.note(format!("unknown event `{event}` at {path}"));
                 }
             }
+            let (has_double, has_down) = (double.is_some(), down.is_some());
             if let Some(down) = down {
                 el = el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, e: &MouseDownEvent, window, cx| {
                     match (e.click_count, &double) {
@@ -530,11 +531,21 @@ impl Workspace {
                 }));
             }
             if let Some(c) = click {
+                // A button takes every press as a click (a quick second one too); only a node that also
+                // has a double_click leaves the second press of a pair to it.
                 el = el.on_click(cx.listener(move |ws, e: &ClickEvent, window, cx| {
-                    if e.click_count() < 2 {
+                    if !has_double || e.click_count() < 2 {
                         ws.run_action(&c, window, cx);
                     }
                 }));
+                if !has_down && !has_double && !obj.contains_key("drag") {
+                    // Its presses are its own: the header around it mustn't read them as dragging the window
+                    // or (pressed twice) zooming it.
+                    el = el.on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        gpui_kit::base::GlobalState::suppress_text_selection(cx);
+                        cx.stop_propagation();
+                    });
+                }
             }
         }
         if let Some(tip) = obj.get("tooltip") {
