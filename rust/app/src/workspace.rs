@@ -685,8 +685,17 @@ impl Workspace {
     pub(crate) fn set_state(&mut self, key: String, value: Value) {
         self.ctx_rev += 1;
         let regroup = key == "sidebar_projects";
-        self.state.insert(key.clone(), value.clone());
-        self.user_state.insert(key, value);
+        // null forgets the key: back to the settings' starting value, if any.
+        if value.is_null() {
+            match self.settings.state.get(&key) {
+                Some(d) => self.state.insert(key.clone(), d.clone()),
+                None => self.state.remove(&key),
+            };
+            self.user_state.remove(&key);
+        } else {
+            self.state.insert(key.clone(), value.clone());
+            self.user_state.insert(key, value);
+        }
         self.save_state();
         if regroup {
             self.merge_models();
