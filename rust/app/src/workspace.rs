@@ -2463,15 +2463,35 @@ impl Workspace {
             let blocks = crate::ui::trace_view::blocks_of(&t.items, working);
             let sigs: Vec<u64> = blocks.iter().map(|b| block_sig(&t.items, b)).collect();
             let (old, new) = (l.blocks.len(), blocks.len());
+            // Where you're reading, by the transcript item at the top of the view, so it stays put when the
+            // rows around it are rebuilt (the list would otherwise snap to the start of the changed range).
+            let reading = (!l.state.is_following_tail() && old > 0).then(|| l.state.logical_scroll_top());
+            let anchor = reading.and_then(|t| l.blocks.get(t.item_ix).and_then(first_item).map(|i| (i, t.offset_in_item)));
+            let mut restore = false;
             if len >= l.items && l.rev != u64::MAX {
-                // Re-measure from the first row whose content changed (a late tool result can change an
-                // older row), not just the last two.
+                // Re-measure only the rows whose content changed (a late tool result can change an older row):
+                // the unchanged run at the start and at the end keep their measured heights.
                 let keep = l.sigs.iter().zip(&sigs).take_while(|(a, b)| a == b).count().min(old).min(new);
-                l.state.splice(keep..old, new - keep);
+                let tail = l.sigs[keep..].iter().rev().zip(sigs[keep..].iter().rev()).take_while(|(a, b)| a == b).count().min(old - keep).min(new - keep);
+                l.state.splice(keep..old - tail, new - keep - tail);
+                restore = reading.is_some_and(|t| t.item_ix >= keep && t.item_ix < old - tail);
             } else {
                 l.state.reset(new);
-                if follow != "never" {
+                if follow != "never" && reading.is_none() {
                     l.state.set_follow_mode(FollowMode::Tail);
+                }
+                restore = reading.is_some();
+            }
+            if let (true, Some((item, offset))) = (restore, anchor) {
+                use crate::ui::trace_view::Block;
+                let holds = |b: &Block| match b {
+                    Block::One(i) => *i == item,
+                    Block::Steps(v) => v.contains(&item),
+                    Block::Pending(_) => false,
+                };
+                let found = blocks.iter().position(holds).or_else(|| blocks.iter().position(|b| first_item(b).is_some_and(|f| f >= item)));
+                if let Some(ix) = found {
+                    l.state.scroll_to(ListOffset { item_ix: ix, offset_in_item: offset });
                 }
             }
             let grew = l.rev != u64::MAX && len > l.items;
@@ -3152,6 +3172,16 @@ pub(crate) fn image_element(src: &str, fit: &str) -> Img {
 const PLAN_COMMAND: &str = r#"token=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])' 2>/dev/null); [ -n "$token" ] && out=$(/usr/bin/curl -sS -m 10 https://api.anthropic.com/api/oauth/usage -H "Authorization: Bearer $token" -H "anthropic-beta: oauth-2025-04-20") && printf '%s' "$out" | grep -q '"limits"' && printf '%s' "$out" > "$HOME/.claude/oauth-usage-cache.json""#;
 
 /** A cheap fingerprint of what a transcript row shows: its items' kinds, text lengths and results. */
+/** The first transcript item a row shows (none for the "Working…" row). */
+fn first_item(b: &crate::ui::trace_view::Block) -> Option<usize> {
+    use crate::ui::trace_view::Block;
+    match b {
+        Block::One(i) => Some(*i),
+        Block::Steps(v) => v.first().copied(),
+        Block::Pending(_) => None,
+    }
+}
+
 fn block_sig(items: &[Item], b: &crate::ui::trace_view::Block) -> u64 {
     use crate::ui::trace_view::Block;
     use std::hash::{Hash, Hasher};

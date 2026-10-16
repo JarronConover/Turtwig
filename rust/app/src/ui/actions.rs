@@ -65,6 +65,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("palette.run", "{label | index}: run a command palette entry (label exact, else the first containing it) without opening the palette"),
     ("chat.answer", "{chat?, option: index | label | \"cancel\"}: answer a waiting chat's question card (its options are in `.chats[].waiting_on`)"),
     ("chat.jump_to_latest", "{chat?}: scroll to the newest message and keep following"),
+    ("transcript.scroll", "{chat?, row, offset?}: scroll a chat's transcript so row (see inspect.json `transcripts`) is at the top, offset px into it; stops following new messages"),
     ("completion.move / completion.close", "{by?}: move the composer's completion highlight, or close the list"),
     ("composer.set / composer.type", "{chat?, text}: replace or add to the text in a chat's message box (the designer's is chat `designer`)"),
     ("js", "{code, ...args}: run JavaScript with `args`, `ctx` (the context), and `ab` (see Scripts)"),
@@ -833,6 +834,15 @@ impl Workspace {
                         Some(-1) => self.call(Call::ChatKeys { chat_id: id, keys: vec!["Escape".into()] }, cx),
                         Some(i) if i >= 0 && (i as usize) < options.len() => self.call(Call::ChatKeys { chat_id: id, keys: vec![(i + 1).to_string()] }, cx),
                         _ => self.exprs.note(format!("chat.answer: no option {:?}; options: {}", a.get("option"), options.join(", "))),
+                    }
+                }
+            }
+            "transcript.scroll" => {
+                if let Some(id) = chat() {
+                    let row = a.get("row").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let offset = a.get("offset").and_then(Value::as_f64).unwrap_or(0.) as f32;
+                    if let Some(l) = self.lists.get(&id) {
+                        l.state.scroll_to(gpui::ListOffset { item_ix: row, offset_in_item: gpui::px(offset) });
                     }
                 }
             }
