@@ -379,6 +379,45 @@
                 { "if": ".designer.working", "type": "spinner", "props": { "size": "xsmall", "color": "@age" } },
                 { "type": "spacer" },
                 { "type": "IconButton", "props": { "icon": "undo-2", "tooltip": "Undo the last change", "do": "settings.undo" } },
+                {
+                  "id": "designer-history",
+                  "type": "box",
+                  "style": { "position": "relative" },
+                  "children": [
+                    { "type": "IconButton", "id": "designer-history-button", "props": { "icon": "rotate-ccw-clock", "tooltip": "Earlier designer conversations", "do": [{ "do": "state.toggle", "key": "designer_history_open" }, "designer.history"] } },
+                    {
+                      "if": ".state.designer_history_open and (.app.dragging | not)",
+                      "type": "box", "layer": "top",
+                      "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
+                      "on": { "click": { "do": "state.set", "key": "designer_history_open", "value": false } }
+                    },
+                    {
+                      "if": ".state.designer_history_open",
+                      "id": "designer-history-list",
+                      "type": "scroll", "layer": "top",
+                      "style": { "position": "absolute", "top": 30, "right": -40, "width": 340, "max_height": 420, "padding": 6, "gap": 2, "radius": 10, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg" },
+                      "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
+                      "children": [
+                        { "type": "text", "props": { "text": "Designer conversations" }, "style": { "padding": [4, 8, 6, 8], "font_size": 12, "color": "@text_faint" } },
+                        { "if": "(.designer.sessions | length) == 0", "type": "text", "props": { "text": "No earlier conversations yet." }, "style": { "padding": [4, 8], "font_size": 13, "color": "@text_faint" } },
+                        {
+                          "for": ".designer.sessions", "as": "d", "key": ".d.id",
+                          "type": "row",
+                          "style": {
+                            "height": 32, "padding": [0, 8], "gap": 8, "align": "center", "radius": 6, "cursor": "pointer", "font_size": 13,
+                            "background": "{{ if .d.current then \"@selection\" else \"transparent\" end }}", "hover": { "background": "@hover" }
+                          },
+                          "tooltip": "{{ if .d.current then \"Showing now\" elif .designer.working then \"Wait for the designer to finish first\" else \"Continue this conversation\" end }}",
+                          "on": { "click": [{ "do": "designer.open", "id": "{{ .d.id }}" }, { "do": "state.set", "key": "designer_history_open", "value": false }] },
+                          "children": [
+                            { "type": "text", "props": { "text": "{{ .d.title }}" }, "style": { "grow": 1, "min_width": 0, "truncate": true } },
+                            { "type": "text", "props": { "text": "{{ .d.age_text }}" }, "style": { "font_size": 12, "color": "@text_faint", "shrink": 0 } }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
                 { "type": "IconButton", "props": { "icon": "square-pen", "tooltip": "New designer conversation", "do": "designer.reset" } },
                 { "type": "IconButton", "props": { "icon": "x", "tooltip": "Close", "do": { "do": "state.set", "key": "designer_open", "value": false } } }
               ]

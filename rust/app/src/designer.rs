@@ -32,13 +32,54 @@ pub fn history_dir() -> PathBuf {
     settings::dir().join("history")
 }
 
+fn sessions_dir() -> PathBuf {
+    let slug: String = settings::dir().to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude/projects").join(slug)
+}
+
+pub fn current() -> Option<String> {
+    std::fs::read_to_string(session_file()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /** The saved session's earlier messages, so the panel shows the conversation after a restart. */
 pub fn past_entries() -> Vec<Value> {
-    let Ok(id) = std::fs::read_to_string(session_file()) else { return vec![] };
-    let slug: String = settings::dir().to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let path = PathBuf::from(home).join(".claude/projects").join(slug).join(format!("{}.jsonl", id.trim()));
-    std::fs::read_to_string(path).map(|t| t.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()).unwrap_or_default()
+    let Some(id) = current() else { return vec![] };
+    std::fs::read_to_string(sessions_dir().join(format!("{id}.jsonl"))).map(|t| t.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()).unwrap_or_default()
+}
+
+/** The text of a transcript entry's message, when it's the user's. */
+fn user_text(e: &Value) -> Option<String> {
+    if e.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    let c = &e["message"]["content"];
+    c.as_str().map(str::to_string).or_else(|| c.as_array()?.iter().find_map(|b| (b["type"] == "text").then(|| b["text"].as_str().map(str::to_string)).flatten()))
+}
+
+/** Every designer conversation, newest first: `{id, title, last, current}` (last: seconds since the epoch;
+title: its first message). One-shot `settings.agent` runs share the folder and are left out. */
+pub fn sessions() -> Vec<Value> {
+    let current = current();
+    let mut out: Vec<(f64, Value)> = std::fs::read_dir(sessions_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let id = p.file_name()?.to_str()?.strip_suffix(".jsonl")?.to_string();
+            let last = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
+            let text = std::fs::read_to_string(&p).ok()?;
+            let first = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|e| user_text(&e))?;
+            if first.starts_with("You are customizing the ") {
+                return None;
+            }
+            let title: String = first.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
+            let is_current = current.as_deref() == Some(id.as_str());
+            Some((last, json!({"id": id, "title": title, "last": last, "current": is_current})))
+        })
+        .collect();
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out.into_iter().map(|(_, v)| v).collect()
 }
 
 /** Saves a copy of the settings file so `settings.undo` can put it back. */
@@ -63,6 +104,12 @@ impl Designer {
         self.child = None;
         self.stdin = None;
         self.working = false;
+    }
+
+    /** Continue an earlier conversation: the next message resumes it. */
+    pub fn switch_to(&mut self, id: &str) {
+        self.reset();
+        let _ = std::fs::write(session_file(), id);
     }
 
     pub fn reset(&mut self) {

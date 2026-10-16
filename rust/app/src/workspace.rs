@@ -150,6 +150,8 @@ pub struct Workspace {
     pub(crate) motion: std::rc::Rc<std::cell::RefCell<crate::ui::motion::MotionStore>>,
     pub(crate) pending_motion: bool,
     pub(crate) designer: crate::designer::Designer,
+    /** The designer's conversations, as the history list last read them. */
+    pub(crate) designer_sessions: Vec<Value>,
     designer_tx: flume::Sender<crate::designer::Out>,
     problems_written: String,
     pub(crate) render_generation: u64,
@@ -347,6 +349,7 @@ impl Workspace {
             motion: Default::default(),
             pending_motion: false,
             designer: Default::default(),
+            designer_sessions: vec![],
             designer_tx,
             problems_written: String::new(),
             render_generation: 0,
@@ -607,6 +610,22 @@ impl Workspace {
     pub(crate) fn designer_reset(&mut self, cx: &mut Context<Self>) {
         self.designer.reset();
         self.transcripts.remove(crate::designer::CHAT_ID);
+        self.designer_sessions = crate::designer::sessions();
+        self.ctx_rev += 1;
+        cx.notify();
+    }
+
+    /** Switch the designer panel to an earlier conversation (`designer.open`). */
+    pub(crate) fn designer_open(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.designer.working || crate::designer::current().as_deref() == Some(id) {
+            return;
+        }
+        self.designer.switch_to(id);
+        let mut t = Transcript::default();
+        t.append(0, &crate::designer::past_entries());
+        self.transcripts.insert(crate::designer::CHAT_ID.into(), t);
+        self.designer_sessions = crate::designer::sessions();
+        self.ctx_rev += 1;
         cx.notify();
     }
 
@@ -1263,6 +1282,11 @@ impl Workspace {
                 "attachments": self.attachments_json(crate::designer::CHAT_ID),
                 "activity": if self.designer.working { self.transcripts.get(crate::designer::CHAT_ID).map(|t| t.activity()).unwrap_or_default() } else { String::new() },
                 "has_messages": self.transcripts.get(crate::designer::CHAT_ID).map(|t| !t.items.is_empty()).unwrap_or(false),
+                "sessions": self.designer_sessions.iter().map(|v| {
+                    let mut v = v.clone();
+                    v["age_text"] = json!(age_text(v["last"].as_f64(), &self.age_format()));
+                    v
+                }).collect::<Vec<_>>(),
             },
         }))
     }
