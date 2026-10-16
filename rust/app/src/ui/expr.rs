@@ -78,7 +78,11 @@ impl Exprs {
         match v {
             Value::String(s) if s.contains("{{") => self.template(s, input),
             Value::Array(a) => Value::Array(a.iter().map(|x| self.resolve(x, input)).collect()),
-            Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), if k == "then" { x.clone() } else { self.resolve(x, input) })).collect()),
+            // A prompt's `then` waits for the text typed (`.input`); every other action resolves here.
+            Value::Object(o) => {
+                let lazy = o.get("do").and_then(Value::as_str) == Some("prompt");
+                Value::Object(o.iter().map(|(k, x)| (k.clone(), if lazy && k == "then" { x.clone() } else { self.resolve(x, input) })).collect())
+            }
             other => other.clone(),
         }
     }
@@ -98,8 +102,9 @@ impl Exprs {
             Value::Array(a) => Val::Arr(Rc::new(a.iter().map(|x| self.resolve_val(x, input)).collect())),
             Value::Object(o) => {
                 let mut map = jaq_json::Map::default();
+                let lazy = o.get("do").and_then(Value::as_str) == Some("prompt");
                 for (k, x) in o {
-                    map.insert(Val::from(k.clone()), if k == "then" { to_val(x) } else { self.resolve_val(x, input) });
+                    map.insert(Val::from(k.clone()), if lazy && k == "then" { to_val(x) } else { self.resolve_val(x, input) });
                 }
                 Val::obj(map)
             }
@@ -178,6 +183,16 @@ pub fn with(base: &Val, extra: Vec<(String, Val)>) -> Val {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_a_prompts_then_waits_for_input() {
+        let e = Exprs::default();
+        let ctx = to_val(&json!({"b": {"id": "x1"}}));
+        let branch = e.resolve(&json!({"do": "if", "cond": true, "then": {"do": "open", "id": "{{ .b.id }}"}}), &ctx);
+        assert_eq!(branch["then"]["id"], "x1");
+        let ask = e.resolve(&json!({"do": "prompt", "then": {"do": "chat.new", "branch": "{{ .input }}"}}), &ctx);
+        assert_eq!(ask["then"]["branch"], "{{ .input }}");
+    }
 
     #[test]
     fn orders_orchestrators_first_and_supports_elif() {

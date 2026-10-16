@@ -93,7 +93,10 @@
     "sidebar_projects": "merged",
     // Worktree order in each project and section: "manual" (as you drag them) or "recent" (newest
     // activity first). Dragging a worktree while sorted by recent switches to manual, with a notice.
-    "sidebar_order": "manual"
+    "sidebar_order": "manual",
+    // Where the worktree's changes show: "bottom" (a tab beside the terminals) or "right" (a panel).
+    "changes_place": "bottom",
+    "changes_width": 560
   },
 
   "views": {
@@ -103,6 +106,7 @@
       "children": [
         { "type": "Sidebar", "id": "sidebar", "if": ".state.sidebar_open" },
         { "type": "MainArea", "id": "main-area", "style": { "grow": 1 } },
+        { "type": "ChangesPanel", "id": "changes-panel", "if": ".state.changes_place == \"right\" and .selected.worktree" },
         { "type": "DesignerPanel", "id": "designer", "if": ".state.designer_open" },
         { "type": "Confirm", "id": "confirm" }
       ]
@@ -1155,7 +1159,7 @@
     },
 
     "TerminalCard": {
-      "about": "The bottom card: Terminal and Changes tabs (state.bottom_tab). Height: state.terminal_height.",
+      "about": "The bottom card: the Changes tab (unless changes are in the right panel), then the terminal tabs (state.bottom_tab). Height: state.terminal_height.",
       "type": "column",
       "style": { "height": "{{ .state.terminal_height }}", "shrink": 0, "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" },
       "animate": { "from": { "opacity": 0, "y": 10 }, "duration": 160 },
@@ -1165,13 +1169,19 @@
           "style": { "height": 46, "shrink": 0, "padding": [0, 18], "gap": 6, "align": "center" },
           "children": [
             {
+              "if": ".state.changes_place != \"right\"",
+              "type": "BottomTab", "id": "tab-changes",
+              "props": { "tab": "changes", "icon": "file-diff", "text": "Changes{{ if .selected.diff.files > 0 then \" \" + (.selected.diff.files | tostring) else \"\" end }}" }
+            },
+            { "if": ".state.changes_place != \"right\"", "id": "bottom-tabs-divider", "type": "divider", "props": { "axis": "y" }, "style": { "height": 14, "self": "center", "margin": [0, 4] } },
+            {
               "for": ".selected.terminals", "as": "t", "key": ".t.id", "id": "tab-terminal",
               "type": "row",
               "style": {
                 "height": 26, "padding": "{{ if (.selected.terminals | length) > 1 then [0, 6, 0, 11] else [0, 11] end }}", "gap": 6, "align": "center", "radius": 13, "border": 1, "font_size": 13, "cursor": "pointer", "shrink": 0,
-                "border_color": "{{ if .state.bottom_tab != \"changes\" and .t.active then \"@tab_border\" else \"transparent\" end }}",
-                "background": "{{ if .state.bottom_tab != \"changes\" and .t.active then \"@tab_bg\" else \"transparent\" end }}",
-                "color": "{{ if .state.bottom_tab != \"changes\" and .t.active then \"@text\" else \"@age\" end }}",
+                "border_color": "{{ if ((.state.bottom_tab == \"changes\" and .state.changes_place != \"right\") | not) and .t.active then \"@tab_border\" else \"transparent\" end }}",
+                "background": "{{ if ((.state.bottom_tab == \"changes\" and .state.changes_place != \"right\") | not) and .t.active then \"@tab_bg\" else \"transparent\" end }}",
+                "color": "{{ if ((.state.bottom_tab == \"changes\" and .state.changes_place != \"right\") | not) and .t.active then \"@text\" else \"@age\" end }}",
                 "hover": { "color": "@text" }
               },
               "on": { "click": { "do": "terminal.select", "id": "{{ .t.id }}" } },
@@ -1189,28 +1199,78 @@
               ]
             },
             { "id": "terminal-new", "type": "IconButton", "props": { "icon": "plus", "size": 24, "tooltip": "New terminal  ⌃⇧T", "do": "terminal.new" } },
-            {
-              "type": "BottomTab", "id": "tab-changes",
-              "props": { "tab": "changes", "icon": "file-diff", "text": "Changes{{ if .selected.diff.files > 0 then \" \" + (.selected.diff.files | tostring) else \"\" end }}" }
-            },
             { "type": "spacer" },
             {
-              "if": ".state.bottom_tab == \"changes\"",
+              "if": "(.state.bottom_tab == \"changes\" and .state.changes_place != \"right\")",
               "type": "row",
               "style": { "gap": 6, "align": "center" },
               "children": [
-                { "if": ".selected.diff.loading", "type": "spinner", "props": { "size": "xsmall", "color": "@age" } },
-                { "type": "Segment", "props": { "key": "diff_base", "value": "uncommitted", "text": "Uncommitted", "tooltip": "Changes not yet committed" } },
-                { "type": "Segment", "props": { "key": "diff_base", "value": "branch", "text": "Whole branch", "tooltip": "Everything on this branch since it left main, committed or not" } },
-                { "type": "IconButton", "props": { "icon": "chevrons-down-up", "tooltip": "Collapse all files", "do": "diff.collapse_all" } },
-                { "type": "IconButton", "props": { "icon": "chevrons-up-down", "tooltip": "Expand all files", "do": "diff.expand_all" } },
-                { "type": "IconButton", "props": { "icon": "refresh-cw", "tooltip": "Refresh", "do": "diff.refresh" } }
+                { "type": "DiffTools" },
+                {
+                  "type": "IconButton", "id": "changes-to-right",
+                  "props": { "icon": "panel-right", "tooltip": "Open changes in a right panel", "do": [{ "do": "state.set", "key": "changes_place", "value": "right" }, { "do": "state.set", "key": "bottom_tab", "value": "terminal" }] }
+                }
               ]
             }
           ]
         },
-        { "if": ".state.bottom_tab != \"changes\"", "type": "terminal", "style": { "grow": 1, "min_height": 0 } },
-        { "if": ".state.bottom_tab == \"changes\"", "type": "diff", "style": { "grow": 1, "min_height": 0, "border_top": 1, "border_color": "@line" } }
+        { "if": "(.state.bottom_tab == \"changes\" and .state.changes_place != \"right\") | not", "type": "terminal", "style": { "grow": 1, "min_height": 0 } },
+        { "if": "(.state.bottom_tab == \"changes\" and .state.changes_place != \"right\")", "type": "diff", "style": { "grow": 1, "min_height": 0, "border_top": 1, "border_color": "@line" } }
+      ]
+    },
+
+    "DiffTools": {
+      "about": "The diff's controls: what to compare against, collapse/expand every file, refresh.",
+      "type": "row",
+      "style": { "gap": 6, "align": "center" },
+      "children": [
+        { "if": ".selected.diff.loading", "type": "spinner", "props": { "size": "xsmall", "color": "@age" } },
+        { "type": "Segment", "props": { "key": "diff_base", "value": "uncommitted", "text": "Uncommitted", "tooltip": "Changes not yet committed" } },
+        { "type": "Segment", "props": { "key": "diff_base", "value": "branch", "text": "Whole branch", "tooltip": "Everything on this branch since it left main, committed or not" } },
+        { "type": "IconButton", "props": { "icon": "chevrons-down-up", "tooltip": "Collapse all files", "do": "diff.collapse_all" } },
+        { "type": "IconButton", "props": { "icon": "chevrons-up-down", "tooltip": "Expand all files", "do": "diff.expand_all" } },
+        { "type": "IconButton", "props": { "icon": "refresh-cw", "tooltip": "Refresh", "do": "diff.refresh" } }
+      ]
+    },
+
+    "ChangesPanel": {
+      "about": "The worktree's changes in a panel right of the chat (state.changes_place \"right\"). Resizable (state.changes_width).",
+      "type": "stack",
+      "style": { "width": "{{ .state.changes_width }}", "height": "full", "shrink": 0, "padding": [0, 14, 14, 0] },
+      "animate": { "from": { "opacity": 0, "x": 28 }, "duration": 220 },
+      "children": [
+        {
+          "type": "column",
+          "style": { "width": "full", "height": "full" },
+          "children": [
+            {
+              "type": "row",
+              "style": { "height": 44, "shrink": 0, "gap": 6, "align": "center", "padding": [0, 4] },
+              "on": { "mouse_down": "window.move", "double_click": "window.zoom" },
+              "children": [
+                { "type": "icon", "props": { "name": "file-diff", "size": 14, "color": "@age" } },
+                { "type": "text", "props": { "text": "Changes{{ if .selected.diff.files > 0 then \" \" + (.selected.diff.files | tostring) else \"\" end }}" }, "style": { "font_size": 13, "font_weight": "semibold" } },
+                { "type": "spacer" },
+                { "type": "DiffTools" },
+                {
+                  "type": "IconButton", "id": "changes-to-bottom",
+                  "props": { "icon": "panel-bottom", "tooltip": "Move changes back to the bottom panel", "do": [{ "do": "state.set", "key": "changes_place", "value": "bottom" }, { "do": "state.set", "key": "bottom_tab", "value": "changes" }, { "do": "state.set", "key": "terminal_open", "value": true }] }
+                },
+                { "type": "IconButton", "props": { "icon": "x", "tooltip": "Close", "do": { "do": "state.set", "key": "changes_place", "value": "bottom" } } }
+              ]
+            },
+            {
+              "type": "column",
+              "style": { "grow": 1, "min_height": 0, "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" },
+              "children": [{ "type": "diff", "style": { "grow": 1, "min_height": 0 } }]
+            }
+          ]
+        },
+        {
+          "type": "resize_handle",
+          "props": { "state": "changes_width", "axis": "x", "invert": true, "min": 320, "max": 1400 },
+          "style": { "position": "absolute", "top": 0, "left": -3, "width": 6, "height": "full" }
+        }
       ]
     },
 
