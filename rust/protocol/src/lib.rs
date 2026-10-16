@@ -81,6 +81,9 @@ pub enum Call {
         #[serde(default)]
         command: Option<String>,
     },
+    /** The app's `daemon` settings for this host's daemon and scripts (timings, limits, parsing); sent on
+    connect and whenever settings change. */
+    Configure { options: Value },
     /** Ends a terminal's tmux session (closing a terminal tab). */
     TermKill { session: String },
     TermInput { term_id: u64, data: String },

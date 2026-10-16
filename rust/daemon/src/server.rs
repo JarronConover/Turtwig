@@ -595,6 +595,10 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         Call::SectionMove { id, index } => sc_tool(&["section", "move", &id, "--index", &index.to_string()], None),
         Call::ProjectMove { repo, index } => sc_tool(&["project", "move", &repo, "--index", &index.to_string()], None),
         Call::WorktreeDiff { path, base } => crate::diff::worktree_diff(&path, base.as_deref()),
+        Call::Configure { options } => {
+            crate::config::set(options);
+            return Ok(json!({}));
+        }
         Call::TermKill { session } => {
             if session.starts_with("sh-") {
                 util::run("tmux", &["kill-session", "-t", &format!("={session}")], &[], None, Duration::from_secs(5));
