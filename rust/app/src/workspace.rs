@@ -610,6 +610,7 @@ impl Workspace {
     pub(crate) fn designer_reset(&mut self, cx: &mut Context<Self>) {
         self.designer.reset();
         self.transcripts.remove(crate::designer::CHAT_ID);
+        self.lists.remove(crate::designer::CHAT_ID);
         self.designer_sessions = crate::designer::sessions();
         self.ctx_rev += 1;
         cx.notify();
@@ -624,6 +625,8 @@ impl Workspace {
         let mut t = Transcript::default();
         t.append(0, &crate::designer::past_entries());
         self.transcripts.insert(crate::designer::CHAT_ID.into(), t);
+        // The panel's rows were laid out for the other conversation; a new list lays these out from scratch.
+        self.lists.remove(crate::designer::CHAT_ID);
         self.designer_sessions = crate::designer::sessions();
         self.ctx_rev += 1;
         cx.notify();
@@ -2458,7 +2461,7 @@ impl Workspace {
             }
             TranscriptList { state, blocks: Default::default(), sigs: vec![], rev: u64::MAX, working: false, items: 0, unseen: false }
         });
-        if l.rev != rev || l.working != working {
+        if l.rev != rev || l.working != working || l.items != len {
             let Some(t) = self.transcripts.get(chat_id) else { return l.state.clone() };
             let blocks = crate::ui::trace_view::blocks_of(&t.items, working);
             let sigs: Vec<u64> = blocks.iter().map(|b| block_sig(&t.items, b)).collect();
