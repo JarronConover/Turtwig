@@ -748,9 +748,20 @@
                 { "type": "Completions", "props": { "chat": "{{ .selected.chat.id }}" } },
                 { "type": "Queued", "props": { "c": "{{ .selected.chat }}" } },
                 {
+                  "if": ".selected.chat.kind == \"subagent\"",
+                  "id": "subagent-note",
+                  "type": "row",
+                  "style": { "padding": [8, 12], "gap": 8, "align": "center", "radius": 10, "border": 1, "border_color": "@line", "font_size": 13, "color": "@text_muted" },
+                  "children": [
+                    { "type": "icon", "props": { "name": "bot", "size": 14 } },
+                    { "type": "text", "props": { "text": "A subagent's conversation, shown as it runs. Reply in its parent chat." } }
+                  ]
+                },
+                {
+                  "if": ".selected.chat.kind != \"subagent\"",
                   "id": "composer-frame",
                   "type": "row",
-                  "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": [6, 8, 6, 6], "gap": 6, "align": "center" },
+                  "style": { "radius": 10, "border": 1, "border_color": "@line", "background": "@composer", "padding": [6, 8, 6, 6], "gap": 6, "align": "end" },
                   "children": [
                     { "type": "composer", "style": { "grow": 1, "min_width": 0 } },
                     {
@@ -770,6 +781,35 @@
                       "style": { "width": 28, "height": 28, "shrink": 0, "radius": 14, "align": "center", "justify": "center", "background": "@accent", "cursor": "pointer", "hover": { "opacity": 0.85 } },
                       "on": { "click": { "do": "composer.send", "chat": "{{ .selected.chat.id }}" } },
                       "children": [{ "type": "icon", "props": { "name": "arrow-up", "size": 15, "color": "#ffffff" } }]
+                    }
+                  ]
+                },
+                {
+                  "if": "(.selected.background | length) > 0",
+                  "id": "background-work",
+                  "type": "row",
+                  "style": { "padding": [8, 2, 0, 2], "gap": 6, "wrap": true, "align": "center" },
+                  "children": [
+                    {
+                      "for": ".selected.background", "as": "b", "key": ".b.tool_id", "id": "background-chip",
+                      "type": "row",
+                      "style": {
+                        "height": 26, "padding": [0, 10], "gap": 6, "align": "center", "radius": 13, "border": 1, "border_color": "@line",
+                        "font_size": 12.5, "color": "@text_muted", "cursor": "pointer", "max_width": 320, "hover": { "color": "@text", "background": "@hover" }
+                      },
+                      "tooltip": "{{ if .b.kind == \"shell\" then \"Running in the background. Click to follow its output in a terminal tab.\" else \"A subagent at work. Click to open its conversation in a tab.\" end }}",
+                      "on": {
+                        "click": {
+                          "do": "if", "cond": "{{ .b.kind == \"shell\" }}",
+                          "then": { "do": "shell.open", "task": "{{ .b.task_id }}", "output": "{{ .b.output }}", "label": "{{ .b.label }}" },
+                          "else": { "do": "subagent.open", "chat": "{{ .b.chat }}", "agent": "{{ .b.agent }}", "label": "{{ .b.label }}" }
+                        }
+                      },
+                      "children": [
+                        { "type": "spinner", "props": { "size": "xsmall", "color": "@age" } },
+                        { "type": "icon", "props": { "name": "{{ if .b.kind == \"shell\" then \"square-terminal\" else \"bot\" end }}", "size": 12 } },
+                        { "type": "text", "props": { "text": "{{ .b.label }}" }, "style": { "truncate": true, "min_width": 0 } }
+                      ]
                     }
                   ]
                 }
@@ -842,7 +882,6 @@
           "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 140 },
           "children": [{ "type": "spinner", "props": { "size": "xsmall" } }, { "type": "text", "props": { "text": "Starting…" } }]
         },
-        { "if": ".selected.worktree", "id": "chat-tab-divider", "type": "divider", "props": { "axis": "y" }, "style": { "height": 14, "self": "center", "margin": [0, 4] } },
         {
           "if": ".selected.worktree",
           "id": "chat-tab-new",
@@ -852,6 +891,8 @@
           "on": { "click": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
           "children": [{ "type": "icon", "props": { "name": "plus", "size": 13 } }]
         },
+        { "type": "spacer" },
+        { "if": ".selected.chats | any(.open | not)", "id": "chat-tab-divider", "type": "divider", "props": { "axis": "y" }, "style": { "height": 14, "self": "center", "margin": [0, 4] } },
         {
           "if": ".selected.chats | any(.open | not)",
           "id": "chat-history",
@@ -872,7 +913,7 @@
               "type": "scroll",
               "layer": "top",
               "style": {
-                "position": "absolute", "top": 30, "left": 0, "width": 320, "max_height": 380, "padding": 6, "gap": 2,
+                "position": "absolute", "top": 30, "right": 0, "width": 320, "max_height": 380, "padding": 6, "gap": 2,
                 "radius": 10, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg"
               },
               "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
@@ -1123,7 +1164,31 @@
           "type": "row",
           "style": { "height": 46, "shrink": 0, "padding": [0, 18], "gap": 6, "align": "center" },
           "children": [
-            { "type": "BottomTab", "id": "tab-terminal", "props": { "tab": "terminal", "text": "Terminal", "icon": "square-terminal" } },
+            {
+              "for": ".selected.terminals", "as": "t", "key": ".t.id", "id": "tab-terminal",
+              "type": "row",
+              "style": {
+                "height": 26, "padding": "{{ if (.selected.terminals | length) > 1 then [0, 6, 0, 11] else [0, 11] end }}", "gap": 6, "align": "center", "radius": 13, "border": 1, "font_size": 13, "cursor": "pointer", "shrink": 0,
+                "border_color": "{{ if .state.bottom_tab != \"changes\" and .t.active then \"@tab_border\" else \"transparent\" end }}",
+                "background": "{{ if .state.bottom_tab != \"changes\" and .t.active then \"@tab_bg\" else \"transparent\" end }}",
+                "color": "{{ if .state.bottom_tab != \"changes\" and .t.active then \"@text\" else \"@age\" end }}",
+                "hover": { "color": "@text" }
+              },
+              "on": { "click": { "do": "terminal.select", "id": "{{ .t.id }}" } },
+              "children": [
+                { "type": "icon", "props": { "name": "{{ if .t.command then \"scroll-text\" else \"square-terminal\" end }}", "size": 13 } },
+                { "type": "text", "props": { "text": "{{ .t.label }}" }, "style": { "truncate": true, "max_width": 220 } },
+                {
+                  "if": "(.selected.terminals | length) > 1",
+                  "type": "box",
+                  "style": { "width": 18, "height": 18, "radius": 9, "align": "center", "justify": "center", "color": "@text_faint", "hover": { "background": "@hover", "color": "@text" } },
+                  "tooltip": "Close this terminal",
+                  "on": { "click": { "do": "terminal.close", "id": "{{ .t.id }}" } },
+                  "children": [{ "type": "icon", "props": { "name": "x", "size": 11 } }]
+                }
+              ]
+            },
+            { "id": "terminal-new", "type": "IconButton", "props": { "icon": "plus", "size": 24, "tooltip": "New terminal  ⌃⇧T", "do": "terminal.new" } },
             {
               "type": "BottomTab", "id": "tab-changes",
               "props": { "tab": "changes", "icon": "file-diff", "text": "Changes{{ if .selected.diff.files > 0 then \" \" + (.selected.diff.files | tostring) else \"\" end }}" }
@@ -1240,6 +1305,7 @@
     { "key": "cmd-,", "do": "settings.open" },
     { "key": "cmd-shift-d", "do": { "do": "state.toggle", "key": "designer_open" } },
     { "key": "cmd-n", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
+    { "key": "ctrl-shift-t", "if": ".selected.worktree", "do": "terminal.new" },
     { "key": "cmd-shift-c", "if": ".selected.worktree", "do": { "do": "clipboard.copy", "text": "{{ .selected.worktree.path }}" } },
     { "key": "cmd-shift-n", "if": ".selected.worktree", "do": { "do": "worktree.new", "repo": "{{ .selected.worktree.repo }}", "host": "{{ .selected.worktree.host }}" } },
     { "key": "cmd-]", "do": { "do": "select", "offset": 1 } },

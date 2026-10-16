@@ -52,7 +52,11 @@ pub struct Workspace {
     pub(crate) completion: Option<(String, String, Vec<crate::completions::Entry>, usize)>,
     /** Messages typed while a chat was working, sent one per turn as it finishes (`chat.queue`). */
     pub(crate) queued: HashMap<String, Vec<String>>,
+    /** Subagent conversations opened as tabs (read-only): (worktree path, a chat with id `sub:PARENT:AGENT`). */
+    pub(crate) sub_chats: Vec<(String, Chat)>,
     queue_saved: String,
+    /** Chats sent a message in the last few seconds whose hook hasn't said they're working yet. */
+    just_sent: HashMap<String, std::time::Instant>,
     /** This view, for click handlers built without a `cx` (message actions). */
     pub(crate) view_handle: Option<WeakEntity<Workspace>>,
     placeholders: HashMap<String, String>,
@@ -219,6 +223,8 @@ impl Workspace {
             completion: None,
             queued: std::fs::read_to_string(settings::dir().join("queued.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             queue_saved: String::new(),
+            just_sent: HashMap::new(),
+            sub_chats: vec![],
             view_handle: None,
             placeholders: HashMap::new(),
             queue_sent: HashMap::new(),
@@ -830,6 +836,7 @@ impl Workspace {
             merged.chats.extend(m.chats.iter().cloned());
         }
         self.model = merged;
+        self.apply_just_sent();
         self.project_hosts = project_hosts;
         self.section_hosts = section_hosts;
     }
@@ -915,12 +922,53 @@ impl Workspace {
     }
 
     pub(crate) fn chat(&self, id: &str) -> Option<&Chat> {
-        self.model.chats.iter().find(|c| c.id == id)
+        self.model.chats.iter().find(|c| c.id == id).or_else(|| self.sub_chats.iter().find(|(_, c)| c.id == id).map(|(_, c)| c))
+    }
+
+    /** A worktree's terminal tabs (`state.terms:PATH`): [{id, label, command?}]; the first shell has id "1". */
+    pub(crate) fn term_tabs(&self, path: &str) -> Vec<Value> {
+        match self.state.get(&format!("terms:{path}")).and_then(Value::as_array) {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => vec![json!({"id": "1", "label": "Terminal"})],
+        }
+    }
+
+    pub(crate) fn term_active(&self, path: &str) -> String {
+        let tabs = self.term_tabs(path);
+        let want = self.state.get(&format!("term_active:{path}")).and_then(Value::as_str).unwrap_or("1");
+        let has = |id: &str| tabs.iter().any(|t| t["id"].as_str() == Some(id));
+        if has(want) { want.to_string() } else { tabs[0]["id"].as_str().unwrap_or("1").to_string() }
+    }
+
+    /** Where a terminal tab's view is kept: the first shell under the worktree's path, others under PATH#ID. */
+    pub(crate) fn term_key(path: &str, id: &str) -> String {
+        if id == "1" { path.to_string() } else { format!("{path}#{id}") }
+    }
+
+    /** The view for a worktree's active terminal tab, made on first show. */
+    pub(crate) fn active_terminal(&mut self, path: &str, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
+        let id = self.term_active(path);
+        let key = Self::term_key(path, &id);
+        if let Some(t) = self.terminals.get(&key) {
+            return Some(t.clone());
+        }
+        let w = self.worktree(path)?.clone();
+        if !self.connected || id == "1" {
+            return None;
+        }
+        let tab = self.term_tabs(path).into_iter().find(|t| t["id"].as_str() == Some(id.as_str()))?;
+        let command = tab.get("command").and_then(Value::as_str).map(str::to_string);
+        let (remote, ts) = (self.remote_for_host(&w.host), self.settings.terminal.clone());
+        let host = w.host.clone();
+        let view = cx.new(|cx| TerminalView::shell(remote, host, None, Some(w.path.clone()), Some(id.clone()), command, &ts, cx));
+        self.terminals.insert(key, view.clone());
+        Some(view)
     }
 
     /** A worktree's chats in tab order (`state.tab_order[path]`, set by dragging tabs), the rest after. */
     fn chats_of(&self, w: &Worktree) -> Vec<&Chat> {
         let mut chats: Vec<&Chat> = w.chat_ids.iter().filter_map(|id| self.chat(id)).collect();
+        chats.extend(self.sub_chats.iter().filter(|(p, _)| *p == w.path).map(|(_, c)| c));
         if let Some(order) = self.state.get("tab_order").and_then(|o| o.get(&w.path)).and_then(Value::as_array) {
             let rank = |id: &str| order.iter().position(|x| x.as_str() == Some(id)).unwrap_or(usize::MAX);
             chats.sort_by_key(|c| rank(&c.id));
@@ -1005,6 +1053,27 @@ impl Workspace {
         let selected_w = self.current_worktree().map(|w| self.worktree_json(w, Value::Null));
         let selected_diff = self.selected.as_deref().map(|p| self.diff_summary(p)).unwrap_or(Value::Null);
         let selected_c = self.current_chat().map(|c| self.chat_json(c));
+        let terminals: Vec<Value> = self.selected.as_deref().map(|p| {
+            let active = self.term_active(p);
+            self.term_tabs(p).into_iter().map(|mut t| {
+                let on = t["id"].as_str() == Some(active.as_str());
+                if let Value::Object(o) = &mut t {
+                    o.insert("active".into(), Value::Bool(on));
+                }
+                t
+            }).collect()
+        }).unwrap_or_default();
+        let background: Vec<Value> = self
+            .current_chat()
+            .filter(|c| c.alive || c.state == "working" || c.state == "waiting")
+            .and_then(|c| self.transcripts.get(&c.id).map(|t| (c, t)))
+            .map(|(c, t)| {
+                t.background().into_iter().map(|b| json!({
+                    "kind": b.kind, "label": b.label, "tool_id": b.tool_id, "task_id": b.task_id, "output": b.output,
+                    "chat": c.id, "agent": b.task_id.clone().unwrap_or_else(|| b.tool_id.clone()),
+                })).collect()
+            })
+            .unwrap_or_default();
         let chats_here: Vec<Value> = self.current_worktree().map(|w| self.chats_of(w).into_iter().map(|c| self.chat_json(c)).collect()).unwrap_or_default();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
         to_val(&json!({
@@ -1012,7 +1081,8 @@ impl Workspace {
             "sections": sections,
             "worktrees": worktrees,
             "chats": self.model.chats.iter().map(|c| self.chat_json(c)).collect::<Vec<_>>(),
-            "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here, "diff": selected_diff},
+            "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here, "diff": selected_diff,
+                         "terminals": terminals, "background": background},
             "state": self.state,
             "theme": self.settings.theme,
             "hosts": self.settings.hosts,
@@ -1354,11 +1424,46 @@ impl Workspace {
         }
     }
 
+    /** A chat shows as working from the moment you send, not from when its hook reports in a second later. */
+    fn apply_just_sent(&mut self) {
+        self.just_sent.retain(|_, t| t.elapsed() < Duration::from_secs(10));
+        let mut seen = vec![];
+        for c in self.model.chats.iter_mut() {
+            if self.just_sent.contains_key(&c.id) {
+                if c.state == "idle" {
+                    c.state = "working".into();
+                } else {
+                    seen.push(c.id.clone());
+                }
+            }
+        }
+        for id in seen {
+            self.just_sent.remove(&id);
+        }
+    }
+
     /** Sends a message to a chat, showing it in the transcript at once. */
     pub(crate) fn send_chat(&mut self, id: &str, text: String) {
+        self.just_sent.insert(id.to_string(), std::time::Instant::now());
+        self.apply_just_sent();
         self.transcripts.entry(id.to_string()).or_default().echo(&text);
         let call = Call::ChatSend { chat_id: id.to_string(), text };
         self.route(&call).send(call);
+    }
+
+    /** A subagent tab is working while its parent still lists it as running. */
+    fn refresh_sub_chats(&mut self) {
+        for (_, c) in self.sub_chats.iter_mut() {
+            let Some((parent, agent)) = c.id.strip_prefix("sub:").and_then(|r| r.split_once(':')) else { continue };
+            let running = self.transcripts.get(parent).is_some_and(|t| {
+                t.background().iter().any(|b| b.tool_id == agent || b.task_id.as_deref() == Some(agent))
+            });
+            let state = if running { "working" } else { "idle" };
+            if c.state != state {
+                c.state = state.into();
+                self.ctx_rev += 1;
+            }
+        }
     }
 
     /** Queued messages survive a restart: kept in `queued.json` in the settings folder. */
@@ -2093,6 +2198,7 @@ impl Render for Workspace {
         let t = std::time::Instant::now();
         self.flush(window, cx);
         self.save_queue();
+        self.refresh_sub_chats();
         self.perf.borrow_mut().spans.insert("flush", t.elapsed().as_secs_f32() * 1000.);
         self.render_generation += 1;
         self.clickables.clear();

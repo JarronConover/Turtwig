@@ -301,7 +301,7 @@ impl Workspace {
             }
             "terminal" => {
                 let path = props.get("path").and_then(Value::as_str).map(str::to_string).or_else(|| self.selected.clone());
-                path.and_then(|p| self.terminals.get(&p).cloned()).map(|t| div().size_full().child(t).into_any_element()).into_iter().collect()
+                path.and_then(|p| self.active_terminal(&p, cx)).map(|t| div().size_full().child(t).into_any_element()).into_iter().collect()
             }
             "diff" => vec![self.diff_view(&props, window, cx)],
             "attachments" => {

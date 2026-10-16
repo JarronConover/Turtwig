@@ -2,7 +2,7 @@
 content blocks; tool results are attached to the call they answer. */
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub enum Item {
@@ -30,6 +30,22 @@ pub struct Transcript {
     orphans: HashMap<String, (String, bool)>,
     /** Messages just sent, shown right away until the file has them: (text, item index). */
     echoes: Vec<(String, usize)>,
+    /** Background shells and agents that have finished: their tool_use ids and task ids. */
+    finished: HashSet<String>,
+}
+
+/** Something a chat started that's still running: a background shell or a subagent. */
+#[derive(Debug, Clone, PartialEq)]
+pub struct Background {
+    /** "shell" or "agent". */
+    pub kind: &'static str,
+    pub label: String,
+    /** The tool_use id that started it. */
+    pub tool_id: String,
+    /** The shell's task id, or the agent's id once known. */
+    pub task_id: Option<String>,
+    /** Where a background shell writes its output. */
+    pub output: Option<String>,
 }
 
 impl Transcript {
@@ -59,6 +75,56 @@ impl Transcript {
             self.push_entry(e);
         }
         self.revision += 1;
+    }
+
+    /** Background shells and subagents started in the loaded lines that haven't finished. */
+    pub fn background(&self) -> Vec<Background> {
+        let mut out = vec![];
+        for it in &self.items {
+            let Item::Tool { id, name, summary, input, result, .. } = it else { continue };
+            let bg = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
+            let done = |task: &Option<String>| self.finished.contains(id) || task.as_ref().is_some_and(|t| self.finished.contains(t));
+            match name.as_str() {
+                "Bash" if bg => {
+                    let Some(r) = result else { continue };
+                    let task = after(r, "running in background with ID: ").map(|s| word(s).trim_end_matches('.').to_string());
+                    let output = after(r, "Output is being written to: ").map(|s| word(s).trim_end_matches('.').to_string());
+                    if task.is_some() && !done(&task) {
+                        out.push(Background { kind: "shell", label: summary.clone(), tool_id: id.clone(), task_id: task, output });
+                    }
+                }
+                "Agent" | "Task" => {
+                    let task = result.as_deref().and_then(|r| after(r, "agentId: ")).map(|s| word(s).to_string());
+                    let running = result.is_none() || (bg && task.is_some());
+                    if running && !done(&task) {
+                        let kind = input.get("subagent_type").and_then(Value::as_str).filter(|t| *t != "general-purpose");
+                        let label = match kind {
+                            Some(k) => format!("{k}: {summary}"),
+                            None => summary.clone(),
+                        };
+                        out.push(Background { kind: "agent", label, tool_id: id.clone(), task_id: task, output: None });
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /** Notes background work that finished, from a <task-notification> (in a queued or a delivered message). */
+    fn note_finished(&mut self, text: &str) {
+        let mut rest = text;
+        while let Some(i) = rest.find("<task-notification>") {
+            let block = &rest[i..];
+            let end = block.find("</task-notification>").unwrap_or(block.len());
+            let block = &block[..end];
+            for tag in ["task-id", "tool-use-id"] {
+                if let Some(v) = between(block, &format!("<{tag}>"), &format!("</{tag}>")) {
+                    self.finished.insert(v.to_string());
+                }
+            }
+            rest = &rest[i + end.max(1)..];
+        }
     }
 
     /** Shows a message you just sent before Claude Code writes it to the file (which takes a moment). */
@@ -120,6 +186,12 @@ impl Transcript {
             return;
         }
         let kind = e.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind == "queue-operation" {
+            if let Some(c) = e.get("content").and_then(Value::as_str) {
+                self.note_finished(c);
+            }
+            return;
+        }
         // Text Claude Code adds for the model (a slash command's expanded skill, caveats): never typed.
         if kind == "user" && e.get("isMeta").and_then(Value::as_bool) == Some(true) {
             return;
@@ -183,6 +255,13 @@ impl Transcript {
                             let id = b["id"].as_str().unwrap_or("").to_string();
                             let name = b["name"].as_str().unwrap_or("tool").to_string();
                             let input = b["input"].clone();
+                            if matches!(name.as_str(), "TaskStop" | "KillShell" | "KillBash") {
+                                for k in ["task_id", "shell_id", "bash_id", "id"] {
+                                    if let Some(v) = input.get(k).and_then(Value::as_str) {
+                                        self.finished.insert(v.to_string());
+                                    }
+                                }
+                            }
                             self.tool_index.insert(id.clone(), self.items.len());
                             self.items.push(Item::Tool {
                                 summary: summarize(&name, &input),
@@ -232,6 +311,9 @@ impl Transcript {
                 });
             }
             return;
+        }
+        if t.contains("<task-notification>") {
+            self.note_finished(t);
         }
         if t.starts_with("<task-notification>") {
             let summary = between(t, "<summary>", "</summary>").unwrap_or("A background task finished");
@@ -297,6 +379,14 @@ fn summarize(name: &str, input: &Value) -> String {
             .unwrap_or_default(),
     };
     text.lines().next().unwrap_or("").chars().take(140).collect()
+}
+
+fn after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    text.find(marker).map(|i| &text[i + marker.len()..])
+}
+
+fn word(s: &str) -> &str {
+    s.split(|c: char| c.is_whitespace() || c == ')' || c == ',').next().unwrap_or("")
 }
 
 fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
@@ -420,5 +510,29 @@ mod paging_tests {
         assert_eq!((t.start, t.lines), (9, 12));
         assert!(matches!(&t.items[0], super::Item::Tool { result: Some(r), .. } if r == "a.txt"));
         assert!(matches!(&t.items[1], super::Item::Assistant { text } if text == "done"));
+    }
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::Transcript;
+    use serde_json::json;
+
+    #[test]
+    fn running_shells_and_agents_until_they_finish() {
+        let mut t = Transcript::default();
+        t.append(0, &[
+            json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "make", "description": "Build", "run_in_background": true}},
+                {"type": "tool_use", "id": "t2", "name": "Agent", "input": {"description": "Look around", "prompt": "x"}}
+            ]}}),
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Command running in background with ID: b9. Output is being written to: /tmp/x/b9.output. You will be notified."}]}}),
+        ]);
+        let bg = t.background();
+        assert_eq!(bg.len(), 2);
+        assert_eq!((bg[0].kind, bg[0].task_id.as_deref(), bg[0].output.as_deref()), ("shell", Some("b9"), Some("/tmp/x/b9.output")));
+        assert_eq!(bg[1].kind, "agent");
+        t.append(2, &[json!({"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n<task-id>b9</task-id>\n<status>completed</status>\n</task-notification>"})]);
+        assert_eq!(t.background().len(), 1);
     }
 }

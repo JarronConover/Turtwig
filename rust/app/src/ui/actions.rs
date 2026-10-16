@@ -40,6 +40,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("project.move", "{repo?, index? | target: repo with zone}: reorder a project (repo defaults to `dragged`)"),
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
     ("worktree.delete", "{path}"),
+    ("terminal.new", "{path?, id?, label?, command?}: a terminal tab under the worktree (a fresh shell, or `command`)"),
+    ("terminal.select / terminal.close", "{path?, id}: show or close a terminal tab (the last one can't be closed); `.selected.terminals` lists them"),
+    ("shell.open", "{task, output, label?, path?}: a terminal tab following a background shell's output file"),
+    ("subagent.open", "{chat, agent, label?}: open a subagent's conversation (read-only) as a tab next to its chat; `.selected.background` lists running ones"),
     ("transcript.load_earlier", "{chat?}: load `chat.transcript_page` more of a long chat's older messages (scrolling to the top does this too)"),
     ("worktree.rename_branch", "{path, branch?}: rename the worktree's git branch (asks when branch is missing)"),
     ("worktree.new", "{repo, host: mac|box, branch?}: a worktree on that branch, checked out if it exists, else new from origin/main (asks when branch is missing)"),
@@ -277,6 +281,14 @@ impl Workspace {
                     self.call(Call::ChatKeys { chat_id: id, keys }, cx);
                 }
             }
+            "chat.close" if chat().is_some_and(|id| id.starts_with("sub:")) => {
+                if let Some(id) = chat() {
+                    self.sub_chats.retain(|(_, c)| c.id != id);
+                    self.opened.remove(&id);
+                    self.active_chat.retain(|_, c| c != &id);
+                    self.sync_selection(window, cx);
+                }
+            }
             "chat.close" => {
                 if let Some(id) = chat() {
                     self.closed.insert(id.clone());
@@ -494,6 +506,87 @@ impl Workspace {
                             let current = self.worktree(&path).map(|w| w.title.clone()).unwrap_or_default();
                             self.name_dialog("Rename worktree", &current, window, cx, move |ws, l, cx| ws.label_worktree(path.clone(), l, cx));
                         }
+                    }
+                }
+            }
+            "terminal.new" => {
+                if let Some(path) = s("path").or_else(|| self.selected.clone()) {
+                    let mut tabs = self.term_tabs(&path);
+                    let id = s("id").unwrap_or_else(|| {
+                        let n = tabs.iter().filter_map(|t| t["id"].as_str()?.parse::<u32>().ok()).max().unwrap_or(1) + 1;
+                        n.to_string()
+                    });
+                    if !tabs.iter().any(|t| t["id"].as_str() == Some(id.as_str())) {
+                        let n = tabs.len() + 1;
+                        let mut tab = json!({"id": id, "label": s("label").unwrap_or_else(|| format!("Terminal {n}"))});
+                        if let Some(c) = s("command") {
+                            tab["command"] = Value::String(c);
+                        }
+                        tabs.push(tab);
+                        self.set_state(format!("terms:{path}"), Value::Array(tabs));
+                    }
+                    self.set_state(format!("term_active:{path}"), Value::String(id));
+                    self.set_state("bottom_tab".into(), Value::String("terminal".into()));
+                    self.set_state("terminal_open".into(), Value::Bool(true));
+                }
+            }
+            "terminal.select" => {
+                if let (Some(path), Some(id)) = (s("path").or_else(|| self.selected.clone()), s("id")) {
+                    self.set_state(format!("term_active:{path}"), Value::String(id));
+                    self.set_state("bottom_tab".into(), Value::String("terminal".into()));
+                }
+            }
+            "terminal.close" => {
+                if let (Some(path), Some(id)) = (s("path").or_else(|| self.selected.clone()), s("id")) {
+                    let mut tabs = self.term_tabs(&path);
+                    if tabs.len() > 1 {
+                        let at = tabs.iter().position(|t| t["id"].as_str() == Some(id.as_str()));
+                        if let Some(i) = at {
+                            tabs.remove(i);
+                            if let Some(t) = self.terminals.remove(&Workspace::term_key(&path, &id)) {
+                                t.read(cx).kill();
+                            }
+                            if self.term_active(&path) == id {
+                                let next = tabs[i.min(tabs.len() - 1)]["id"].as_str().unwrap_or("1").to_string();
+                                self.set_state(format!("term_active:{path}"), Value::String(next));
+                            }
+                            self.set_state(format!("terms:{path}"), Value::Array(tabs));
+                        }
+                    }
+                }
+            }
+            "shell.open" => {
+                if let (Some(task), Some(output)) = (s("task"), s("output")) {
+                    let path = s("path").or_else(|| self.selected.clone());
+                    let label = s("label").unwrap_or_else(|| "Background shell".into());
+                    let quoted = format!("'{}'", output.replace('\'', "'\\''"));
+                    let open = json!({"do": "terminal.new", "path": path, "id": format!("task-{task}"), "label": label,
+                                      "command": format!("tail -n +1 -F {quoted}")});
+                    self.run_action(&open, window, cx);
+                }
+            }
+            "subagent.open" => {
+                if let (Some(parent), Some(agent)) = (s("chat"), s("agent")) {
+                    let id = format!("sub:{parent}:{agent}");
+                    let path = self.all_worktrees().into_iter().find(|w| w.chat_ids.contains(&parent)).map(|w| w.path.clone());
+                    if let (Some(path), Some(p)) = (path, self.chat(&parent).cloned()) {
+                        if self.chat(&id).is_none() {
+                            let mut c = p.clone();
+                            c.id = id.clone();
+                            c.name = s("label").unwrap_or_else(|| "Subagent".into());
+                            c.kind = "subagent".into();
+                            c.status = "subagent".into();
+                            c.alive = false;
+                            c.state = "working".into();
+                            c.waiting_on = None;
+                            c.suggestion = None;
+                            c.tmux = String::new();
+                            self.sub_chats.push((path.clone(), c));
+                        }
+                        self.closed.remove(&id);
+                        self.opened.insert(id.clone());
+                        self.active_chat.insert(path.clone(), id);
+                        self.select(path, window, cx);
                     }
                 }
             }

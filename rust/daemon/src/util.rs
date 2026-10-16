@@ -145,17 +145,30 @@ pub fn chat_session(chat_id: &str) -> String {
     format!("chat-{}", &chat_id[..chat_id.len().min(8)])
 }
 
-/** The tmux shell for a worktree's terminal, `sh-<sha1(realpath)[:10]>`; created on first use. */
-pub fn shell_session(path: &str) -> String {
+/** A folder's terminal session (`sh-<sha1(realpath)[:10]>`, created on first use): its first shell, or another one `extra` names; `command` runs instead of a
+login shell (and the pane stays open after it ends). */
+pub fn shell_session(path: &str, extra: Option<&str>, command: Option<&str>) -> String {
     let real = realpath(path);
-    let name = format!("sh-{}", &sha1_smol::Sha1::from(real.as_bytes()).digest().to_string()[..10]);
+    let base = format!("sh-{}", &sha1_smol::Sha1::from(real.as_bytes()).digest().to_string()[..10]);
+    let name = match extra.filter(|e| !e.is_empty()) {
+        Some(e) => format!("{base}-{}", e.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>()),
+        None => base,
+    };
     let target = format!("={name}");
     if !run("tmux", &["has-session", "-t", &target], &[], None, Duration::from_secs(5)).ok {
         let env = agent_box_dir().join("bin").join("agent-env");
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".into());
-        run("tmux", &["new-session", "-d", "-s", &name, "-c", &real, &env.to_string_lossy(), &shell, "-l"],
-            &[], None, Duration::from_secs(10));
+        let env = env.to_string_lossy();
+        let mut args = vec!["new-session", "-d", "-s", &name, "-c", &real, &env];
+        match command {
+            Some(c) => args.extend(["sh", "-c", c]),
+            None => args.extend([shell.as_str(), "-l"]),
+        }
+        run("tmux", &args, &[], None, Duration::from_secs(10));
         run("tmux", &["set", "-t", &name, "status", "off"], &[], None, Duration::from_secs(5));
+        if command.is_some() {
+            run("tmux", &["set", "-t", &name, "remain-on-exit", "on"], &[], None, Duration::from_secs(5));
+        }
     }
     name
 }

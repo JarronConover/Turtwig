@@ -266,6 +266,12 @@ fn parse_entry(line: &[u8]) -> Value {
     let Ok(mut v) = serde_json::from_slice::<Value>(line) else { return Value::Null };
     match v.get("type").and_then(Value::as_str) {
         Some("user" | "assistant" | "system") => {}
+        // Background work finishing (its <task-notification>), whether or not the agent has read it yet.
+        Some("queue-operation") => {
+            let mut text = v.get("content").and_then(Value::as_str).unwrap_or("").to_string();
+            cut(&mut text);
+            return json!({ "type": "queue-operation", "operation": v.get("operation"), "content": text });
+        }
         _ => return json!({ "type": v.get("type").cloned().unwrap_or(Value::Null) }),
     }
     if let Some(o) = v.as_object_mut() {
@@ -392,6 +398,26 @@ fn sc_tool(args: &[&str], path: Option<&str>) -> Result<Value, String> {
     }
 }
 
+/** A subagent's transcript next to its parent's: `<session>/subagents/agent-<id>.jsonl`, found by agent id
+or by the `toolUseId` in its `.meta.json`. */
+fn subagent_path(parent: &std::path::Path, agent: &str) -> Option<PathBuf> {
+    let dir = parent.with_extension("").join("subagents");
+    let direct = dir.join(format!("agent-{agent}.jsonl"));
+    if direct.exists() {
+        return Some(direct);
+    }
+    for e in std::fs::read_dir(&dir).ok()?.flatten() {
+        let p = e.path();
+        if p.to_string_lossy().ends_with(".meta.json") {
+            let meta: Value = serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
+            if meta.get("toolUseId").and_then(Value::as_str) == Some(agent) {
+                return Some(PathBuf::from(p.to_string_lossy().replace(".meta.json", ".jsonl")));
+            }
+        }
+    }
+    None
+}
+
 fn registry_chat(chat_id: &str) -> Option<Value> {
     let dir = util::agent_home().join("state").join("registry").join("chats");
     for e in std::fs::read_dir(dir).ok()?.flatten() {
@@ -433,10 +459,23 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             return Ok(json!({ "last_seq": last }));
         }
         Call::TranscriptRead { chat_id, from, tail, before } => {
-            let chat = registry_chat(&chat_id).ok_or("no such chat")?;
-            let id = chat.get("id").and_then(|v| v.as_str()).unwrap_or(&chat_id).to_string();
+            // `sub:PARENT:AGENT`: a subagent's transcript, beside its parent's (AGENT is its id or the
+            // tool_use id that started it).
+            let (lookup, agent) = match chat_id.strip_prefix("sub:").and_then(|r| r.split_once(':')) {
+                Some((parent, agent)) => (parent.to_string(), Some(agent.to_string())),
+                None => (chat_id.clone(), None),
+            };
+            let chat = registry_chat(&lookup).ok_or("no such chat")?;
+            let reg_id = chat.get("id").and_then(|v| v.as_str()).unwrap_or(&lookup).to_string();
             let dir = chat.get("dir").and_then(|v| v.as_str()).ok_or("chat has no folder")?;
-            let path = util::transcript_path(dir, &id);
+            let mut path = util::transcript_path(dir, &reg_id);
+            let id = match &agent {
+                Some(a) => {
+                    path = subagent_path(&path, a).ok_or("no transcript for that subagent yet")?;
+                    chat_id.clone()
+                }
+                None => reg_id,
+            };
             let mut w = Watch { path: path.clone(), offset: 0, next_line: 0 };
             // An older page: lines before `before`, leaving the watch alone.
             if let Some(b) = before {
@@ -477,7 +516,21 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         Call::ChatStart { chat_id } => chat_tool(&["start", &chat_id], 300),
         Call::ChatStop { chat_id } => chat_tool(&["stop", &chat_id], 120),
         Call::ChatArchive { chat_id } => chat_tool(&["archive", &chat_id], 120),
-        Call::ChatSend { chat_id, text } => chat_tool(&["send", &chat_id, &text], 60),
+        Call::ChatSend { chat_id, text } => {
+            // Pasted as one bracketed paste, then Enter: Claude Code sees exactly where the paste ends, so
+            // the Enter submits it with no wait (typing it in took a half-second pause and a Python start).
+            let target = format!("={}:", util::chat_session(&chat_id));
+            let ok = |args: &[&str]| util::run("tmux", args, &[], None, Duration::from_secs(10)).ok;
+            if !ok(&["has-session", "-t", &target]) {
+                return chat_tool(&["send", &chat_id, &text], 60);
+            }
+            let buf = format!("abx-{}", &chat_id[..chat_id.len().min(8)]);
+            if !(ok(&["set-buffer", "-b", &buf, "--", &text]) && ok(&["paste-buffer", "-p", "-d", "-b", &buf, "-t", &target])) {
+                return Err("couldn't type into the chat".into());
+            }
+            std::thread::sleep(Duration::from_millis(60));
+            if ok(&["send-keys", "-t", &target, "C-m"]) { Ok(json!({})) } else { Err("couldn't submit the message".into()) }
+        }
         Call::ChatKeys { chat_id, keys } => {
             let target = format!("={}:", util::chat_session(&chat_id));
             let mut args = vec!["send-keys", "-t", target.as_str()];
@@ -524,10 +577,16 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         Call::SectionMove { id, index } => sc_tool(&["section", "move", &id, "--index", &index.to_string()], None),
         Call::ProjectMove { repo, index } => sc_tool(&["project", "move", &repo, "--index", &index.to_string()], None),
         Call::WorktreeDiff { path, base } => crate::diff::worktree_diff(&path, base.as_deref()),
-        Call::TermOpen { session, cwd, cols, rows } => {
+        Call::TermKill { session } => {
+            if session.starts_with("sh-") {
+                util::run("tmux", &["kill-session", "-t", &format!("={session}")], &[], None, Duration::from_secs(5));
+            }
+            return Ok(json!({}));
+        }
+        Call::TermOpen { session, cwd, cols, rows, name, command } => {
             let session = match (session, cwd) {
                 (Some(s), _) => s,
-                (None, Some(c)) => util::shell_session(&c),
+                (None, Some(c)) => util::shell_session(&c, name.as_deref(), command.as_deref()),
                 (None, None) => return Err("term_open needs a session or a cwd".into()),
             };
             let term_id = shared.next_term.fetch_add(1, Ordering::SeqCst);

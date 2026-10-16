@@ -69,7 +69,20 @@ pub enum Call {
     /** `{diff, base, from, truncated}`: unified diff text; `base` "uncommitted" (default) or "branch". */
     WorktreeDiff { path: String, base: Option<String> },
     /** Attach to a tmux session: a chat's, or the shell of `cwd` when `session` is None. */
-    TermOpen { session: Option<String>, cwd: Option<String>, cols: u16, rows: u16 },
+    /** With `cwd`: `name` picks one of the folder's shells (none: the first), and `command` runs in a new
+    one instead of a login shell. */
+    TermOpen {
+        session: Option<String>,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        command: Option<String>,
+    },
+    /** Ends a terminal's tmux session (closing a terminal tab). */
+    TermKill { session: String },
     TermInput { term_id: u64, data: String },
     TermResize { term_id: u64, cols: u16, rows: u16 },
     TermClose { term_id: u64 },

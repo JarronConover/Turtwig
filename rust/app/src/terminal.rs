@@ -42,6 +42,11 @@ pub struct TerminalView {
     keys: std::collections::HashMap<String, Value>,
     pub session: Option<String>,
     pub cwd: Option<String>,
+    /** Which of the folder's shells (none: the first), and a command to run instead of a shell. */
+    name: Option<String>,
+    command: Option<String>,
+    /** The tmux session the daemon attached, once open. */
+    opened: Option<String>,
     size: (u16, u16),
     focus: FocusHandle,
     font: Font,
@@ -54,6 +59,11 @@ pub struct TerminalView {
 
 impl TerminalView {
     pub fn new(remote: Remote, host: String, session: Option<String>, cwd: Option<String>, ts: &TerminalSettings, cx: &mut Context<Self>) -> Self {
+        Self::shell(remote, host, session, cwd, None, None, ts, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn shell(remote: Remote, host: String, session: Option<String>, cwd: Option<String>, name: Option<String>, command: Option<String>, ts: &TerminalSettings, cx: &mut Context<Self>) -> Self {
         let size = Size { cols: 100, rows: 30 };
         Self {
             term: Term::new(Config::default(), &size, VoidListener),
@@ -63,6 +73,9 @@ impl TerminalView {
             term_id: None,
             session,
             cwd,
+            name,
+            command,
+            opened: None,
             size: (100, 30),
             focus: cx.focus_handle(),
             font: font(ts.font_family.clone()),
@@ -82,18 +95,37 @@ impl TerminalView {
         }
         self.term_id = Some(0);
         let remote = self.remote.clone();
-        let call = Call::TermOpen { session: self.session.clone(), cwd: self.cwd.clone(), cols: self.size.0, rows: self.size.1 };
+        let call = Call::TermOpen {
+            session: self.session.clone(),
+            cwd: self.cwd.clone(),
+            cols: self.size.0,
+            rows: self.size.1,
+            name: self.name.clone(),
+            command: self.command.clone(),
+        };
         cx.spawn(async move |this, cx| {
             if let Ok(v) = remote.call(call).await {
                 let id = v["term_id"].as_u64();
+                let session = v["session"].as_str().map(str::to_string);
                 this.update(cx, |t, cx| {
                     t.term_id = id;
+                    t.opened = session;
                     cx.notify();
                 })
                 .ok();
             }
         })
         .detach();
+    }
+
+    /** Closes the terminal and ends its shell (a closed terminal tab). */
+    pub fn kill(&self) {
+        if let Some(id) = self.term_id.filter(|id| *id != 0) {
+            self.remote.send(Call::TermClose { term_id: id });
+        }
+        if let Some(s) = self.opened.clone() {
+            self.remote.send(Call::TermKill { session: s });
+        }
     }
 
     pub fn output(&mut self, data: &str, cx: &mut Context<Self>) {
