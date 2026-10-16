@@ -664,6 +664,8 @@
           ]
         },
         { "id": "toolbar-drag", "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } },
+        { "type": "CostButton", "id": "usage-cost" },
+        { "type": "PlanButton", "id": "usage-plan" },
         {
           "id": "history",
           "type": "box",
@@ -1255,6 +1257,128 @@
       ]
     },
 
+    "CostButton": {
+      "about": "What the current worktree's conversations cost (API-equivalent, at models.dev rates), with a breakdown: this chat, the worktree, its tabs, and every conversation by time. `.usage` holds the numbers.",
+      "type": "box",
+      "style": { "position": "relative" },
+      "children": [
+        {
+          "id": "usage-cost-pill",
+          "type": "row",
+          "style": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "align": "center", "font_size": 12.5, "font_family": "@font_mono", "cursor": "pointer", "hover": { "background": "@hover" } },
+          "tooltip": "What this worktree's chats cost",
+          "on": { "click": [{ "do": "state.toggle", "key": "usage_cost_open" }, { "do": "state.set", "key": "usage_plan_open", "value": false }] },
+          "children": [{ "type": "text", "props": { "text": "{{ .usage.worktree_text }}" } }]
+        },
+        {
+          "if": ".state.usage_cost_open",
+          "type": "box", "layer": "top",
+          "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
+          "on": { "click": { "do": "state.set", "key": "usage_cost_open", "value": false } }
+        },
+        {
+          "if": ".state.usage_cost_open",
+          "id": "usage-cost-panel",
+          "type": "column", "layer": "top",
+          "style": { "position": "absolute", "top": 32, "right": -6, "width": 340, "padding": [12, 14], "gap": 6, "radius": 12, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg", "font_size": 13 },
+          "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
+          "children": [
+            { "type": "text", "props": { "text": "Conversation cost" }, "style": { "font_size": 14, "font_weight": "semibold", "padding": [0, 0, 4, 0] } },
+            { "type": "UsageRow", "props": { "label": "Active conversation", "value": "{{ .usage.chat_text }}" } },
+            { "type": "UsageRow", "props": { "label": "Current worktree", "value": "{{ .usage.worktree_text }}", "strong": true } },
+            { "if": "(.usage.tabs | length) > 0", "type": "divider", "style": { "margin": [4, 0] } },
+            { "if": "(.usage.tabs | length) > 0", "type": "text", "props": { "text": "Tabs in this worktree" }, "style": { "font_size": 12, "color": "@text_faint" } },
+            { "for": ".usage.tabs", "as": "t", "key": ".t.id", "type": "UsageRow", "props": { "label": "{{ .t.name }}", "value": "{{ .t.cost_text }}", "strong": "{{ .t.id == .selected.chat.id }}" } },
+            { "type": "divider", "style": { "margin": [4, 0] } },
+            { "type": "text", "props": { "text": "All conversations" }, "style": { "font_size": 12, "color": "@text_faint" } },
+            { "type": "UsageRow", "props": { "label": "Last 7 days", "value": "{{ .usage.last_7_text }}", "strong": true } },
+            { "type": "UsageRow", "props": { "label": "Last 30 days", "value": "{{ .usage.last_30_text }}", "strong": true } },
+            { "type": "UsageRow", "props": { "label": "Last 90 days", "value": "{{ .usage.last_90_text }}", "strong": true } },
+            { "type": "UsageRow", "props": { "label": "Lifetime", "value": "{{ .usage.lifetime_text }}", "strong": true } },
+            { "if": ".usage.unpriced_tokens > 0", "type": "text", "props": { "text": "{{ .usage.unpriced_tokens }} tokens unpriced ({{ .usage.unpriced_models | join(\", \") }})" }, "style": { "font_size": 11.5, "color": "@text_faint", "padding": [4, 0, 0, 0] } },
+            { "type": "text", "props": { "text": "Rates: models.dev{{ if .usage.rates_updated then \", updated \" + .usage.rates_updated else \"\" end }}{{ if .usage.loading then \" · counting…\" else \"\" end }}" }, "style": { "font_size": 11.5, "color": "@text_faint" } },
+            { "type": "text", "props": { "text": "API-equivalent cost of every Claude Code conversation on both machines, not a bill: plan usage is valued at the same rates." }, "style": { "font_size": 11.5, "color": "@text_faint" } }
+          ]
+        }
+      ]
+    },
+
+    "UsageRow": {
+      "about": "A label and an amount on one line. props: label, value, strong (bool).",
+      "type": "row",
+      "style": { "height": 24, "gap": 10, "align": "center" },
+      "children": [
+        { "type": "text", "props": { "text": "{{ .props.label }}" }, "style": { "grow": 1, "min_width": 0, "truncate": true, "color": "{{ if .props.strong then \"@text\" else \"@text_muted\" end }}" } },
+        { "type": "text", "props": { "text": "{{ .props.value }}" }, "style": { "font_family": "@font_mono", "font_weight": "{{ if .props.strong then \"semibold\" else \"normal\" end }}" } }
+      ]
+    },
+
+    "PlanButton": {
+      "about": "How much of the Claude plan is left (session, weekly, per-model weekly) from Claude Code's usage endpoint. `.usage.plan.limits`.",
+      "type": "box",
+      "style": { "position": "relative" },
+      "children": [
+        {
+          "type": "IconButton", "id": "usage-plan-button",
+          "props": {
+            "icon": "circle-gauge", "size": 26,
+            "tooltip": "{{ (.usage.plan.limits // []) | map(.name + \" \" + ((.left | floor) | tostring) + \"% left\") | join(\" · \") }}",
+            "do": [{ "do": "state.toggle", "key": "usage_plan_open" }, { "do": "state.set", "key": "usage_cost_open", "value": false }]
+          },
+          "style": { "color": "{{ if ((.usage.plan.limits // []) | any(.left < 20)) then \"@danger\" elif ((.usage.plan.limits // []) | any(.left < 40)) then \"@warning\" else \"@text_muted\" end }}" }
+        },
+        {
+          "if": ".state.usage_plan_open",
+          "type": "box", "layer": "top",
+          "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
+          "on": { "click": { "do": "state.set", "key": "usage_plan_open", "value": false } }
+        },
+        {
+          "if": ".state.usage_plan_open",
+          "id": "usage-plan-panel",
+          "type": "column", "layer": "top",
+          "style": { "position": "absolute", "top": 32, "right": -6, "width": 320, "padding": [12, 14], "gap": 10, "radius": 12, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg", "font_size": 13 },
+          "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
+          "children": [
+            {
+              "type": "row", "style": { "gap": 8, "align": "center" },
+              "children": [
+                { "type": "icon", "props": { "name": "asterisk", "size": 15, "color": "@claude" } },
+                { "type": "text", "props": { "text": "Claude Code" }, "style": { "font_size": 14, "font_weight": "semibold" } }
+              ]
+            },
+            { "if": "(.usage.plan.limits // []) | length == 0", "type": "text", "props": { "text": "No plan usage yet: Refresh fetches it from Claude Code." }, "style": { "color": "@text_faint" } },
+            {
+              "for": ".usage.plan.limits // []", "as": "l", "key": ".l.name",
+              "type": "column", "style": { "gap": 5 },
+              "children": [
+                {
+                  "type": "row", "style": { "gap": 8, "align": "center" },
+                  "children": [
+                    { "type": "text", "props": { "text": "{{ .l.name }}" }, "style": { "grow": 1 } },
+                    { "type": "text", "props": { "text": "{{ .l.left | floor }}% left" }, "style": { "color": "{{ if .l.left < 20 then \"@danger\" elif .l.left < 40 then \"@warning\" else \"@success\" end }}" } },
+                    { "if": ".l.resets_in", "type": "text", "props": { "text": "Resets in {{ .l.resets_in }}" }, "style": { "color": "@text_faint", "font_size": 12 } }
+                  ]
+                },
+                {
+                  "type": "box", "style": { "height": 6, "radius": 3, "background": "@hover" },
+                  "children": [{ "type": "box", "style": { "height": 6, "radius": 3, "width": "{{ (.l.left | floor | tostring) + \"%\" }}", "background": "{{ if .l.left < 20 then \"@danger\" elif .l.left < 40 then \"@warning\" else \"@success\" end }}" } }]
+                }
+              ]
+            },
+            { "type": "divider" },
+            {
+              "type": "row", "style": { "gap": 8, "align": "center", "font_size": 12, "color": "@text_faint" },
+              "children": [
+                { "type": "text", "props": { "text": "Updated {{ .usage.plan.updated_text // \"never\" }}" }, "style": { "grow": 1 } },
+                { "type": "Pill", "id": "usage-refresh", "props": { "text": "Refresh", "do": "usage.refresh" } }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+
     "DiffTools": {
       "about": "The diff's controls: what to compare against, collapse/expand every file, refresh.",
       "type": "row",
@@ -1687,6 +1811,13 @@
   "palette": { "placeholder": "Type a command or a worktree…", "worktrees": true, "worktree_label": "Go to {title}" },
 
   "settings_editor": { "width": 760 },
+
+  // Cost and plan usage (the $ pill and the gauge in the toolbar). rates: per model id (or prefix),
+  // dollars per million tokens {input, output, cache_read, cache_write, cache_write_1h}, over models.dev's.
+  "usage": {
+    "refresh_secs": 120, "rates_max_age_hours": 24, "rates_url": "https://models.dev/api.json", "rates_providers": ["anthropic"],
+    "rates": {}, "plan_max_age_secs": 300, "plan_command": null
+  },
 
   // The macOS menu bar: `app` items join the a.box menu; each of `menus` is a menu of its own.
   // Items are {label, do} or {separator: true}.

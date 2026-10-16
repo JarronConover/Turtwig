@@ -621,6 +621,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             }
             return Ok(json!({}));
         }
+        Call::Usage => return Ok(crate::usage::scan()),
         Call::TermKill { session } => {
             if session.starts_with("sh-") {
                 util::run("tmux", &["kill-session", "-t", &format!("={session}")], &[], None, Duration::from_secs(5));

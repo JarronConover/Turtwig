@@ -8,6 +8,7 @@ mod mac;
 mod model;
 mod server;
 mod term;
+mod usage;
 mod util;
 
 fn main() -> anyhow::Result<()> {

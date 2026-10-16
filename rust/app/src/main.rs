@@ -11,6 +11,7 @@ mod script;
 mod settings;
 mod terminal;
 mod transcript;
+mod usage;
 mod ui;
 mod workspace;
 

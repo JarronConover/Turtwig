@@ -109,6 +109,7 @@ pub struct Workspace {
     /** Subagent conversations opened as tabs (read-only): (worktree path, a chat with id `sub:PARENT:AGENT`). */
     pub(crate) sub_chats: Vec<(String, Chat)>,
     queue_saved: String,
+    pub(crate) usage: crate::usage::Usage,
     /** Drafts read at startup, waiting for their chat's message box; and what drafts.json holds. */
     drafts_loaded: HashMap<String, String>,
     drafts_saved: String,
@@ -249,6 +250,15 @@ impl Workspace {
         }
         let remote = remotes.get("box").cloned().expect("the box connection");
         let watch = Self::watch_settings(window, cx);
+        // Usage and plan limits: refreshed every `usage.refresh_secs`.
+        let usage_loop = cx.spawn(async move |this, cx| loop {
+            let every = this.update(cx, |ws, cx| {
+                ws.refresh_usage(false, cx);
+                ws.settings.num("usage.refresh_secs", 120.).max(15.)
+            });
+            let Ok(every) = every else { break };
+            cx.background_executor().timer(Duration::from_secs_f64(every)).await;
+        });
         let env_every = settings.connection.env_push_seconds;
         let env_push = cx.spawn(async move |_, cx| loop {
             if env_every == 0 {
@@ -305,6 +315,7 @@ impl Workspace {
             completion: None,
             queued: std::fs::read_to_string(settings::dir().join("queued.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             queue_saved: String::new(),
+            usage: Default::default(),
             drafts_loaded: std::fs::read_to_string(settings::dir().join("drafts.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             drafts_saved: String::new(),
             just_sent: HashMap::new(),
@@ -390,7 +401,7 @@ impl Workspace {
             diff_geom: Default::default(),
             diff_scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
-            _tasks: [watch, env_push, designer_listen].into_iter().chain(listeners).chain(clicks).collect(),
+            _tasks: [watch, env_push, designer_listen, usage_loop].into_iter().chain(listeners).chain(clicks).collect(),
             _subscriptions: vec![],
         };
         let mut ws = ws;
@@ -1207,6 +1218,8 @@ impl Workspace {
             .unwrap_or_default();
         let chats_here: Vec<Value> = self.current_worktree().map(|w| self.chats_of(w).into_iter().map(|c| self.chat_json(c)).collect()).unwrap_or_default();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
+        let tabs: Vec<(String, String)> = self.current_worktree().map(|w| self.chats_of(w).into_iter().filter(|c| self.chat_open(c)).map(|c| (c.id.clone(), c.name.clone())).collect()).unwrap_or_default();
+        let usage = self.usage.context(self.current_chat().map(|c| c.id.as_str()), self.current_worktree().map(|w| (w.host.as_str(), w.path.as_str())), &tabs);
         to_val(&json!({
             "projects": projects,
             "sections": sections,
@@ -1243,6 +1256,7 @@ impl Workspace {
                 "errors": self.exprs.errors.borrow().iter().chain(self.settings.warnings.iter()).cloned().collect::<Vec<_>>(),
             },
             "now": now,
+            "usage": usage,
             "data": self.script_data,
             "designer": {
                 "working": self.designer.working,
@@ -1722,6 +1736,92 @@ impl Workspace {
             i += step;
         }
         false
+    }
+
+    /** Fetches every connected machine's token usage, reloads the plan's limits (refreshing them from
+    Claude Code's endpoint when stale or `force`), and models.dev rates once a day. */
+    pub(crate) fn refresh_usage(&mut self, force: bool, cx: &mut Context<Self>) {
+        let rates_path = settings::dir().join("usage-rates.json");
+        if self.usage.rates.is_empty() {
+            if let Some(v) = std::fs::read_to_string(&rates_path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
+                self.usage.rates = v["models"].as_object().cloned().unwrap_or_default();
+                self.usage.rates_updated = v["fetched"].as_str().map(str::to_string);
+            }
+        }
+        let max_age = self.settings.num("usage.rates_max_age_hours", 24.) * 3600.;
+        let stale = std::fs::metadata(&rates_path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map_or(true, |e| e.as_secs_f64() > max_age);
+        let url = self.settings.get("usage.rates_url").and_then(Value::as_str).unwrap_or("https://models.dev/api.json").to_string();
+        let providers: Vec<String> = self.settings.get("usage.rates_providers").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_else(|| vec!["anthropic".into()]);
+        if stale || force {
+            cx.spawn(async move |this, cx| {
+                let out = cx.background_spawn(async move { std::process::Command::new("/usr/bin/curl").args(["-sSL", "-m", "30", &url]).output() }).await;
+                let Some(v) = out.ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()) else { return };
+                let mut models = Map::new();
+                for p in &providers {
+                    for (id, m) in v[p.as_str()]["models"].as_object().into_iter().flatten() {
+                        if let Some(c) = m.get("cost") {
+                            models.insert(id.clone(), c.clone());
+                        }
+                    }
+                }
+                if models.is_empty() {
+                    return;
+                }
+                let fetched = std::process::Command::new("date").arg("+%Y-%m-%d").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                let _ = std::fs::write(settings::dir().join("usage-rates.json"), serde_json::to_string(&json!({"fetched": fetched, "models": models})).unwrap_or_default());
+                this.update(cx, |ws, cx| {
+                    ws.usage.rates = models;
+                    ws.usage.rates_updated = fetched;
+                    let o = ws.settings.get("usage.rates").and_then(Value::as_object).cloned().unwrap_or_default();
+                    ws.usage.recompute(&o);
+                    ws.ctx_rev += 1;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        // The plan's limits: Claude Code's status line keeps ~/.claude/oauth-usage-cache.json fresh; when it's
+        // older than `usage.plan_max_age_secs` (or on Refresh), ask the endpoint the same way.
+        self.usage.load_plan();
+        let plan_age = self.usage.plan_updated.map(|t| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|n| n.as_secs_f64() - t).unwrap_or(0.)).unwrap_or(f64::MAX);
+        if force || plan_age > self.settings.num("usage.plan_max_age_secs", 300.) {
+            let script = self.settings.get("usage.plan_command").and_then(Value::as_str).unwrap_or(PLAN_COMMAND).to_string();
+            cx.spawn(async move |this, cx| {
+                let _ = cx.background_spawn(async move { std::process::Command::new("/bin/sh").arg("-c").arg(script).output() }).await;
+                this.update(cx, |ws, cx| {
+                    ws.usage.load_plan();
+                    ws.ctx_rev += 1;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        let hosts: Vec<(String, Remote)> = self.remotes.iter().filter(|(h, _)| self.host_up.get(*h) == Some(&true)).map(|(h, r)| (h.clone(), r.clone())).collect();
+        if hosts.is_empty() {
+            return;
+        }
+        self.usage.loading = true;
+        cx.spawn(async move |this, cx| {
+            for (host, r) in hosts {
+                if let Ok(v) = r.call(Call::Usage).await {
+                    this.update(cx, |ws, _| {
+                        ws.usage.raw.insert(host.clone(), v);
+                    })
+                    .ok();
+                }
+            }
+            this.update(cx, |ws, cx| {
+                ws.usage.loading = false;
+                let o = ws.settings.get("usage.rates").and_then(Value::as_object).cloned().unwrap_or_default();
+                ws.usage.recompute(&o);
+                ws.ctx_rev += 1;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /** A subagent tab is working while its parent still lists it as running. */
@@ -2962,6 +3062,9 @@ pub(crate) fn image_element(src: &str, fit: &str) -> Img {
     };
     el.object_fit(fit)
 }
+
+/** Refreshes Claude Code's plan-usage cache from its OAuth endpoint (the token stays in the keychain). */
+const PLAN_COMMAND: &str = r#"token=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])' 2>/dev/null); [ -n "$token" ] && out=$(/usr/bin/curl -sS -m 10 https://api.anthropic.com/api/oauth/usage -H "Authorization: Bearer $token" -H "anthropic-beta: oauth-2025-04-20") && printf '%s' "$out" | grep -q '"limits"' && printf '%s' "$out" > "$HOME/.claude/oauth-usage-cache.json""#;
 
 /** A cheap fingerprint of what a transcript row shows: its items' kinds, text lengths and results. */
 fn block_sig(items: &[Item], b: &crate::ui::trace_view::Block) -> u64 {

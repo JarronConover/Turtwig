@@ -87,6 +87,8 @@ pub enum Call {
     /** Scrolls a terminal's tmux history without tmux mouse mode: positive lines go back (entering copy
     mode), negative come forward; 0 leaves copy mode. */
     TermScroll { session: String, lines: i32 },
+    /** Token usage of every Claude Code session on this machine (see the daemon's usage.rs). */
+    Usage,
     /** Ends a terminal's tmux session (closing a terminal tab). */
     TermKill { session: String },
     TermInput { term_id: u64, data: String },
