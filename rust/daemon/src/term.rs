@@ -12,6 +12,9 @@ pub struct Term {
 
 /** A pty running `tmux attach` to `session`; output streams to `tx` as `TermOutput`. */
 pub fn open(term_id: u64, session: &str, cols: u16, rows: u16, tx: Sender<String>) -> anyhow::Result<Term> {
+    if session.starts_with("sh-") {
+        crate::util::shell_options(session);
+    }
     let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
     let mut cmd = CommandBuilder::new("tmux");
     cmd.args(["attach", "-t", &format!("={session}")]);

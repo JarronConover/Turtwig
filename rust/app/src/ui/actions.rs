@@ -57,7 +57,13 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
     ("palette.open", "the command palette"),
     ("steps.expand_all / steps.collapse_all", "{chat?}: open or close every step line in a chat's transcript"),
-    ("ui.click", "{id?, label?}: click a clickable node as if by hand: exact node id, else the first whose id or tooltip contains `label` (inspect.json lists them)"),
+    ("ui.click", "{id?, label?, double?, press?}: click a clickable node as if by hand: exact node id, else the first whose id or tooltip contains `label` (inspect.json lists them); `double`/`press` use its double-click or mouse-down action"),
+    ("ui.menu", "{id? | node?, item}: run an item of a node's right-click menu (node by exact id, else id or tooltip containing `node`; item by label, exact or containing)"),
+    ("dialog.submit", "{values?: [..]}: fill the open dialog's fields in order (`.app.dialog`, values in inspect.json) and save it"),
+    ("dialog.cancel", "close the open dialog without saving"),
+    ("palette.run", "{label | index}: run a command palette entry (label exact, else the first containing it) without opening the palette"),
+    ("chat.jump_to_latest", "{chat?}: scroll to the newest message and keep following"),
+    ("completion.move / completion.close", "{by?}: move the composer's completion highlight, or close the list"),
     ("composer.set / composer.type", "{chat?, text}: replace or add to the text in a chat's message box (the designer's is chat `designer`)"),
     ("js", "{code, ...args}: run JavaScript with `args`, `ctx` (the context), and `ab` (see Scripts)"),
     ("<a script action>", "any name a script registers with ab.action(name, fn) works as an action everywhere"),
@@ -133,7 +139,7 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             if let Err(e) = remote.call(call).await {
                 this.update(cx, |ws, cx| {
-                    ws.pending_actions.push(json!({"do": "notify", "text": format!("Couldn't rename the branch: {e}")}));
+                    ws.pending_actions.push(json!({"do": "notify", "text": ws.tr("rename_branch_failed", "Couldn't rename the branch: {error}", &[("error", &e.to_string())])}));
                     cx.notify();
                 })
                 .ok();
@@ -144,7 +150,7 @@ impl Workspace {
 
     fn new_worktree(&mut self, repo: String, host: String, branch: String, cx: &mut Context<Self>) {
         let remote = self.remote_for_host(&host);
-        self.status = format!("Making a worktree for {branch}…");
+        self.status = self.tr("making_worktree", "Making a worktree for {branch}…", &[("branch", &branch)]);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let res = remote.call(Call::WorktreeCreate { repo, branch: branch.trim().to_string() }).await;
@@ -155,11 +161,11 @@ impl Workspace {
                             ws.selected = Some(p.to_string());
                             ws.set_state("selected_worktree".into(), Value::String(p.to_string()));
                         }
-                        ws.status = "Connected".into();
+                        ws.status = ws.tr("connected", "Connected", &[]);
                     }
                     Err(e) => {
-                        ws.status = "Connected".into();
-                        ws.pending_actions.push(json!({"do": "notify", "text": format!("Couldn't make the worktree: {e}")}));
+                        ws.status = ws.tr("connected", "Connected", &[]);
+                        ws.pending_actions.push(json!({"do": "notify", "text": ws.tr("new_worktree_failed", "Couldn't make the worktree: {error}", &[("error", &e.to_string())])}));
                     }
                 }
                 cx.notify();
@@ -260,7 +266,7 @@ impl Workspace {
             "chat.new" => {
                 self.starting = s("dir").filter(|_| s("branch").is_none());
                 let call = Call::ChatNew {
-                    name: s("name").unwrap_or("New chat".into()),
+                    name: s("name").unwrap_or_else(|| self.tr("new_chat_name", "New chat", &[])),
                     kind: s("kind").unwrap_or(if s("dir").is_some() && s("branch").is_none() { "primary".into() } else { "orchestrator".into() }),
                     branch: s("branch"),
                     base: s("base"),
@@ -393,7 +399,8 @@ impl Workspace {
                 if let Some(t) = a.get("text").map(super::render::value_text) {
                     cx.write_to_clipboard(ClipboardItem::new_string(t));
                     use gpui_kit::component::WindowExt as _;
-                    window.push_notification("Copied", cx);
+                    let t = self.tr("copied", "Copied", &[]);
+                    self.toast(t, window, cx);
                 }
             }
             "chat.fork" => {
@@ -412,7 +419,8 @@ impl Workspace {
                 if let Some(id) = chat() {
                     if self.chat(&id).is_some_and(|c| c.status == "running_elsewhere") {
                         use gpui_kit::component::WindowExt as _;
-                        window.push_notification("This chat is running in super.engineering: stop it there, or take it over first", cx);
+                        let t = self.tr("stop_elsewhere", "This chat is running in super.engineering: stop it there, or take it over first", &[]);
+                        self.toast(t, window, cx);
                     } else {
                         self.call(Call::ChatKeys { chat_id: id, keys: vec!["Escape".into()] }, cx);
                     }
@@ -522,7 +530,7 @@ impl Workspace {
                     });
                     if !tabs.iter().any(|t| t["id"].as_str() == Some(id.as_str())) {
                         let n = tabs.len() + 1;
-                        let mut tab = json!({"id": id, "label": s("label").unwrap_or_else(|| format!("Terminal {n}"))});
+                        let mut tab = json!({"id": id, "label": s("label").unwrap_or_else(|| self.tr("terminal_n", "Terminal {n}", &[("n", &n.to_string())]))});
                         if let Some(c) = s("command") {
                             tab["command"] = Value::String(c);
                         }
@@ -562,7 +570,7 @@ impl Workspace {
             "shell.open" => {
                 if let (Some(task), Some(output)) = (s("task"), s("output")) {
                     let path = s("path").or_else(|| self.selected.clone());
-                    let label = s("label").unwrap_or_else(|| "Background shell".into());
+                    let label = s("label").unwrap_or_else(|| self.tr("background_shell", "Background shell", &[]));
                     let quoted = format!("'{}'", output.replace('\'', "'\\''"));
                     let open = json!({"do": "terminal.new", "path": path, "id": format!("task-{task}"), "label": label,
                                       "command": format!("tail -n +1 -F {quoted}")});
@@ -577,7 +585,7 @@ impl Workspace {
                         if self.chat(&id).is_none() {
                             let mut c = p.clone();
                             c.id = id.clone();
-                            c.name = s("label").unwrap_or_else(|| "Subagent".into());
+                            c.name = s("label").unwrap_or_else(|| self.tr("subagent", "Subagent", &[]));
                             c.kind = "subagent".into();
                             c.status = "subagent".into();
                             c.alive = false;
@@ -637,7 +645,7 @@ impl Workspace {
                         this.update(cx, |ws, cx| {
                             match res.ok().and_then(|v| v["stdout"].as_str().and_then(|u| web_url(u.trim()))) {
                                 Some(url) => cx.open_url(&url),
-                                None => ws.pending_actions.push(json!({"do": "notify", "text": "This project has no origin remote"})),
+                                None => ws.pending_actions.push(json!({"do": "notify", "text": ws.tr("no_remote", "This project has no origin remote", &[])})),
                             }
                             cx.notify();
                         })
@@ -753,8 +761,61 @@ impl Workspace {
                 }
             }
             "app.snapshot" => self.snapshot(window, cx),
+            "ui.menu" => {
+                // Run a right-click menu item without the mouse: the node by `id` (else the first whose id or
+                // tooltip contains `node`), its item by `item` (exact, else containing; submenus included).
+                let (id, node, item) = (s("id"), s("node").map(|l| l.to_lowercase()), s("item").unwrap_or_default());
+                let menu = self
+                    .menus
+                    .iter()
+                    .find(|(nid, _, _, _)| id.as_deref() == Some(nid.as_str()))
+                    .or_else(|| {
+                        let n = node.as_deref()?;
+                        self.menus.iter().find(|(nid, tip, _, _)| nid.to_lowercase().contains(n) || tip.to_lowercase().contains(n))
+                    })
+                    .map(|(_, _, spec, ctx)| (spec.clone(), ctx.clone()));
+                let Some((spec, ctx)) = menu else {
+                    self.exprs.note(format!("ui.menu: no menu on {}", id.or(node).unwrap_or_default()));
+                    return;
+                };
+                fn flat(entries: Vec<crate::ui::render::MenuEntry>, out: &mut Vec<(String, Value)>) {
+                    for e in entries {
+                        match e {
+                            crate::ui::render::MenuEntry::Item { label, action, disabled: false, .. } => out.push((label, action)),
+                            crate::ui::render::MenuEntry::Submenu { children, .. } => flat(children, out),
+                            _ => {}
+                        }
+                    }
+                }
+                let mut items = vec![];
+                flat(self.menu_entries(&spec, &ctx), &mut items);
+                let low = item.to_lowercase();
+                let pick = items.iter().find(|(l, _)| *l == item).or_else(|| items.iter().find(|(l, _)| l.to_lowercase().contains(&low))).map(|(_, a)| a.clone());
+                match pick {
+                    Some(action) => self.run_action(&action, window, cx),
+                    None => self.exprs.note(format!("ui.menu: no item {item:?}; items: {}", items.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(", "))),
+                }
+            }
+            "dialog.submit" => {
+                let values = a.get("values").and_then(Value::as_array).map(|v| v.iter().map(super::render::value_text).collect());
+                self.submit_dialog(values, window, cx);
+            }
+            "dialog.cancel" => self.cancel_dialog(window, cx),
+            "palette.run" => self.run_palette(s("label"), a.get("index").and_then(Value::as_u64).map(|i| i as usize), window, cx),
+            "chat.jump_to_latest" => {
+                if let Some(id) = chat() {
+                    self.jump_to_latest(&id);
+                }
+            }
+            "completion.move" => {
+                let by = a.get("by").and_then(Value::as_i64).unwrap_or(1);
+                self.move_completion(by, cx);
+            }
+            "completion.close" => self.completion = None,
             "ui.click" => {
                 let (id, label) = (s("id"), s("label").map(|l| l.to_lowercase()));
+                let suffix = if a.get("double").and_then(Value::as_bool) == Some(true) { ":double" } else if a.get("press").and_then(Value::as_bool) == Some(true) { ":press" } else { "" };
+                let id = id.map(|i| format!("{i}{suffix}"));
                 let hit = self
                     .clickables
                     .iter()
@@ -806,7 +867,8 @@ impl Workspace {
             "settings.undo" => {
                 use gpui_kit::component::WindowExt as _;
                 if !crate::designer::undo() {
-                    window.push_notification("Nothing to undo", cx);
+                    let t = self.tr("nothing_to_undo", "Nothing to undo", &[]);
+                    self.toast(t, window, cx);
                 }
             }
             "settings.open" => self.open_settings(window, cx),
@@ -816,13 +878,13 @@ impl Workspace {
             }
             "notify" => {
                 use gpui_kit::component::WindowExt as _;
-                window.push_notification(s("text").unwrap_or_default(), cx);
+                self.toast(s("text").unwrap_or_default(), window, cx);
             }
             "notify.system" => {
                 self.notify_count += 1;
                 let id = format!("{}#{}", s("chat").unwrap_or_default(), self.notify_count);
                 #[cfg(target_os = "macos")]
-                crate::macos::notify(&id, &s("title").unwrap_or("a.box".into()), &s("text").unwrap_or_default(), a.get("sound").and_then(Value::as_bool) != Some(false));
+                crate::macos::notify(&id, &s("title").unwrap_or_else(|| self.tr("app_name", "a.box", &[])), &s("text").unwrap_or_default(), a.get("sound").and_then(Value::as_bool) != Some(false));
             }
             "sound" => {
                 #[cfg(target_os = "macos")]

@@ -5,14 +5,71 @@ use crate::remote::Remote;
 use crate::settings::{parse_color, TerminalSettings};
 use agent_box_protocol::Call;
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor, Processor, StdSyncHandler};
 use alacritty_terminal::term::TermMode;
 use base64::Engine as _;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use gpui_kit::*;
+use std::cell::Cell;
+use std::rc::Rc;
+
+/** The 16 ANSI colors unless `terminal.palette` gives its own. */
+const PALETTE: [u32; 16] = [
+    0x1e1e1f, 0xe5534b, 0x3fb950, 0xd29922, 0x488efc, 0xbc8cff, 0x39c5cf, 0xd6d6d8, 0x6e7681, 0xff7b72,
+    0x56d364, 0xe3b341, 0x79c0ff, 0xd2a8ff, 0x56d4dd, 0xffffff,
+];
+
+/** `terminal` settings past fonts and colors: everything here has a default matching the app's original look. */
+#[derive(Clone)]
+struct Look {
+    palette: [Hsla; 16],
+    /** "block", "bar", "underline", "hollow", or "app" (whatever the program asks for). */
+    cursor_shape: String,
+    cursor_focused: f32,
+    cursor_unfocused: f32,
+    cursor_color: Option<Hsla>,
+    /** "auto" (to the program when it asked for the mouse, e.g. tmux with `mouse on`; else this view's own
+    scrollback), "local", "app", or "off". */
+    wheel: String,
+    wheel_lines: f32,
+    select: bool,
+    selection_color: Hsla,
+    copy_key: String,
+}
+
+impl Look {
+    fn from(ts: &TerminalSettings) -> Look {
+        let x = &ts.extra;
+        let mut palette = PALETTE.map(|c| Hsla::from(rgb(c)));
+        if let Some(Value::Array(colors)) = x.get("palette") {
+            for (slot, c) in palette.iter_mut().zip(colors) {
+                if let Some(hex) = c.as_str() {
+                    *slot = parse_color(hex);
+                }
+            }
+        }
+        let cursor = x.get("cursor").cloned().unwrap_or(Value::Null);
+        let cnum = |k: &str, d: f64| cursor.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+        let text = |v: Option<&Value>, d: &str| v.and_then(Value::as_str).unwrap_or(d).to_string();
+        Look {
+            palette,
+            cursor_shape: text(cursor.get("shape"), "block"),
+            cursor_focused: cnum("focused_alpha", 0.75),
+            cursor_unfocused: cnum("unfocused_alpha", 0.3),
+            cursor_color: cursor.get("color").and_then(Value::as_str).map(parse_color),
+            wheel: text(x.get("wheel"), "auto"),
+            wheel_lines: x.get("wheel_lines").and_then(Value::as_f64).unwrap_or(1.) as f32,
+            select: x.get("select").and_then(Value::as_bool).unwrap_or(true),
+            selection_color: x.get("selection").and_then(Value::as_str).map(parse_color).unwrap_or_else(|| parse_color("#3a425299")),
+            copy_key: normalize_combo(&text(x.get("copy_key"), "cmd-c")),
+        }
+    }
+}
 
 struct Size {
     cols: usize,
@@ -55,6 +112,12 @@ pub struct TerminalView {
     padding: [f32; 2],
     fg: Hsla,
     bg: Hsla,
+    look: Look,
+    /** Where the grid was last painted: (origin, cell width, line height), for mapping clicks to cells. */
+    geom: Rc<Cell<(Point<Pixels>, Pixels, Pixels)>>,
+    selecting: bool,
+    /** Fractional wheel lines carried between events. */
+    wheel_rest: f32,
 }
 
 impl TerminalView {
@@ -64,9 +127,14 @@ impl TerminalView {
 
     #[allow(clippy::too_many_arguments)]
     pub fn shell(remote: Remote, host: String, session: Option<String>, cwd: Option<String>, name: Option<String>, command: Option<String>, ts: &TerminalSettings, cx: &mut Context<Self>) -> Self {
-        let size = Size { cols: 100, rows: 30 };
+        let start = ts.extra.get("size").cloned().unwrap_or(Value::Null);
+        let dim = |k: &str, d: u64| start.get(k).and_then(Value::as_u64).unwrap_or(d).clamp(2, 1000) as u16;
+        let (cols, rows) = (dim("cols", 100), dim("rows", 30));
+        let size = Size { cols: cols as usize, rows: rows as usize };
+        let history = ts.extra.get("scrollback").and_then(Value::as_u64).unwrap_or(10_000) as usize;
+        let config = Config { scrolling_history: history, ..Config::default() };
         Self {
-            term: Term::new(Config::default(), &size, VoidListener),
+            term: Term::new(config, &size, VoidListener),
             parser: Processor::new(),
             remote,
             host,
@@ -76,7 +144,7 @@ impl TerminalView {
             name,
             command,
             opened: None,
-            size: (100, 30),
+            size: (cols, rows),
             focus: cx.focus_handle(),
             font: font(ts.font_family.clone()),
             font_size: px(ts.font_size),
@@ -85,7 +153,172 @@ impl TerminalView {
             fg: parse_color(&ts.foreground),
             bg: parse_color(&ts.background),
             keys: ts.keys.iter().map(|(k, v)| (normalize_combo(k), v.clone())).collect(),
+            look: Look::from(ts),
+            geom: Rc::new(Cell::new((Point::default(), px(8.), px(16.)))),
+            selecting: false,
+            wheel_rest: 0.,
         }
+    }
+
+    /** Picks up edited `terminal` settings (keys, colors, palette, cursor, wheel, selection) without reopening. */
+    pub fn apply_settings(&mut self, ts: &TerminalSettings) {
+        self.set_keys(&ts.keys);
+        self.font = font(ts.font_family.clone());
+        self.font_size = px(ts.font_size);
+        self.line_height = ts.line_height;
+        self.padding = ts.padding;
+        self.fg = parse_color(&ts.foreground);
+        self.bg = parse_color(&ts.background);
+        self.look = Look::from(ts);
+    }
+
+    /** The screen as text, newest `n` rows (what an agent reads in inspect.json). */
+    pub fn screen_lines(&self, n: usize) -> Vec<String> {
+        let rows = self.rows();
+        let skip = rows.len().saturating_sub(n);
+        rows.into_iter().skip(skip).map(|(t, _)| t.trim_end().to_string()).collect()
+    }
+
+    /** Types text into the shell as if pasted (bracketed when the program asked for it). */
+    pub fn type_text(&mut self, text: &str) {
+        self.to_bottom();
+        if self.term.mode().contains(TermMode::BRACKETED_PASTE) && text.contains('\n') {
+            self.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
+        } else {
+            self.write(text.as_bytes());
+        }
+    }
+
+    /** Presses a key combo ("enter", "ctrl-c", "alt-left", "up"): `terminal.keys` first, then the usual bytes. */
+    pub fn press(&mut self, combo: &str) -> bool {
+        let combo = normalize_combo(combo);
+        if let Some(Value::String(text)) = self.keys.get(&combo) {
+            let t = text.clone();
+            self.write(t.as_bytes());
+            return true;
+        }
+        let parts: Vec<&str> = combo.split('-').collect();
+        let Some((key, mods)) = parts.split_last() else { return false };
+        let (ctrl, alt) = (mods.contains(&"ctrl"), mods.contains(&"alt"));
+        let ch = (key.chars().count() == 1).then(|| if mods.contains(&"shift") { key.to_uppercase() } else { key.to_string() });
+        match key_bytes(key, ctrl, alt, ch.as_deref()) {
+            Some(b) => {
+                self.to_bottom();
+                self.write(&b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /** Scrolls this view's own history (`lines` > 0 goes back); "bottom" returns to the live screen. */
+    pub fn scroll(&mut self, lines: i32) {
+        self.term.scroll_display(Scroll::Delta(lines));
+    }
+
+    pub fn to_bottom(&mut self) {
+        if self.term.grid().display_offset() > 0 {
+            self.term.scroll_display(Scroll::Bottom);
+        }
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    /** What inspect.json shows about one terminal. */
+    pub fn describe(&self, lines: usize) -> Value {
+        let cursor = self.term.renderable_content().cursor.point;
+        json!({
+            "host": self.host, "session": self.opened.clone().or(self.session.clone()), "term_id": self.term_id,
+            "cwd": self.cwd, "command": self.command, "cols": self.size.0, "rows": self.size.1,
+            "cursor": {"line": cursor.line.0, "column": cursor.column.0},
+            "scrolled_back": self.term.grid().display_offset(),
+            "mouse_reporting": self.term.mode().intersects(TermMode::MOUSE_MODE),
+            "selection": self.selection_text(),
+            "lines": self.screen_lines(lines),
+        })
+    }
+
+    /** The grid cell under a window position. */
+    fn cell_at(&self, pos: Point<Pixels>) -> (GridPoint, Side) {
+        let (origin, cw, lh) = self.geom.get();
+        let x = f32::from(pos.x - origin.x) / f32::from(cw).max(1.);
+        let y = f32::from(pos.y - origin.y) / f32::from(lh).max(1.);
+        let cols = self.term.columns();
+        let col = (x.max(0.) as usize).min(cols.saturating_sub(1));
+        let row = (y.max(0.) as usize).min(self.term.screen_lines().saturating_sub(1));
+        let side = if x.fract() < 0.5 { Side::Left } else { Side::Right };
+        let line = row as i32 - self.term.grid().display_offset() as i32;
+        (GridPoint::new(Line(line), Column(col)), side)
+    }
+
+    fn on_mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+        if !self.look.select {
+            return;
+        }
+        let (at, side) = self.cell_at(e.position);
+        let ty = match e.click_count {
+            2 => SelectionType::Semantic,
+            n if n >= 3 => SelectionType::Lines,
+            _ => SelectionType::Simple,
+        };
+        self.term.selection = Some(Selection::new(ty, at, side));
+        self.selecting = true;
+        cx.notify();
+    }
+
+    fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.selecting || e.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let (at, side) = self.cell_at(e.position);
+        if let Some(s) = self.term.selection.as_mut() {
+            s.update(at, side);
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.selecting = false;
+        if self.term.selection.as_ref().is_some_and(|s| s.is_empty()) {
+            self.term.selection = None;
+        }
+        cx.notify();
+    }
+
+    fn on_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let (_, _, lh) = self.geom.get();
+        let dy = f32::from(e.delta.pixel_delta(lh).y) / f32::from(lh).max(1.) * self.look.wheel_lines + self.wheel_rest;
+        let lines = dy.trunc() as i32;
+        self.wheel_rest = dy - lines as f32;
+        if lines == 0 {
+            return;
+        }
+        let mode = *self.term.mode();
+        let to_app = match self.look.wheel.as_str() {
+            "off" => return,
+            "app" => true,
+            "local" => false,
+            _ => mode.intersects(TermMode::MOUSE_MODE),
+        };
+        if to_app {
+            let (at, _) = self.cell_at(e.position);
+            let (col, row) = (at.column.0 + 1, (at.line.0 + self.term.grid().display_offset() as i32).max(0) as usize + 1);
+            let button = if lines > 0 { 64 } else { 65 };
+            for _ in 0..lines.unsigned_abs() {
+                if mode.contains(TermMode::SGR_MOUSE) {
+                    self.write(format!("\x1b[<{button};{col};{row}M").as_bytes());
+                } else {
+                    self.write(&[0x1b, b'[', b'M', 32 + button as u8, (32 + col.min(223)) as u8, (32 + row.min(223)) as u8]);
+                }
+            }
+        } else if !mode.contains(TermMode::ALT_SCREEN) {
+            self.scroll(lines);
+            cx.notify();
+        }
+        cx.stop_propagation();
     }
 
     /** Opens the PTY on the box once the first layout has a real size. */
@@ -168,7 +401,15 @@ impl TerminalView {
             }
         }
         combo.push(k.key.as_str());
-        match self.keys.get(&combo.join("-")) {
+        let combo = combo.join("-");
+        if self.look.select && combo == self.look.copy_key {
+            if let Some(text) = self.selection_text() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.stop_propagation();
+                return;
+            }
+        }
+        match self.keys.get(&combo) {
             Some(Value::String(text)) => {
                 self.write(text.as_bytes());
                 cx.stop_propagation();
@@ -191,46 +432,21 @@ impl TerminalView {
         if m.platform {
             return;
         }
-        let bytes: Vec<u8> = match k.key.as_str() {
-            "enter" => b"\r".to_vec(),
-            "backspace" => b"\x7f".to_vec(),
-            "tab" => b"\t".to_vec(),
-            "escape" => b"\x1b".to_vec(),
-            "up" => b"\x1b[A".to_vec(),
-            "down" => b"\x1b[B".to_vec(),
-            "right" => b"\x1b[C".to_vec(),
-            "left" => b"\x1b[D".to_vec(),
-            "home" => b"\x1b[H".to_vec(),
-            "end" => b"\x1b[F".to_vec(),
-            "pageup" => b"\x1b[5~".to_vec(),
-            "pagedown" => b"\x1b[6~".to_vec(),
-            "delete" => b"\x1b[3~".to_vec(),
-            key if m.control && key.len() == 1 => {
-                let c = key.as_bytes()[0].to_ascii_lowercase();
-                if c.is_ascii_lowercase() { vec![c - b'a' + 1] } else { return }
-            }
-            _ => match &k.key_char {
-                Some(s) if m.alt => [b"\x1b".as_slice(), s.as_bytes()].concat(),
-                Some(s) => s.as_bytes().to_vec(),
-                None => return,
-            },
-        };
+        let Some(bytes) = key_bytes(k.key.as_str(), m.control, m.alt, k.key_char.as_deref()) else { return };
+        self.term.selection = None;
+        self.to_bottom();
         self.write(&bytes);
         cx.stop_propagation();
     }
 
     fn color(&self, c: TermColor) -> Hsla {
-        const PALETTE: [u32; 16] = [
-            0x1e1e1f, 0xe5534b, 0x3fb950, 0xd29922, 0x488efc, 0xbc8cff, 0x39c5cf, 0xd6d6d8, 0x6e7681, 0xff7b72,
-            0x56d364, 0xe3b341, 0x79c0ff, 0xd2a8ff, 0x56d4dd, 0xffffff,
-        ];
         match c {
             TermColor::Named(NamedColor::Foreground) => self.fg,
             TermColor::Named(NamedColor::Background) => self.bg,
-            TermColor::Named(n) if (n as usize) < 16 => rgb(PALETTE[n as usize]).into(),
+            TermColor::Named(n) if (n as usize) < 16 => self.look.palette[n as usize],
             TermColor::Named(_) => self.fg,
             TermColor::Spec(rgbc) => rgb(((rgbc.r as u32) << 16) | ((rgbc.g as u32) << 8) | rgbc.b as u32).into(),
-            TermColor::Indexed(i) if i < 16 => rgb(PALETTE[i as usize]).into(),
+            TermColor::Indexed(i) if i < 16 => self.look.palette[i as usize],
             TermColor::Indexed(i) if i >= 232 => {
                 let v = 8 + (i as u32 - 232) * 10;
                 rgb((v << 16) | (v << 8) | v).into()
@@ -289,7 +505,25 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.rows();
-        let cursor = self.term.renderable_content().cursor.point;
+        let content = self.term.renderable_content();
+        let (cursor, app_shape) = (content.cursor.point, content.cursor.shape);
+        // Selected cells as (screen row, first column, last column) spans.
+        let offset = content.display_offset as i32;
+        let spans: Vec<(usize, usize, usize)> = content
+            .selection
+            .map(|sel| {
+                let cols = self.term.columns();
+                (0..self.term.screen_lines())
+                    .filter_map(|r| {
+                        let line = Line(r as i32 - offset);
+                        let hit: Vec<usize> = (0..cols).filter(|c| sel.contains(GridPoint::new(line, Column(*c)))).collect();
+                        Some((r, *hit.first()?, *hit.last()?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let look = self.look.clone();
+        let geom = self.geom.clone();
         let font = self.font.clone();
         let font_size = self.font_size;
         let line_height = font_size * self.line_height;
@@ -307,7 +541,10 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.focus.focus(window, cx)))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_scroll_wheel(cx.listener(Self::on_wheel))
             .size_full()
             .child(
                 canvas(
@@ -321,6 +558,11 @@ impl Render for TerminalView {
                     },
                     move |bounds, _, window, cx| {
                         let origin = bounds.origin + point(px(pad[0]), px(pad[1]));
+                        geom.set((origin, cell_width, line_height));
+                        for (r, a, b) in &spans {
+                            let y = origin.y + line_height * *r as f32;
+                            window.paint_quad(fill(Bounds::new(point(origin.x + cell_width * *a as f32, y), size(cell_width * (b - a + 1) as f32, line_height)), look.selection_color));
+                        }
                         for (i, (text, runs)) in rows.iter().enumerate() {
                             let y = origin.y + line_height * i as f32;
                             let mut x = origin.x;
@@ -355,15 +597,59 @@ impl Render for TerminalView {
                             let _ = line.paint(point(origin.x, y), line_height, TextAlign::Left, None, window, cx);
                         }
                         let cx_ = origin.x + cell_width * cursor.column.0 as f32;
-                        let cy = origin.y + line_height * cursor.line.0.max(0) as f32;
-                        let mut c = fg;
-                        c.a = if focused { 0.75 } else { 0.3 };
-                        window.paint_quad(fill(Bounds::new(point(cx_, cy), size(cell_width, line_height)), c));
+                        let cy = origin.y + line_height * (cursor.line.0 + offset).max(0) as f32;
+                        let mut c = look.cursor_color.unwrap_or(fg);
+                        c.a = if focused { look.cursor_focused } else { look.cursor_unfocused };
+                        use alacritty_terminal::vte::ansi::CursorShape as Shape;
+                        let shape = match look.cursor_shape.as_str() {
+                            "bar" => Shape::Beam,
+                            "underline" => Shape::Underline,
+                            "hollow" => Shape::HollowBlock,
+                            "app" => app_shape,
+                            _ => Shape::Block,
+                        };
+                        let thin = px(2.);
+                        match shape {
+                            Shape::Hidden => {}
+                            Shape::Beam => window.paint_quad(fill(Bounds::new(point(cx_, cy), size(thin, line_height)), c)),
+                            Shape::Underline => window.paint_quad(fill(Bounds::new(point(cx_, cy + line_height - thin), size(cell_width, thin)), c)),
+                            Shape::HollowBlock => window.paint_quad(outline(Bounds::new(point(cx_, cy), size(cell_width, line_height)), c, BorderStyle::Solid)),
+                            Shape::Block => window.paint_quad(fill(Bounds::new(point(cx_, cy), size(cell_width, line_height)), c)),
+                        }
                     },
                 )
                 .size_full(),
             )
     }
+}
+
+/** The bytes a key sends to the shell, as xterm does; None for keys that send nothing. */
+fn key_bytes(key: &str, ctrl: bool, alt: bool, key_char: Option<&str>) -> Option<Vec<u8>> {
+    Some(match key {
+        "enter" => b"\r".to_vec(),
+        "backspace" => b"\x7f".to_vec(),
+        "tab" => b"\t".to_vec(),
+        "escape" => b"\x1b".to_vec(),
+        "up" => b"\x1b[A".to_vec(),
+        "down" => b"\x1b[B".to_vec(),
+        "right" => b"\x1b[C".to_vec(),
+        "left" => b"\x1b[D".to_vec(),
+        "home" => b"\x1b[H".to_vec(),
+        "end" => b"\x1b[F".to_vec(),
+        "pageup" => b"\x1b[5~".to_vec(),
+        "pagedown" => b"\x1b[6~".to_vec(),
+        "delete" => b"\x1b[3~".to_vec(),
+        "space" if !ctrl => if alt { b"\x1b ".to_vec() } else { b" ".to_vec() },
+        k if ctrl && k.len() == 1 => {
+            let c = k.as_bytes()[0].to_ascii_lowercase();
+            if c.is_ascii_lowercase() { vec![c - b'a' + 1] } else { return None }
+        }
+        _ => match key_char {
+            Some(s) if alt => [b"\x1b".as_slice(), s.as_bytes()].concat(),
+            Some(s) => s.as_bytes().to_vec(),
+            None => return None,
+        },
+    })
 }
 
 /** "opt+Left" and "Cmd-Backspace" both become "alt-left" / "cmd-backspace", modifiers in a fixed order. */
@@ -389,17 +675,78 @@ mod tests {
         assert_eq!(super::normalize_combo("cmd-shift-Backspace"), "shift-cmd-backspace");
         assert_eq!(super::normalize_combo("shift-enter"), "shift-enter");
     }
+
+    #[test]
+    fn keys_turn_into_bytes() {
+        assert_eq!(super::key_bytes("c", true, false, Some("c")), Some(vec![3]));
+        assert_eq!(super::key_bytes("up", false, false, None), Some(b"\x1b[A".to_vec()));
+        assert_eq!(super::key_bytes("b", false, true, Some("b")), Some(b"\x1bb".to_vec()));
+        assert_eq!(super::key_bytes("f1", false, false, None), None);
+    }
 }
 
 /** Actions this module handles (named in SETTINGS.md with the rest). */
-pub(crate) const ACTIONS: &[(&str, &str)] = &[];
+pub(crate) const ACTIONS: &[(&str, &str)] = &[
+    ("terminal.type", "{text?, keys?: [\"enter\", \"ctrl-c\", \"up\", ...], path?, id?}: type into the worktree's active terminal tab (or tab `id`); text first, then each key"),
+    ("terminal.scroll", "{lines?, to?: \"bottom\", path?, id?}: scroll a terminal's own history (lines > 0 goes back)"),
+    ("terminal.copy", "{path?, id?}: copy a terminal's selection to the clipboard"),
+];
 
-/** Runs `name` if it's one of this module's actions; false otherwise. */
-pub(crate) fn dispatch(_ws: &mut crate::workspace::Workspace, _name: &str, _a: &serde_json::Map<String, serde_json::Value>, _window: &mut gpui_kit::Window, _cx: &mut gpui_kit::Context<crate::workspace::Workspace>) -> bool {
-    false
+/** The terminal view for a tab: `path` (default: the selected worktree) and tab `id` (default: its active tab). */
+fn find(ws: &crate::workspace::Workspace, a: &Map<String, Value>) -> Option<Entity<TerminalView>> {
+    let path = a.get("path").and_then(Value::as_str).map(str::to_string).or_else(|| ws.selected.clone())?;
+    let id = a.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ws.term_active(&path));
+    ws.terminals.get(&crate::workspace::Workspace::term_key(&path, &id)).cloned()
 }
 
-/** What inspect.json shows about this module's views. */
-pub(crate) fn inspect(_ws: &crate::workspace::Workspace, _cx: &gpui_kit::App) -> serde_json::Value {
-    serde_json::Value::Null
+/** Runs `name` if it's one of this module's actions; false otherwise. */
+pub(crate) fn dispatch(ws: &mut crate::workspace::Workspace, name: &str, a: &Map<String, Value>, _window: &mut Window, cx: &mut Context<crate::workspace::Workspace>) -> bool {
+    if !matches!(name, "terminal.type" | "terminal.scroll" | "terminal.copy") {
+        return false;
+    }
+    let Some(t) = find(ws, a) else {
+        ws.exprs.note(format!("{name}: no open terminal there"));
+        return true;
+    };
+    match name {
+        "terminal.type" => {
+            let text = a.get("text").and_then(Value::as_str).map(str::to_string);
+            let keys: Vec<String> = match a.get("keys") {
+                Some(Value::Array(k)) => k.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+                Some(Value::String(k)) => vec![k.clone()],
+                _ => vec![],
+            };
+            let bad = t.update(cx, |t, cx| {
+                if let Some(text) = &text {
+                    t.type_text(text);
+                }
+                let bad: Vec<String> = keys.iter().filter(|k| !t.press(k)).cloned().collect();
+                cx.notify();
+                bad
+            });
+            if !bad.is_empty() {
+                ws.exprs.note(format!("terminal.type: unknown keys {bad:?}"));
+            }
+        }
+        "terminal.scroll" => {
+            let bottom = a.get("to").and_then(Value::as_str) == Some("bottom");
+            let lines = a.get("lines").and_then(Value::as_i64).unwrap_or(0) as i32;
+            t.update(cx, |t, cx| {
+                if bottom { t.to_bottom() } else { t.scroll(lines) }
+                cx.notify();
+            });
+        }
+        _ => {
+            if let Some(text) = t.read(cx).selection_text() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+        }
+    }
+    true
+}
+
+/** What inspect.json shows about this module's views: every open terminal, by view key (`PATH` or `PATH#ID`). */
+pub(crate) fn inspect(ws: &crate::workspace::Workspace, cx: &App) -> Value {
+    let n = ws.settings.num("inspect.terminal_lines", 40.).max(0.) as usize;
+    Value::Object(ws.terminals.iter().map(|(k, t)| (k.clone(), t.read(cx).describe(n))).collect())
 }

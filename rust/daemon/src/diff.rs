@@ -1,12 +1,9 @@
 /*! A worktree's changes as unified diff text: against HEAD (uncommitted) or against where the branch
 left the default branch (everything on the branch). Untracked files are included as additions. */
 
-use crate::util;
+use crate::{config, util};
 use serde_json::{json, Value};
 use std::time::Duration;
-
-const MAX_BYTES: usize = 3_000_000;
-const MAX_UNTRACKED: usize = 200;
 
 fn git(path: &str, args: &[&str]) -> util::Output {
     let mut all = vec!["-C", path];
@@ -20,7 +17,7 @@ fn default_branch(path: &str) -> String {
     if head.ok && !name.is_empty() && name != "origin/HEAD" {
         return name.to_string();
     }
-    "origin/main".into()
+    config::text("diff_default_base", "origin/main")
 }
 
 pub fn worktree_diff(path: &str, base: Option<&str>) -> Result<Value, String> {
@@ -39,18 +36,25 @@ pub fn worktree_diff(path: &str, base: Option<&str>) -> Result<Value, String> {
     if !d.ok && d.stdout.is_empty() {
         return Err(d.stderr.lines().last().unwrap_or("git diff failed").to_string());
     }
+    // `diff_max_bytes` of diff text, `diff_max_untracked` new files, and untracked files only with
+    // `diff_include_untracked`.
+    let (max_bytes, max_untracked) = (config::count("diff_max_bytes", 3_000_000), config::count("diff_max_untracked", 200));
     let mut text = d.stdout;
-    let untracked = git(path, &["ls-files", "--others", "--exclude-standard", "-z"]);
-    let files: Vec<&str> = untracked.stdout.split('\0').filter(|f| !f.is_empty()).collect();
-    for f in files.iter().take(MAX_UNTRACKED) {
-        if text.len() > MAX_BYTES {
+    let untracked = if config::flag("diff_include_untracked", true) {
+        git(path, &["ls-files", "--others", "--exclude-standard", "-z"]).stdout
+    } else {
+        String::new()
+    };
+    let files: Vec<&str> = untracked.split('\0').filter(|f| !f.is_empty()).collect();
+    for f in files.iter().take(max_untracked) {
+        if text.len() > max_bytes {
             break;
         }
         text.push_str(&git(path, &["diff", "--no-index", "--no-color", "--", "/dev/null", f]).stdout);
     }
-    let truncated = text.len() > MAX_BYTES || files.len() > MAX_UNTRACKED;
-    if text.len() > MAX_BYTES {
-        let mut cut = MAX_BYTES;
+    let truncated = text.len() > max_bytes || files.len() > max_untracked;
+    if text.len() > max_bytes {
+        let mut cut = max_bytes;
         while !text.is_char_boundary(cut) {
             cut -= 1;
         }

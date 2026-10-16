@@ -9,7 +9,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::{db, mac, model, term, util};
+use crate::{config, db, mac, model, term, util};
 
 struct Watch {
     path: PathBuf,
@@ -54,12 +54,13 @@ impl Shared {
         }
         if let (Some(sid), Some(state)) = (&e.session_id, model::state_for_event(&e.event)) {
             let waiting = (state == "waiting").then(|| e.payload.clone());
-            self.states.lock().unwrap().insert(sid.clone(), (state.to_string(), waiting));
+            self.states.lock().unwrap().insert(sid.clone(), (state, waiting));
         }
     }
 }
 
 pub fn run() -> anyhow::Result<()> {
+    config::load();
     let sock = util::socket_path();
     std::fs::create_dir_all(util::agent_home())?;
     if UnixStream::connect(&sock).is_ok() {
@@ -107,9 +108,9 @@ fn event_loop(shared: &Arc<Shared>) {
         return;
     };
     loop {
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(config::ms("events_poll_ms", 250));
         let seq = shared.last_seq.load(Ordering::SeqCst);
-        let rows = db::since(&conn, seq, 500);
+        let rows = db::since(&conn, seq, config::count("events_batch", 500).max(1) as i64);
         if rows.is_empty() {
             continue;
         }
@@ -138,11 +139,11 @@ fn model_loop(shared: &Arc<Shared>) {
         let (m, c) = &shared.wake;
         let mut woke = m.lock().unwrap();
         if !*woke {
-            woke = c.wait_timeout(woke, Duration::from_secs(2)).unwrap().0;
+            woke = c.wait_timeout(woke, config::ms("model_poll_ms", 2000)).unwrap().0;
         }
         *woke = false;
     }
-    std::thread::sleep(Duration::from_millis(250));
+    std::thread::sleep(config::ms("model_debounce_ms", 250));
     // On the Mac every build polls super.engineering, so build only while someone is watching.
     if mac::is_mac() && !shared.conns.lock().unwrap().iter().any(|c| c.subscribed.load(Ordering::SeqCst)) {
         *shared.model.lock().unwrap() = None;
@@ -215,7 +216,7 @@ fn warm_line_starts() {
         })
         .collect();
     chats.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, c) in chats.into_iter().take(60) {
+    for (_, c) in chats.into_iter().take(config::count("warm_index_chats", 60)) {
         if let (Some(id), Some(dir)) = (c.get("id").and_then(Value::as_str), c.get("dir").and_then(Value::as_str)) {
             line_starts(&util::transcript_path(dir, id));
         }
@@ -260,7 +261,7 @@ fn read_from(w: &mut Watch, from: usize) -> Vec<Value> {
 }
 
 /** A transcript line as the app needs it: without what it never shows (request blobs, image bytes in
-tool results, the `toolUseResult` copy), and long tool output cut to `TOOL_TEXT_MAX`, so a chat full of
+tool results, the `toolUseResult` copy), and long tool output cut to `tool_text_max`, so a chat full of
 screenshots opens in a fraction of the bytes. */
 fn parse_entry(line: &[u8]) -> Value {
     let Ok(mut v) = serde_json::from_slice::<Value>(line) else { return Value::Null };
@@ -274,14 +275,15 @@ fn parse_entry(line: &[u8]) -> Value {
         }
         _ => return json!({ "type": v.get("type").cloned().unwrap_or(Value::Null) }),
     }
-    if let Some(o) = v.as_object_mut() {
+    if let Some(o) = v.as_object_mut().filter(|_| config::flag("drop_tool_use_result", true)) {
         o.remove("toolUseResult");
     }
+    let drop_images = config::flag("drop_tool_images", true);
     if let Some(blocks) = v.pointer_mut("/message/content").and_then(Value::as_array_mut) {
         for b in blocks.iter_mut().filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")) {
             match b.get_mut("content") {
                 Some(Value::Array(parts)) => {
-                    parts.retain(|p| p.get("type").and_then(Value::as_str) != Some("image"));
+                    parts.retain(|p| !drop_images || p.get("type").and_then(Value::as_str) != Some("image"));
                     for p in parts.iter_mut() {
                         if let Some(Value::String(t)) = p.get_mut("text") {
                             cut(t);
@@ -296,21 +298,21 @@ fn parse_entry(line: &[u8]) -> Value {
     v
 }
 
-const TOOL_TEXT_MAX: usize = 20_000;
-
+/** Long tool output cut to `tool_text_max` characters (0: never), with `tool_text_cut_note` after. */
 fn cut(t: &mut String) {
-    if t.len() > TOOL_TEXT_MAX {
-        let mut at = TOOL_TEXT_MAX;
+    let max = config::count("tool_text_max", 20_000);
+    if max > 0 && t.len() > max {
+        let mut at = max;
         while !t.is_char_boundary(at) {
             at -= 1;
         }
         t.truncate(at);
-        t.push_str("\n… (cut here; the full output is in the transcript file)");
+        t.push_str(&config::text("tool_text_cut_note", "\n… (cut here; the full output is in the transcript file)"));
     }
 }
 
 fn transcript_loop(shared: &Arc<Shared>) {
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(config::ms("transcripts_poll_ms", 300));
     for c in shared.conns.lock().unwrap().iter() {
         let mut watches = c.watches.lock().unwrap();
         for (chat_id, w) in watches.iter_mut() {
@@ -479,7 +481,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let mut w = Watch { path: path.clone(), offset: 0, next_line: 0 };
             // An older page: lines before `before`, leaving the watch alone.
             if let Some(b) = before {
-                let n = tail.unwrap_or(600);
+                let n = tail.unwrap_or(config::count("transcript_page", 600));
                 let starts = line_starts(&path);
                 let start = b.saturating_sub(n);
                 return Ok(json!({ "entries": read_range(&path, &starts, start, b), "from": start }));
@@ -509,7 +511,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             chat_tool(&refs, 900)
         }
         Call::History { limit } => {
-            let limit = limit.unwrap_or(200);
+            let limit = limit.unwrap_or(config::count("history_limit", 200));
             return Ok(history(limit));
         }
         Call::ChatFork { chat_id } => chat_tool(&["fork", &chat_id], 120),
@@ -530,14 +532,18 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             }
             // Claude Code can drop an Enter that lands while it's still taking the paste in: press it, then
             // again (a few times at most) while the prompt line still holds the text.
-            std::thread::sleep(Duration::from_millis(150));
-            for _ in 0..4 {
+            std::thread::sleep(config::ms("send_paste_wait_ms", 150));
+            let prompt = config::text("prompt_char", "❯");
+            for _ in 0..config::count("send_enter_tries", 4).max(1) {
                 if !ok(&["send-keys", "-t", &target, "C-m"]) {
                     return Err("couldn't submit the message".into());
                 }
-                std::thread::sleep(Duration::from_millis(350));
+                std::thread::sleep(config::ms("send_enter_wait_ms", 350));
+                if prompt.is_empty() {
+                    break;
+                }
                 let pane = util::run("tmux", &["capture-pane", "-p", "-t", &target], &[], None, Duration::from_secs(5)).stdout;
-                let waiting = pane.lines().rev().find(|l| l.trim_start().starts_with('❯')).map(|l| l.trim_start().trim_start_matches('❯').trim().to_string());
+                let waiting = pane.lines().rev().find(|l| l.trim_start().starts_with(prompt.as_str())).map(|l| l.trim_start().trim_start_matches(prompt.as_str()).trim().to_string());
                 if waiting.as_deref().is_none_or(str::is_empty) {
                     break;
                 }
@@ -550,7 +556,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             args.extend(keys.iter().map(|k| k.as_str()));
             let o = util::run("tmux", &args, &[], None, Duration::from_secs(10));
             // Esc ends the turn, and no hook says so: the chat is idle from here.
-            if o.ok && keys == ["Escape"] {
+            if o.ok && keys == ["Escape"] && config::flag("escape_marks_idle", true) {
                 let sid = registry_chat(&chat_id).and_then(|c| c.get("id").and_then(Value::as_str).map(str::to_string)).unwrap_or(chat_id.clone());
                 shared.states.lock().unwrap().insert(sid, ("idle".into(), None));
             }
@@ -684,6 +690,7 @@ fn find_item_id(v: &Value, path: &str) -> Option<String> {
 
 /** `agent-boxd connect`: relay stdio to the daemon, starting it first if needed. */
 pub fn connect() -> anyhow::Result<()> {
+    config::load();
     let sock = util::socket_path();
     let stream = match UnixStream::connect(&sock) {
         Ok(s) => s,
@@ -691,12 +698,12 @@ pub fn connect() -> anyhow::Result<()> {
             start_detached()?;
             let mut tries = 0;
             loop {
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(config::ms("connect_wait_ms", 200));
                 if let Ok(s) = UnixStream::connect(&sock) {
                     break s;
                 }
                 tries += 1;
-                if tries > 50 {
+                if tries > config::count("connect_tries", 50) {
                     anyhow::bail!("agent-boxd didn't start (socket {})", sock.display());
                 }
             }

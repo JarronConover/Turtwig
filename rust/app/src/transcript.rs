@@ -3,6 +3,139 @@ content blocks; tool results are attached to the call they answer. */
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
+/** How session lines turn into items, from settings `chat.show`, `chat.labels`, `chat.tools`,
+`chat.tool_names`, `chat.pending`, and `chat.summary_chars`; `set_options` applies them (to lines read
+after, not ones already shown). */
+#[derive(Clone, Debug)]
+pub struct Options {
+    /** Lines Claude Code adds for the model (isMeta: expanded skills, caveats), as notices. */
+    pub meta: bool,
+    /** Subagent lines inside the parent's transcript. */
+    pub sidechain: bool,
+    /** Harness wrappers (command output, system reminders), as notices. */
+    pub wrappers: bool,
+    /** The compaction summary: "step" (a collapsed line), "message" (a user bubble), or "hidden". */
+    pub compaction: String,
+    /** Messages from other Claude sessions: "step", "message", or "hidden". */
+    pub agent_messages: String,
+    /** Background-task notifications: "notice", "message", or "hidden". */
+    pub task_notifications: String,
+    /** Claude Code's error lines as notices. */
+    pub errors: bool,
+    /** The "Thinking"/"Working" row while a chat works. */
+    pub pending: bool,
+    pub summary_chars: usize,
+    pub labels: Value,
+    pub tools: Value,
+    pub tool_names: Value,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            meta: false,
+            sidechain: false,
+            wrappers: false,
+            compaction: "step".into(),
+            agent_messages: "step".into(),
+            task_notifications: "notice".into(),
+            errors: true,
+            pending: true,
+            summary_chars: 140,
+            labels: Value::Null,
+            tools: Value::Null,
+            tool_names: Value::Null,
+        }
+    }
+}
+
+thread_local! {
+    static OPTIONS: std::cell::RefCell<Rc<Options>> = std::cell::RefCell::new(Rc::new(Options::default()));
+}
+
+/** Reads `chat.show`, `chat.labels`, `chat.tools`, `chat.tool_names`, `chat.pending`, `chat.summary_chars`. */
+pub fn set_options(chat: &Value) {
+    let d = Options::default();
+    let show = &chat["show"];
+    let b = |k: &str, d: bool| show.get(k).and_then(Value::as_bool).unwrap_or(d);
+    let t = |k: &str, d: &str| show.get(k).and_then(Value::as_str).unwrap_or(d).to_string();
+    let o = Options {
+        meta: b("meta", d.meta),
+        sidechain: b("sidechain", d.sidechain),
+        wrappers: b("wrappers", d.wrappers),
+        compaction: t("compaction", &d.compaction),
+        agent_messages: t("agent_messages", &d.agent_messages),
+        task_notifications: t("task_notifications", &d.task_notifications),
+        errors: b("errors", d.errors),
+        pending: chat["pending"].get("show").and_then(Value::as_bool).unwrap_or(d.pending),
+        summary_chars: chat.get("summary_chars").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(d.summary_chars),
+        labels: chat.get("labels").cloned().unwrap_or(Value::Null),
+        tools: chat.get("tools").cloned().unwrap_or(Value::Null),
+        tool_names: chat.get("tool_names").cloned().unwrap_or(Value::Null),
+    };
+    OPTIONS.with(|c| *c.borrow_mut() = Rc::new(o));
+}
+
+pub fn options() -> Rc<Options> {
+    OPTIONS.with(|c| c.borrow().clone())
+}
+
+/** A transcript label from `chat.labels` (else `default`), with `{name}` placeholders filled. */
+pub fn label(key: &str, default: &str, vars: &[(&str, &str)]) -> String {
+    let o = options();
+    let mut s = o.labels.get(key).and_then(Value::as_str).unwrap_or(default).to_string();
+    for (k, v) in vars {
+        s = s.replace(&format!("{{{k}}}"), v);
+    }
+    s
+}
+
+/** How a tool's step reads: prefixes while running, done, and failed (the subject follows them), its icon,
+and the verb in a working chat's one-line activity. `chat.tools.NAME` (or `chat.tools["*"]` for tools
+with no entry) overrides any of these. */
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolLook {
+    pub doing: String,
+    pub done: String,
+    pub failed: String,
+    pub icon: String,
+    pub activity: String,
+}
+
+pub fn tool_look(name: &str) -> ToolLook {
+    let (doing, done, failed, icon, activity) = match name {
+        "Read" => ("Reading", "Read", "Couldn't read", "file-text", "Reading"),
+        "Edit" | "MultiEdit" => ("Editing", "Edited", "Couldn't edit", "pencil", "Editing"),
+        "Write" => ("Writing", "Wrote", "Couldn't write", "file-plus", "Editing"),
+        "NotebookEdit" => ("Editing", "Edited", "Couldn't edit", "notebook-pen", "Editing"),
+        "Bash" => ("", "", "Failed:", "square-terminal", "Running"),
+        "Grep" => ("Searching for", "Searched for", "Couldn't search for", "search", "Searching for"),
+        "Glob" => ("Finding", "Found", "Couldn't find", "folder-search", "Searching for"),
+        "WebFetch" => ("Fetching", "Fetched", "Couldn't fetch", "globe", "Fetching"),
+        "WebSearch" => ("Searching the web for", "Searched the web for", "Couldn't search the web for", "search", "Searching the web for"),
+        "Agent" | "Task" => ("Delegating:", "Delegated:", "Delegation failed:", "bot", "Delegating:"),
+        "TodoWrite" => ("Updating the plan", "Updated the plan", "Couldn't update the plan", "list-todo", "TodoWrite"),
+        "Skill" => ("Loading", "Loaded", "Couldn't load", "sparkles", "Skill"),
+        "Compaction" => ("", "", "", "fold-vertical", "Compaction"),
+        "AgentMessage" => ("", "", "", "message-square", "AgentMessage"),
+        _ => ("", "", "Failed:", "wrench", name),
+    };
+    let o = options();
+    let over = o.tools.get(name).or_else(|| o.tools.get("*")).cloned().unwrap_or(Value::Null);
+    let pick = |k: &str, d: &str| over.get(k).and_then(Value::as_str).unwrap_or(d).to_string();
+    ToolLook { doing: pick("doing", doing), done: pick("done", done), failed: pick("failed", failed), icon: pick("icon", icon), activity: pick("activity", activity) }
+}
+
+/** A tool's name as shown when it has no entry: `mcp__server__tool` as "server · tool"
+(`chat.tool_names`: `strip` prefix, `separator`). */
+pub fn tool_display_name(name: &str) -> String {
+    let o = options();
+    let strip = o.tool_names.get("strip").and_then(Value::as_str).unwrap_or("mcp__");
+    let sep = o.tool_names.get("separator").and_then(Value::as_str).unwrap_or(" · ");
+    name.trim_start_matches(strip).replace("__", sep)
+}
 
 #[derive(Debug, Clone)]
 pub enum Item {
@@ -51,13 +184,13 @@ pub struct Background {
 }
 
 impl Transcript {
-    /** A short line on what the agent is doing now, from the newest item: "Reading settings.jsonc". */
+    /** A short line on what the agent is doing now, from the newest item: "Reading settings.jsonc"
+    (verbs: `chat.tools.NAME.activity`; `chat.labels.activity_thinking` / `activity_writing`). */
     pub fn activity(&self) -> String {
         match self.items.last() {
-            Some(Item::Tool { name, summary, result: None, .. }) => format!("{} {summary}", verb(name)),
-            Some(Item::Tool { .. }) | Some(Item::User { .. }) | Some(Item::Image { .. }) => "Thinking".into(),
-            Some(Item::Thinking { .. }) => "Thinking".into(),
-            Some(Item::Assistant { .. }) => "Writing".into(),
+            Some(Item::Tool { name, summary, result: None, .. }) => format!("{} {summary}", tool_look(name).activity),
+            Some(Item::Tool { .. }) | Some(Item::User { .. }) | Some(Item::Image { .. }) | Some(Item::Thinking { .. }) => label("activity_thinking", "Thinking", &[]),
+            Some(Item::Assistant { .. }) => label("activity_writing", "Writing", &[]),
             _ => String::new(),
         }
     }
@@ -79,12 +212,17 @@ impl Transcript {
         self.revision += 1;
     }
 
-    /** Background shells and subagents started in the loaded lines that haven't finished. */
     /** An empty transcript for a chat id (`sub:...` ids are subagents). */
     pub fn for_chat(id: &str) -> Self {
         Transcript { keep_sidechain: id.starts_with("sub:"), ..Default::default() }
     }
 
+    /** Tool results still waiting for their call (in lines not loaded yet). */
+    pub fn orphan_count(&self) -> usize {
+        self.orphans.len()
+    }
+
+    /** Background shells and subagents started in the loaded lines that haven't finished. */
     pub fn background(&self) -> Vec<Background> {
         let mut out = vec![];
         for it in &self.items {
@@ -190,7 +328,8 @@ impl Transcript {
     }
 
     fn push_entry(&mut self, e: &Value) {
-        if !self.keep_sidechain && e.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        let opts = options();
+        if !self.keep_sidechain && !opts.sidechain && e.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             return;
         }
         let kind = e.get("type").and_then(Value::as_str).unwrap_or("");
@@ -200,11 +339,19 @@ impl Transcript {
             }
             return;
         }
+        let content = &e["message"]["content"];
         // Text Claude Code adds for the model (a slash command's expanded skill, caveats): never typed.
         if kind == "user" && e.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            if opts.meta {
+                let text = content.as_str().map(str::to_string).unwrap_or_else(|| {
+                    content.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n")
+                });
+                if !text.trim().is_empty() {
+                    self.items.push(Item::Notice { text });
+                }
+            }
             return;
         }
-        let content = &e["message"]["content"];
         if kind == "system" && e.get("subtype").and_then(Value::as_str) == Some("compact_boundary") {
             self.compact_trigger = e["compactMetadata"]["trigger"].as_str().map(str::to_string);
             return;
@@ -214,6 +361,14 @@ impl Transcript {
             let text = content.as_str().map(str::to_string).unwrap_or_else(|| {
                 content.as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n")
             });
+            match opts.compaction.as_str() {
+                "hidden" => return,
+                "message" => {
+                    self.items.push(Item::User { text });
+                    return;
+                }
+                _ => {}
+            }
             self.items.push(Item::Tool {
                 id: format!("compact:{}", self.lines),
                 name: "Compaction".into(),
@@ -286,7 +441,7 @@ impl Transcript {
             }
             "system" => {
                 if let Some(t) = e.get("content").and_then(Value::as_str) {
-                    if e.get("level").and_then(Value::as_str) == Some("error") {
+                    if opts.errors && e.get("level").and_then(Value::as_str) == Some("error") {
                         self.items.push(Item::Notice { text: t.to_string() });
                     }
                 }
@@ -305,8 +460,17 @@ impl Transcript {
             self.items.push(Item::User { text });
             return;
         }
+        let opts = options();
         // Another Claude session talking to this one (SendMessage, teammates): a collapsed step, not you.
         if t.contains("<teammate-message") || t.contains("<cross-session-message") || t.starts_with("Another Claude session sent a message") {
+            match opts.agent_messages.as_str() {
+                "hidden" => return,
+                "message" => {
+                    self.items.push(Item::User { text: t.to_string() });
+                    return;
+                }
+                _ => {}
+            }
             for (from, summary, body) in agent_messages(t) {
                 let id = format!("agent-msg:{}", self.lines);
                 self.items.push(Item::Tool {
@@ -324,12 +488,23 @@ impl Transcript {
             self.note_finished(t);
         }
         if t.starts_with("<task-notification>") {
-            let summary = between(t, "<summary>", "</summary>").unwrap_or("A background task finished");
-            self.items.push(Item::Notice { text: summary.to_string() });
+            let fallback = label("background_finished", "A background task finished", &[]);
+            let summary = between(t, "<summary>", "</summary>").map(str::to_string).unwrap_or(fallback);
+            match opts.task_notifications.as_str() {
+                "hidden" => {}
+                "message" => self.items.push(Item::User { text: t.to_string() }),
+                _ => self.items.push(Item::Notice { text: summary }),
+            }
             return;
         }
         // Harness wrappers (command output, reminders) aren't things the user typed.
-        if t.is_empty() || t.starts_with("<command-") || t.starts_with("<local-command") || t.starts_with("<system-reminder") {
+        if t.is_empty() {
+            return;
+        }
+        if t.starts_with("<command-") || t.starts_with("<local-command") || t.starts_with("<system-reminder") {
+            if opts.wrappers {
+                self.items.push(Item::Notice { text: t.to_string() });
+            }
             return;
         }
         self.settle_echo(t);
@@ -356,19 +531,6 @@ impl Transcript {
     }
 }
 
-fn verb(tool: &str) -> &str {
-    match tool {
-        "Read" => "Reading",
-        "Write" | "Edit" | "NotebookEdit" => "Editing",
-        "Bash" => "Running",
-        "Grep" | "Glob" => "Searching for",
-        "WebFetch" => "Fetching",
-        "WebSearch" => "Searching the web for",
-        "Agent" | "Task" => "Delegating:",
-        _ => tool,
-    }
-}
-
 fn summarize(name: &str, input: &Value) -> String {
     let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let short = |p: String| p.rsplit('/').next().unwrap_or(&p).to_string();
@@ -386,7 +548,7 @@ fn summarize(name: &str, input: &Value) -> String {
             .and_then(|o| o.values().find_map(|v| v.as_str().map(str::to_string)))
             .unwrap_or_default(),
     };
-    text.lines().next().unwrap_or("").chars().take(140).collect()
+    text.lines().next().unwrap_or("").chars().take(options().summary_chars).collect()
 }
 
 fn after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
@@ -431,13 +593,13 @@ fn agent_messages(text: &str) -> Vec<(String, String, String)> {
                     body = r.to_string();
                 }
             }
-            let from = [attr("teammate_id"), attr("from"), attr("session")].into_iter().find(|x| !x.is_empty()).unwrap_or_else(|| "another session".into());
+            let from = [attr("teammate_id"), attr("from"), attr("session")].into_iter().find(|x| !x.is_empty()).unwrap_or_else(|| label("another_session", "another session", &[]));
             out.push((from, summary, body));
             rest = &after[(body_end + close.len()).min(after.len())..];
         }
     }
     if out.is_empty() {
-        out.push(("another session".into(), String::new(), text.to_string()));
+        out.push((label("another_session", "another session", &[]), String::new(), text.to_string()));
     }
     out
 }
@@ -542,5 +704,32 @@ mod background_tests {
         assert_eq!(bg[1].kind, "agent");
         t.append(2, &[json!({"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n<task-id>b9</task-id>\n<status>completed</status>\n</task-notification>"})]);
         assert_eq!(t.background().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod options_tests {
+    use super::{set_options, Item, Transcript};
+    use serde_json::json;
+
+    #[test]
+    fn show_options_change_what_lines_become() {
+        let lines = [
+            json!({"type": "user", "isMeta": true, "message": {"content": "skill text"}}),
+            json!({"type": "user", "message": {"content": "<system-reminder>x</system-reminder>"}}),
+            json!({"type": "user", "message": {"content": "<task-notification><summary>done</summary></task-notification>"}}),
+        ];
+        set_options(&json!({}));
+        let mut t = Transcript::default();
+        t.append(0, &lines);
+        assert!(matches!(t.items.as_slice(), [Item::Notice { text }] if text == "done"));
+        set_options(&json!({"show": {"meta": true, "wrappers": true, "task_notifications": "hidden"}, "labels": {"activity_thinking": "Pondering"}}));
+        let mut t = Transcript::default();
+        t.append(0, &lines);
+        assert_eq!(t.items.len(), 2);
+        assert_eq!(t.activity(), "");
+        t.append(3, &[json!({"type": "user", "message": {"content": "hi"}})]);
+        assert_eq!(t.activity(), "Pondering");
+        set_options(&json!({}));
     }
 }

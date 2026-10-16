@@ -406,6 +406,17 @@ impl Workspace {
         if let Some(Value::Object(on)) = obj.get("on") {
             let get = |k: &str| on.get(k).map(|a| self.exprs.resolve_action(a, ctx));
             let (click, double, down, drop) = (get("click"), get("double_click"), get("mouse_down"), get("drop"));
+            let label = obj.get("tooltip").map(|t| value_text(&self.exprs.resolve(t, ctx))).filter(|t| !t.is_empty()).unwrap_or_default();
+            if let Some(c) = click.clone() {
+                self.clickables.push((id.clone(), label.clone(), c));
+            }
+            // Double-clicks and presses are clickable by agents too: `ui.click {id, double: true}` / `{id, press: true}`.
+            if let Some(d) = double.clone() {
+                self.clickables.push((format!("{id}:double"), label.clone(), d));
+            }
+            if let Some(d) = down.clone() {
+                self.clickables.push((format!("{id}:press"), label, d));
+            }
             if let Some(spec) = on.get("drop_item") {
                 let drop_key = obj.get("drop_key").map(|k| value_text(&self.exprs.resolve(k, ctx))).unwrap_or_else(|| id.clone());
                 let zones = self.exprs.resolve(obj.get("drop_zones").unwrap_or(&Value::Null), ctx);
@@ -505,10 +516,6 @@ impl Workspace {
                     }
                 }));
             }
-            if let Some(c) = click.clone() {
-                let label = obj.get("tooltip").map(|t| value_text(&self.exprs.resolve(t, ctx))).filter(|t| !t.is_empty()).unwrap_or_default();
-                self.clickables.push((id.clone(), label, c));
-            }
             if let Some(c) = click {
                 el = el.on_click(cx.listener(move |ws, e: &ClickEvent, window, cx| {
                     if e.click_count() < 2 {
@@ -530,6 +537,8 @@ impl Workspace {
         let el: AnyElement = if let Some(Value::Array(menu)) = obj.get("menu") {
             // Entries are worked out when the menu opens, not on every frame.
             let (spec, menu_ctx) = (menu.clone(), ctx.clone());
+            let tip = obj.get("tooltip").map(|t| value_text(&self.exprs.resolve(t, ctx))).unwrap_or_default();
+            self.menus.push((id.clone(), tip, std::rc::Rc::new(menu.clone()), ctx.clone()));
             let view = cx.entity();
             el.context_menu(move |menu, window, cx| {
                 let entries = view.read(cx).menu_entries(&spec, &menu_ctx);

@@ -7,7 +7,6 @@ use gpui_kit::*;
 use serde_json::{json, Value};
 use std::io::Write as _;
 
-const ACTIVITY_LINES: usize = 400;
 
 /** Recent frames: when each started, how long building the element tree took, and the whole frame. */
 #[derive(Default)]
@@ -24,12 +23,13 @@ impl Perf {
         }
     }
 
-    pub fn summary(&self) -> Value {
-        let recent: Vec<_> = self.frames.iter().filter(|f| f.0.elapsed().as_secs_f32() < 2.).collect();
+    pub fn summary(&self, window_secs: f32) -> Value {
+        let window_secs = window_secs.max(0.1);
+        let recent: Vec<_> = self.frames.iter().filter(|f| f.0.elapsed().as_secs_f32() < window_secs).collect();
         let avg = |k: fn(&(std::time::Instant, f32, f32)) -> f32| if recent.is_empty() { 0. } else { recent.iter().map(|f| k(f)).sum::<f32>() / recent.len() as f32 };
         let last = self.frames.back();
         json!({
-            "frames_per_sec": recent.len() as f32 / 2.,
+            "frames_per_sec": recent.len() as f32 / window_secs,
             "avg_render_ms": avg(|f| f.1),
             "avg_frame_ms": avg(|f| f.2),
             "max_frame_ms": recent.iter().map(|f| f.2).fold(0., f32::max),
@@ -43,7 +43,7 @@ impl Perf {
 impl Workspace {
     /** Rewrites inspect.json when what it describes changed (checked at most twice a second). */
     pub(crate) fn write_inspect(&mut self, ctx: &jaq_json::Val, window: &Window, cx: &App) {
-        if self.inspect_at.is_some_and(|t| t.elapsed().as_millis() < 500) {
+        if self.inspect_at.is_some_and(|t| (t.elapsed().as_millis() as f64) < self.settings.num("inspect.interval_ms", 500.)) {
             return;
         }
         let ctx = crate::ui::expr::to_json(ctx);
@@ -54,7 +54,10 @@ impl Workspace {
         let doc = json!({
             "about": "The running app as of `at`: `context` is what settings expressions see; `layout` is where nodes with ids are (x, y, w, h in points); see SETTINGS.md.",
             "window": {"width": f32::from(size.width), "height": f32::from(size.height), "focused": self.focused, "number": window_number()},
-            "perf": self.perf.borrow().summary(),
+            "perf": self.perf.borrow().summary(self.settings.num("inspect.perf_window_secs", 2.) as f32),
+            "internal": self.internal_json(),
+            "dialog": self.dialog_json(cx),
+            "palette": self.palette_entries().into_iter().map(|(l, _)| l).collect::<Vec<_>>(),
             "views": {
                 "transcripts": crate::ui::trace_view::inspect(self),
                 "diff": crate::ui::diff_view::inspect(self),
@@ -88,12 +91,18 @@ impl Workspace {
         }
         let at = chrono_like_now();
         let mut line = format!("{at} {}", serde_json::to_string(action).unwrap_or_default());
-        if line.len() > 600 {
-            line.truncate(600);
+        let chars = self.settings.num("inspect.activity_chars", 600.) as usize;
+        if line.len() > chars {
+            let mut at = chars;
+            while !line.is_char_boundary(at) {
+                at -= 1;
+            }
+            line.truncate(at);
         }
         self.activity.push(line);
-        if self.activity.len() > ACTIVITY_LINES {
-            let drop = self.activity.len() - ACTIVITY_LINES;
+        let lines = self.settings.num("inspect.activity_lines", 400.) as usize;
+        if self.activity.len() > lines {
+            let drop = self.activity.len() - lines;
             self.activity.drain(..drop);
         }
         if let Ok(mut f) = std::fs::File::create(settings::dir().join("activity.log")) {
@@ -109,7 +118,7 @@ impl Workspace {
         #[cfg(not(target_os = "macos"))]
         let id: Option<i64> = None;
         let Some(id) = id else {
-            window.push_notification("No window to capture", cx);
+            window.push_notification(self.tr("no_window", "No window to capture", &[]), cx);
             return;
         };
         let path = settings::dir().join("snapshot.png");

@@ -104,10 +104,22 @@ pub enum Row {
     Note(String),
 }
 
-pub const MAX_LINES_PER_FILE: usize = 4000;
+/** How a file's rows are cut: at most `max_lines` lines each, then `more` with `{n}` the lines left out;
+`binary` is the note for files with no text. */
+pub struct RowLimits {
+    pub max_lines: usize,
+    pub more: String,
+    pub binary: String,
+}
+
+impl Default for RowLimits {
+    fn default() -> Self {
+        RowLimits { max_lines: 4000, more: "{n} more lines; open the file to see them".into(), binary: "Binary file".into() }
+    }
+}
 
 /** Rows for the list plus the row where each file starts; collapsed files show only their header. */
-pub fn rows(files: &[File], collapsed: &std::collections::HashSet<String>) -> (Vec<Row>, Vec<usize>, usize) {
+pub fn rows(files: &[File], collapsed: &std::collections::HashSet<String>, limits: &RowLimits) -> (Vec<Row>, Vec<usize>, usize) {
     let (mut rows, mut starts, mut widest, mut widest_len) = (vec![], vec![], 0, 0);
     for (i, f) in files.iter().enumerate() {
         starts.push(rows.len());
@@ -116,14 +128,14 @@ pub fn rows(files: &[File], collapsed: &std::collections::HashSet<String>) -> (V
             continue;
         }
         if f.binary {
-            rows.push(Row::Note("Binary file".into()));
+            rows.push(Row::Note(limits.binary.clone()));
             continue;
         }
         let mut shown = 0;
         for h in &f.hunks {
             rows.push(Row::Hunk(h.header.clone()));
             for l in &h.lines {
-                if shown == MAX_LINES_PER_FILE {
+                if shown == limits.max_lines {
                     break;
                 }
                 shown += 1;
@@ -136,8 +148,20 @@ pub fn rows(files: &[File], collapsed: &std::collections::HashSet<String>) -> (V
         }
         let total: usize = f.hunks.iter().map(|h| h.lines.len()).sum();
         if total > shown {
-            rows.push(Row::Note(format!("{} more lines; open the file to see them", total - shown)));
+            rows.push(Row::Note(limits.more.replace("{n}", &(total - shown).to_string())));
         }
     }
     (rows, starts, widest)
+}
+
+#[cfg(test)]
+mod limit_tests {
+    #[test]
+    fn long_files_stop_at_the_limit_with_a_note() {
+        let text = format!("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1,5 @@\n{}", "+l\n".repeat(5));
+        let files = super::parse(&text);
+        let limits = super::RowLimits { max_lines: 2, more: "{n} hidden".into(), binary: "bin".into() };
+        let (rows, _, _) = super::rows(&files, &Default::default(), &limits);
+        assert!(matches!(rows.last(), Some(super::Row::Note(n)) if n == "3 hidden"));
+    }
 }

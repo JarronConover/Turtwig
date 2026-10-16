@@ -169,6 +169,17 @@ pub fn shell_session(path: &str, extra: Option<&str>, command: Option<&str>) -> 
         if command.is_some() {
             run("tmux", &["set", "-t", &name, "remain-on-exit", "on"], &[], None, Duration::from_secs(5));
         }
+        shell_options(&name);
     }
     name
+}
+
+/** A terminal session's tmux options from the daemon options: `terminal_mouse` (wheel scrolls tmux's
+history, drag selects; the app sends mouse events when it's on) and `terminal_history_limit` (lines). */
+pub fn shell_options(session: &str) {
+    let mouse = if crate::config::flag("terminal_mouse", false) { "on" } else { "off" };
+    run("tmux", &["set", "-t", session, "mouse", mouse], &[], None, Duration::from_secs(5));
+    if let Some(n) = crate::config::get("terminal_history_limit").and_then(|v| v.as_u64()) {
+        run("tmux", &["set", "-t", session, "history-limit", &n.to_string()], &[], None, Duration::from_secs(5));
+    }
 }

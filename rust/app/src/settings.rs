@@ -90,6 +90,9 @@ pub struct TerminalSettings {
     pastes the clipboard; null leaves the combo to the app. Checked before the terminal's own keys. */
     #[serde(default)]
     pub keys: Map<String, Value>,
+    /** Everything else under `terminal`: palette, cursor, size, scrollback, wheel, select, copy_key. */
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 impl Default for Settings {

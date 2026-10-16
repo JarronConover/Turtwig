@@ -59,6 +59,13 @@ pub struct Workspace {
     just_sent: HashMap<String, std::time::Instant>,
     /** Where you've been, browser-style: (worktree, chat) visits and the one showing now. */
     nav: Vec<(String, Option<String>)>,
+    /** Recent in-window notifications: (unix time, text). */
+    pub(crate) notices: Vec<(f64, String)>,
+    /** Recent hook events from every daemon (for inspect.json). */
+    pub(crate) hooks: Vec<Value>,
+    /** The open text dialog (rename, new worktree, project settings, prompt), for agents. */
+    pub(crate) dialog: Option<OpenDialog>,
+    pub(crate) palette_open: bool,
     nav_at: usize,
     nav_jumping: bool,
     /** This view, for click handlers built without a `cx` (message actions). */
@@ -130,6 +137,8 @@ pub struct Workspace {
     pub(crate) activity: Vec<String>,
     /** What's clickable this frame: (node id, tooltip, action), for `ui.click` and inspect.json. */
     pub(crate) clickables: Vec<(String, String, Value)>,
+    /** Right-click menus drawn this frame: (node id, tooltip, menu spec, its context), for `ui.menu`. */
+    pub(crate) menus: Vec<(String, String, std::rc::Rc<Vec<Value>>, jaq_json::Val)>,
     pub(crate) scripts: Option<crate::script::Scripts>,
     pub(crate) script_data: Map<String, Value>,
     script_timers: HashMap<u64, Task<()>>,
@@ -155,6 +164,7 @@ impl Workspace {
             Err(e) => (Settings::default(), Some(format!("{e:#}"))),
         };
         crate::ui::docs::write_reference();
+        crate::transcript::set_options(&settings.chat);
         let retry = Duration::from_secs(settings.connection.retry_seconds);
         let mut conns = vec![("box".to_string(), settings.connection.ssh_host.clone(), settings.connection.daemon.clone())];
         if settings.local.enabled && !settings.local.daemon.is_empty() {
@@ -229,6 +239,10 @@ impl Workspace {
             queue_saved: String::new(),
             just_sent: HashMap::new(),
             nav: vec![],
+            notices: vec![],
+            hooks: vec![],
+            dialog: None,
+            palette_open: false,
             nav_at: 0,
             nav_jumping: false,
             sub_chats: vec![],
@@ -287,6 +301,7 @@ impl Workspace {
             virtual_lists: HashMap::new(),
             activity: vec![],
             clickables: vec![],
+            menus: vec![],
             scripts: None,
             script_data: Map::new(),
             script_timers: HashMap::new(),
@@ -588,6 +603,7 @@ impl Workspace {
                 self.state = s.state.clone();
                 self.state.extend(self.user_state.clone());
                 self.settings = s;
+                crate::transcript::set_options(&self.settings.chat);
                 self.settings_error = None;
                 self.exprs = Exprs::default();
                 self.configure_motion();
@@ -600,11 +616,15 @@ impl Workspace {
                 self.update_badge(&ctx);
                 crate::logo::clear_cache();
                 self.update_dock_icon();
-                let keys = self.settings.terminal.keys.clone();
+                let ts = self.settings.terminal.clone();
                 for t in self.terminals.values() {
-                    t.update(cx, |t, _| t.set_keys(&keys));
+                    t.update(cx, |t, _| t.apply_settings(&ts));
                 }
                 self.pending_script.push(json!({"type": "event", "name": "model", "payload": null}));
+                let up: Vec<String> = self.host_up.iter().filter(|(_, u)| **u).map(|(h, _)| h.clone()).collect();
+                for h in up {
+                    self.configure_host(&h);
+                }
             }
             Err(e) => self.settings_error = Some(format!("{e:#}")),
         }
@@ -736,8 +756,9 @@ impl Workspace {
             Incoming::Connected => {
                 self.host_up.insert(host.to_string(), true);
                 self.connected = self.host_up.values().any(|u| *u);
-                self.status = "Connected".into();
+                self.status = self.tr("connected", "Connected", &[]);
                 self.watching.clear();
+                self.configure_host(host);
                 let remote = self.remote_for_host(host);
                 cx.spawn(async move |_, _| {
                     let _ = remote.call(Call::Hello { client: "agent-box-app".into() }).await;
@@ -748,7 +769,7 @@ impl Workspace {
             Incoming::Disconnected(why) => {
                 self.host_up.insert(host.to_string(), false);
                 self.connected = self.host_up.values().any(|u| *u);
-                self.status = format!("Reconnecting to {host}… ({why})");
+                self.status = self.tr("reconnecting", "Reconnecting to {host}… ({why})", &[("host", host), ("why", &why)]);
                 self.terminals.retain(|_, t| t.read(cx).host != host);
                 self.term_by_id.retain(|(h, _), _| h != host);
             }
@@ -792,6 +813,14 @@ impl Workspace {
                     t.update(cx, |t, cx| t.output(&data, cx));
                 }
                 return;
+            }
+            Incoming::Event(Event::Hook(e)) => {
+                let keep = self.settings.num("inspect.hook_events", 50.) as usize;
+                self.hooks.push(json!({"host": host, "seq": e.seq, "at": e.at, "event": e.event, "session_id": e.session_id}));
+                if self.hooks.len() > keep {
+                    let extra = self.hooks.len() - keep;
+                    self.hooks.drain(..extra);
+                }
             }
             Incoming::Event(_) => {}
         }
@@ -1087,7 +1116,7 @@ impl Workspace {
             "projects": projects,
             "sections": sections,
             "worktrees": worktrees,
-            "chats": self.model.chats.iter().map(|c| self.chat_json(c)).collect::<Vec<_>>(),
+            "chats": self.model.chats.iter().chain(self.sub_chats.iter().map(|(_, c)| c)).map(|c| self.chat_json(c)).collect::<Vec<_>>(),
             "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here, "diff": selected_diff,
                          "terminals": terminals, "background": background},
             "state": self.state,
@@ -1104,6 +1133,9 @@ impl Workspace {
                 "history_loading": self.history_loading,
                 "connected": self.connected,
                 "removed_projects": removed,
+                "notifications": self.notices.iter().map(|(at, text)| json!({"at": at, "text": text})).collect::<Vec<_>>(),
+                "dialog": self.dialog.as_ref().map(|d| json!({"title": d.title, "fields": d.inputs.iter().map(|(l, _)| l.to_string()).collect::<Vec<_>>()})),
+                "palette_open": self.palette_open,
                 "nav": {"back": self.can_navigate(-1), "forward": self.can_navigate(1)},
                 "dragging": self.dragging,
                 "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
@@ -1432,6 +1464,39 @@ impl Workspace {
         }
     }
 
+    /** Sends settings `daemon` to a host's daemon (its timings, limits, and parsing rules). */
+    fn configure_host(&self, host: &str) {
+        let options = self.settings.get("daemon").cloned().unwrap_or(Value::Object(Map::new()));
+        self.remote_for_host(host).send(Call::Configure { options });
+    }
+
+    /** A user-facing string: settings `strings.KEY` (else `default`), with `{name}` filled from `vars`. */
+    pub(crate) fn tr(&self, key: &str, default: &str, vars: &[(&str, &str)]) -> String {
+        let mut t = self.settings.text(key, default);
+        for (k, v) in vars {
+            t = t.replace(&format!("{{{k}}}"), v);
+        }
+        t
+    }
+
+    /** An in-window notification, kept in `.app.notifications` (the newest `notifications.keep`) for agents. */
+    pub(crate) fn toast(&mut self, text: impl Into<String>, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        let text: String = text.into();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
+        self.notices.push((now, text.clone()));
+        let keep = self.settings.num("notifications.keep", 20.) as usize;
+        if self.notices.len() > keep {
+            let extra = self.notices.len() - keep;
+            self.notices.drain(..extra);
+        }
+        self.ctx_rev += 1;
+        if self.settings.get("notifications.show").and_then(Value::as_bool) != Some(false) {
+            let autohide = self.settings.get("notifications.autohide").and_then(Value::as_bool) != Some(false);
+            window.push_notification(gpui_kit::component::notification::Notification::new().message(text).autohide(autohide), cx);
+        }
+    }
+
     /** A chat shows as working from the moment you send, not from when its hook reports in a second later. */
     fn apply_just_sent(&mut self) {
         self.just_sent.retain(|_, t| t.elapsed() < Duration::from_secs(10));
@@ -1544,7 +1609,8 @@ impl Workspace {
         let Some(paths) = self.take_attachments(id) else {
             use gpui_kit::component::WindowExt as _;
             self.send_when_ready.insert(id.to_string());
-            window.push_notification("Sending when the upload finishes", cx);
+            let t = self.tr("sending_after_upload", "Sending when the upload finishes", &[]);
+            self.toast(t, window, cx);
             return;
         };
         let text = [typed, paths.join(" ")].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
@@ -1594,7 +1660,7 @@ impl Workspace {
 
     pub(crate) fn start_chat(&mut self, call: Call, cx: &mut Context<Self>) {
         let remote = self.route(&call);
-        self.status = "Starting a chat…".into();
+        self.status = self.tr("starting_chat", "Starting a chat…", &[]);
         cx.spawn(async move |this, cx| {
             let res = remote.call(call).await;
             this.update(cx, |ws, cx| {
@@ -1603,10 +1669,10 @@ impl Workspace {
                         if let Some(id) = v["stdout"].as_str().and_then(|o| o.split_whitespace().next()) {
                             ws.pending_select = Some(id.to_string());
                         }
-                        ws.status = "Connected".into();
+                        ws.status = ws.tr("connected", "Connected", &[]);
                     }
                     Err(e) => {
-                        ws.status = format!("Couldn't start the chat: {e}");
+                        ws.status = ws.tr("start_failed", "Couldn't start the chat: {error}", &[("error", &e.to_string())]);
                         ws.starting = None;
                     }
                 }
@@ -1617,11 +1683,24 @@ impl Workspace {
         .detach();
     }
 
-    /** A dialog of labeled text fields; `done` gets their values in order when saved (Enter in any field saves). */
+    /** A dialog of labeled text fields; `done` gets their values in order when saved (Enter in any field saves).
+    Agents see it as `.app.dialog` and answer it with `dialog.submit` / `dialog.cancel`. */
     pub(crate) fn fields_dialog(
         &mut self,
         title: &str,
         fields: Vec<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        done: impl Fn(&mut Workspace, Vec<String>, &mut Context<Workspace>) + 'static,
+    ) {
+        self.open_fields(title, fields, false, window, cx, done);
+    }
+
+    fn open_fields(
+        &mut self,
+        title: &str,
+        fields: Vec<(String, String)>,
+        need_first: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
         done: impl Fn(&mut Workspace, Vec<String>, &mut Context<Workspace>) + 'static,
@@ -1633,12 +1712,18 @@ impl Workspace {
         let view = cx.entity();
         let title: SharedString = title.to_string().into();
         let done = std::rc::Rc::new(done);
-        let submit = {
+        let submit: std::rc::Rc<dyn Fn(&mut Window, &mut App)> = {
             let (inputs, view, done) = (inputs.clone(), view.clone(), done.clone());
             std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
-                let vals: Vec<String> = inputs.iter().map(|(_, i)| i.read(cx).value().to_string()).collect();
+                let vals: Vec<String> = inputs.iter().map(|(_, i)| i.read(cx).value().trim().to_string()).collect();
+                if need_first && vals.first().is_none_or(|v| v.is_empty()) {
+                    return;
+                }
                 let done = done.clone();
-                view.update(cx, |ws, cx| done(ws, vals, cx));
+                view.update(cx, |ws, cx| {
+                    ws.dialog = None;
+                    done(ws, vals, cx)
+                });
                 window.close_dialog(cx);
             })
         };
@@ -1651,23 +1736,30 @@ impl Workspace {
             }));
         }
         let focus = inputs.first().map(|i| i.1.clone());
+        let save: SharedString = self.tr("dialog_save", "Save", &[]).into();
+        let shown = inputs.clone();
+        let button = submit.clone();
+        let single = inputs.len() == 1;
+        let title_text = title.to_string();
         window.open_dialog(cx, move |dialog, _, _| {
-            let submit = submit.clone();
-            let body = v_flex().gap_3().children(inputs.iter().map(|(label, input)| {
-                v_flex().gap_1().child(div().text_sm().child(label.clone())).child(Input::new(input))
+            let submit = button.clone();
+            let body = v_flex().gap_3().children(shown.iter().map(|(label, input)| {
+                v_flex().gap_1().when(!single, |d| d.child(div().text_sm().child(label.clone()))).child(Input::new(input))
             }));
             dialog.title(title.clone()).child(body).footer(
                 h_flex()
                     .gap_2()
                     .justify_end()
-                    .child(gpui_kit::component::button::Button::new("ok").label("Save").on_click(move |_, window, cx| submit(window, cx))),
+                    .child(gpui_kit::component::button::Button::new("ok").label(save.clone()).on_click(move |_, window, cx| submit(window, cx))),
             )
         });
+        self.dialog = Some(OpenDialog { title: title_text, inputs, submit });
         if let Some(f) = focus {
             f.update(cx, |s, cx| s.focus(window, cx));
         }
     }
 
+    /** One text field; Save does nothing while it's empty. */
     pub(crate) fn name_dialog(
         &mut self,
         title: &str,
@@ -1676,41 +1768,50 @@ impl Workspace {
         cx: &mut Context<Self>,
         done: impl Fn(&mut Workspace, String, &mut Context<Workspace>) + 'static,
     ) {
-        use gpui_kit::component::input::{Input, InputState};
-        use gpui_kit::component::WindowExt as _;
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()));
-        let view = cx.entity();
-        let title: SharedString = title.to_string().into();
-        let done = std::rc::Rc::new(done);
-        let submit = {
-            let (input, view, done) = (input.clone(), view.clone(), done.clone());
-            std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
-                let v = input.read(cx).value().trim().to_string();
-                if v.is_empty() {
-                    return;
-                }
-                let done = done.clone();
-                view.update(cx, |ws, cx| done(ws, v, cx));
-                window.close_dialog(cx);
-            })
-        };
-        let s2 = submit.clone();
-        self._subscriptions.push(cx.subscribe_in(&input, window, move |_, _, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
-                s2(window, cx);
+        let label = self.tr("dialog_name", "Name", &[]);
+        self.open_fields(title, vec![(label, value.to_string())], true, window, cx, move |ws, mut vals, cx| done(ws, vals.remove(0), cx));
+    }
+
+    /** `dialog.submit {values?}`: fill the open dialog's fields (in order) and save it. */
+    pub(crate) fn submit_dialog(&mut self, values: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(d) = self.dialog.as_ref() else { return };
+        if let Some(values) = values {
+            for ((_, input), v) in d.inputs.iter().zip(values) {
+                input.update(cx, |s, cx| s.set_value(v, window, cx));
             }
-        }));
-        let focus = input.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (input, submit) = (input.clone(), submit.clone());
-            dialog.title(title.clone()).child(Input::new(&input)).footer(
-                h_flex()
-                    .gap_2()
-                    .justify_end()
-                    .child(gpui_kit::component::button::Button::new("ok").label("Save").on_click(move |_, window, cx| submit(window, cx))),
-            )
-        });
-        focus.update(cx, |s, cx| s.focus(window, cx));
+        }
+        let submit = d.submit.clone();
+        submit(window, cx);
+    }
+
+    pub(crate) fn cancel_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        if self.dialog.take().is_some() {
+            window.close_dialog(cx);
+        }
+    }
+
+    /** Working state an agent can't see in the context: back/forward history, recent sends, which chats
+    were opened or closed by hand, focus, subagent tabs, hook events, the open dialog and notifications. */
+    pub(crate) fn internal_json(&self) -> Value {
+        json!({
+            "nav": {"at": self.nav_at, "visits": self.nav.iter().map(|(w, c)| json!({"worktree": w, "chat": c})).collect::<Vec<_>>()},
+            "just_sent": self.just_sent.iter().map(|(k, t)| (k.clone(), json!(t.elapsed().as_secs_f32()))).collect::<Map<_, _>>(),
+            "queue_sent": self.queue_sent.iter().map(|(k, t)| (k.clone(), json!(t.elapsed().as_secs_f32()))).collect::<Map<_, _>>(),
+            "opened": self.opened.iter().collect::<Vec<_>>(),
+            "closed": self.closed.iter().collect::<Vec<_>>(),
+            "subagent_tabs": self.sub_chats.iter().map(|(w, c)| json!({"worktree": w, "chat": c.id, "name": c.name, "state": c.state})).collect::<Vec<_>>(),
+            "hooks": self.hooks,
+            "palette_open": self.palette_open,
+        })
+    }
+
+    /** The open dialog for inspect.json: title and each field's label and current text. */
+    pub(crate) fn dialog_json(&self, cx: &App) -> Value {
+        self.dialog.as_ref().map(|d| json!({
+            "title": d.title,
+            "fields": d.inputs.iter().map(|(l, i)| json!({"label": l.to_string(), "value": i.read(cx).value().to_string()})).collect::<Vec<_>>(),
+        })).unwrap_or(Value::Null)
     }
 
     pub(crate) fn new_section(&mut self, assign: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1754,9 +1855,11 @@ impl Workspace {
         let home = std::env::var("HOME").unwrap_or_default();
         cmd.env("PATH", format!("{home}/.local/bin:{home}/.cargo/bin:{home}/dev/redo-monorepo-worktrees/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"));
         if notify {
-            window.push_notification("Working…", cx);
+            let t = self.tr("working", "Working…", &[]);
+            self.toast(t, window, cx);
         }
-        cx.spawn_in(window, async move |_, cx| {
+        let (done, failed) = (self.tr("done", "Done", &[]), self.tr("failed", "Failed", &[]));
+        cx.spawn_in(window, async move |this, cx| {
             let out = cx.background_spawn(async move { cmd.output() }).await;
             if !notify {
                 return;
@@ -1764,18 +1867,18 @@ impl Workspace {
             let msg = match out {
                 Ok(o) => {
                     let text = String::from_utf8_lossy(if o.status.success() { &o.stdout } else { &o.stderr }).trim().to_string();
-                    text.lines().last().unwrap_or(if o.status.success() { "Done" } else { "Failed" }).to_string()
+                    text.lines().last().map(str::to_string).unwrap_or(if o.status.success() { done } else { failed })
                 }
                 Err(e) => e.to_string(),
             };
-            cx.update(|window, cx| window.push_notification(msg, cx)).ok();
+            this.update_in(cx, |ws, window, cx| ws.toast(msg, window, cx)).ok();
         })
         .detach();
     }
 
-    pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_kit::component::command::{Command, CommandItem, CommandState};
-        use gpui_kit::component::WindowExt as _;
+    /** The command palette's entries: settings `commands` (with `if` applied), then one per worktree
+    (`palette.worktrees`, labeled by `palette.worktree_label`). */
+    pub(crate) fn palette_entries(&self) -> Vec<(String, Value)> {
         let ctx = self.context();
         let mut entries: Vec<(String, Value)> = vec![];
         for c in self.settings.commands.clone() {
@@ -1787,26 +1890,57 @@ impl Workspace {
             let label = value_text(&self.exprs.resolve(c.get("label").unwrap_or(&Value::Null), &ctx));
             entries.push((label, self.exprs.resolve_action(c.get("do").unwrap_or(&Value::Null), &ctx)));
         }
-        for w in self.all_worktrees() {
-            entries.push((format!("Go to {}", w.title), json!({"do": "select", "worktree": w.path})));
+        if self.settings.get("palette.worktrees").and_then(Value::as_bool) != Some(false) {
+            let fmt = self.settings.get("palette.worktree_label").and_then(Value::as_str).unwrap_or("Go to {title}").to_string();
+            for w in self.all_worktrees() {
+                let label = fmt.replace("{title}", &w.title).replace("{branch}", w.branch.as_deref().unwrap_or("")).replace("{project}", &w.project);
+                entries.push((label, json!({"do": "select", "worktree": w.path})));
+            }
         }
+        entries
+    }
+
+    /** `palette.run {label | index}`: run a palette entry without opening it (label: exact, else the first containing it). */
+    pub(crate) fn run_palette(&mut self, label: Option<String>, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.palette_entries();
+        let pick = match (index, label) {
+            (Some(i), _) => entries.get(i).cloned(),
+            (None, Some(l)) => {
+                let low = l.to_lowercase();
+                entries.iter().find(|(x, _)| *x == l).or_else(|| entries.iter().find(|(x, _)| x.to_lowercase().contains(&low))).cloned()
+            }
+            _ => None,
+        };
+        match pick {
+            Some((_, action)) => self.run_action(&action, window, cx),
+            None => self.exprs.note("palette.run: no such entry".to_string()),
+        }
+    }
+
+    pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::command::{Command, CommandItem, CommandState};
+        use gpui_kit::component::WindowExt as _;
+        let entries = self.palette_entries();
+        let placeholder: SharedString = self.settings.get("palette.placeholder").and_then(Value::as_str).unwrap_or("Type a command or a worktree…").to_string().into();
         let state = cx.new(|cx| CommandState::new(window, cx));
         let view = cx.entity();
         let entries = std::rc::Rc::new(entries);
+        self.palette_open = true;
         window.open_dialog(cx, move |dialog, _, _| {
-            let (state, view, entries) = (state.clone(), view.clone(), entries.clone());
+            let (state, view, entries, placeholder) = (state.clone(), view.clone(), entries.clone(), placeholder.clone());
             dialog.close_button(false).p_0().content(move |content, _, _| {
                 let (view, entries) = (view.clone(), entries.clone());
                 content.child(
                     Command::new(&state)
                         .bordered(false)
-                        .placeholder("Type a command or a worktree…")
+                        .placeholder(placeholder.clone())
                         .items(entries.iter().map(|(label, _)| CommandItem::new().label(label.clone())).collect::<Vec<_>>())
                         .on_confirm(move |index, window, cx| {
                             if let Some((_, action)) = entries.get(index.row) {
                                 let action = action.clone();
                                 window.close_dialog(cx);
                                 view.update(cx, |ws, cx| {
+                                    ws.palette_open = false;
                                     ws.pending_actions.push(action);
                                     cx.notify();
                                 });
@@ -1831,15 +1965,16 @@ impl Workspace {
             let errors = ws.exprs.errors.borrow().clone();
             let docs = settings::dir().join("SETTINGS.md");
             sheet
-                .title("Settings")
-                .size(px(760.))
+                .title(ws.tr("settings_title", "Settings", &[]))
+                .size(px(ws.settings.num("settings_editor.width", 760.) as f32))
                 .child(
                     v_flex()
                         .size_full()
                         .gap_2()
-                        .child(div().text_size(px(12.)).text_color(rgb(0x898a8e)).child(format!(
-                            "Everything about the app is here. Your file is merged over the built-in defaults; set a key to null to remove a default. Reference for you and agents: {}",
-                            docs.display()
+                        .child(div().text_size(px(12.)).text_color(rgb(0x898a8e)).child(ws.tr(
+                            "settings_intro",
+                            "Everything about the app is here. Your file is merged over the built-in defaults; set a key to null to remove a default. Reference for you and agents: {docs}",
+                            &[("docs", &docs.display().to_string())],
                         )))
                         .when_some(error, |d, e| d.child(div().text_size(px(12.)).text_color(rgb(0xd8566c)).child(e)))
                         .when(!errors.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgb(0xf0a43a)).child(errors.join("\n"))))
@@ -1873,7 +2008,7 @@ impl Workspace {
         let designer = chat.as_deref() == Some(crate::designer::CHAT_ID);
         let has_items = chat.as_ref().and_then(|id| self.transcripts.get(id)).is_some_and(|t| !t.items.is_empty());
         let Some(chat_id) = chat.filter(|id| self.chat(id).is_some() || (designer && has_items)) else {
-            let empty = props.get("empty").map(value_text).unwrap_or_else(|| "No chat here yet.".into());
+            let empty = props.get("empty").map(value_text).unwrap_or_else(|| self.tr("no_chat", "No chat here yet.", &[]));
             let overlay = if designer { self.drop_overlay(crate::designer::CHAT_ID, cx) } else { None };
             return div().relative().size_full().flex().items_center().justify_center().child(style::apply(div(), &st("empty"), &theme).child(empty)).children(overlay).into_any_element();
         };
@@ -2265,6 +2400,7 @@ impl Render for Workspace {
         self.perf.borrow_mut().spans.insert("flush", t.elapsed().as_secs_f32() * 1000.);
         self.render_generation += 1;
         self.clickables.clear();
+        self.menus.clear();
         let generation = self.render_generation;
         self.entered.retain(|_, (_, seen, _)| *seen + 2 >= generation);
         self.transitions.retain(|_, t| t.seen + 2 >= generation);
@@ -2279,6 +2415,15 @@ impl Render for Workspace {
         if let Some(p) = self.selected.clone() {
             let base = self.diff_base();
             self.ensure_diff(&p, &base, cx);
+        }
+        {
+            use gpui_kit::component::WindowExt as _;
+            // A dialog closed by Escape or a click outside is gone from the state too.
+            if (self.dialog.is_some() || self.palette_open) && !window.has_active_dialog(cx) {
+                self.dialog = None;
+                self.palette_open = false;
+                self.ctx_rev += 1;
+            }
         }
         self.dragging = cx.has_active_drag();
         if self.dragging {
@@ -2410,6 +2555,12 @@ impl TranscriptList {
         use crate::ui::trace_view::Block;
         self.blocks.iter().map(|b| match b { Block::One(i) => format!("one:{i}"), Block::Steps(v) => format!("steps:{}", v.len()), Block::Pending(t) => t.to_string() }).collect()
     }
+}
+
+pub(crate) struct OpenDialog {
+    pub(crate) title: String,
+    pub(crate) inputs: Vec<(SharedString, Entity<gpui_kit::component::input::InputState>)>,
+    pub(crate) submit: std::rc::Rc<dyn Fn(&mut Window, &mut App)>,
 }
 
 pub(crate) struct TranscriptList {

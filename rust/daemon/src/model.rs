@@ -7,15 +7,20 @@ use std::time::{Duration, Instant};
 
 use crate::util;
 
-const GIT_TTL: Duration = Duration::from_secs(90);
-/** How many `git status` runs at once: in a big repo each takes seconds of disk and CPU, and forty at
-once (one per worktree) slowed the whole Mac down. */
-const GIT_AT_ONCE: usize = 2;
+/** How long a worktree's git status / merge request stays fresh (`git_ttl_secs`, `mr_ttl_secs`). */
+fn git_ttl() -> Duration {
+    crate::config::secs("git_ttl_secs", 90)
+}
+/** How many `git status` runs at once (`git_at_once`): in a big repo each takes seconds of disk and CPU,
+and forty at once (one per worktree) slowed the whole Mac down. */
+fn git_at_once() -> usize {
+    crate::config::count("git_at_once", 2).max(1)
+}
 static GIT_SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
 
 fn with_git_slot<T>(f: impl FnOnce() -> T) -> T {
     let (lock, cv) = &GIT_SLOTS;
-    let mut busy = cv.wait_while(lock.lock().unwrap(), |n| *n >= GIT_AT_ONCE).unwrap();
+    let mut busy = cv.wait_while(lock.lock().unwrap(), |n| *n >= git_at_once()).unwrap();
     *busy += 1;
     drop(busy);
     let out = f();
@@ -23,7 +28,9 @@ fn with_git_slot<T>(f: impl FnOnce() -> T) -> T {
     cv.notify_one();
     out
 }
-const MR_TTL: Duration = Duration::from_secs(90);
+fn mr_ttl() -> Duration {
+    crate::config::secs("mr_ttl_secs", 90)
+}
 
 /** Repo key and GitLab project for each checkout folder name. */
 pub(crate) fn repo_for(project_name: &str) -> (&'static str, &'static str, f32) {
@@ -55,7 +62,7 @@ pub struct Caches {
 impl Caches {
     pub fn git(self: &Arc<Self>, path: &str) -> GitInfo {
         let hit = self.git.lock().unwrap().get(path).cloned();
-        if hit.as_ref().map(|(t, _)| t.elapsed() > GIT_TTL).unwrap_or(true) {
+        if hit.as_ref().map(|(t, _)| t.elapsed() > git_ttl()).unwrap_or(true) {
             self.refresh(format!("git:{path}"), {
                 let me = self.clone();
                 let path = path.to_string();
@@ -71,7 +78,7 @@ impl Caches {
     pub fn mr(self: &Arc<Self>, repo: &str, branch: &str) -> Option<MergeRequest> {
         let key = (repo.to_string(), branch.to_string());
         let hit = self.mr.lock().unwrap().get(&key).cloned();
-        if hit.as_ref().map(|(t, _)| t.elapsed() > MR_TTL).unwrap_or(true) {
+        if hit.as_ref().map(|(t, _)| t.elapsed() > mr_ttl()).unwrap_or(true) {
             self.refresh(format!("mr:{repo}:{branch}"), {
                 let me = self.clone();
                 move || {
@@ -157,7 +164,14 @@ fn sc(args: &[&str]) -> Value {
 /** Chat state from its latest hook: (state, waiting_on). */
 pub type ChatStates = HashMap<String, (String, Option<Value>)>;
 
-pub fn state_for_event(event: &str) -> Option<&'static str> {
+/** The chat state a hook event puts a chat in; `hook_states` ({event: state, or null to ignore it})
+overrides these. */
+pub fn state_for_event(event: &str) -> Option<String> {
+    if let Some(map) = crate::config::get("hook_states").and_then(|m| m.as_object().cloned()) {
+        if let Some(v) = map.get(event) {
+            return v.as_str().map(str::to_string);
+        }
+    }
     match event {
         "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some("working"),
         "Stop" => Some("idle"),
@@ -165,15 +179,21 @@ pub fn state_for_event(event: &str) -> Option<&'static str> {
         "SessionEnd" => Some("stopped"),
         _ => None,
     }
+    .map(str::to_string)
 }
 
 /** A Notification that blocks on the user (a permission or question), not the idle reminder. */
+/** Whether a Notification hook means the chat needs you: its type is in `waiting_notification_types`, or
+it has no type and its message doesn't start with `idle_notification_prefix`. */
 pub fn needs_user(payload: &Value) -> bool {
     let kind = payload.get("notification_type").and_then(Value::as_str).unwrap_or("");
     let message = payload.get("message").and_then(Value::as_str).unwrap_or("");
+    let waiting: Vec<String> = crate::config::get("waiting_notification_types")
+        .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
+        .unwrap_or_else(|| vec!["permission_prompt".into(), "elicitation_dialog".into()]);
     match kind {
-        "permission_prompt" | "elicitation_dialog" => true,
-        "" => !message.starts_with("Claude is waiting for your input"),
+        k if waiting.iter().any(|w| w == k) => true,
+        "" => !message.starts_with(&crate::config::text("idle_notification_prefix", "Claude is waiting for your input")),
         _ => false,
     }
 }
@@ -190,13 +210,21 @@ fn strip_ansi(s: &str) -> String {
     re.replace_all(s, "").into_owned()
 }
 
+const WAITING_PATTERN: &str = r"(?i)Enter to select|Esc to cancel|Do you want to proceed|❯ 1\. Yes";
+
+/** Whether the pane's last `waiting_pane_lines` lines show a prompt matching `waiting_pattern` (a regex). */
 fn pane_waiting(pane: &str) -> bool {
-    static WAITING: OnceLock<Regex> = OnceLock::new();
-    let re = WAITING
-        .get_or_init(|| Regex::new(r"(?i)Enter to select|Esc to cancel|Do you want to proceed|❯ 1\. Yes").unwrap());
+    static WAITING: Mutex<Option<(String, Regex)>> = Mutex::new(None);
+    let pattern = crate::config::text("waiting_pattern", WAITING_PATTERN);
+    let mut cached = WAITING.lock().unwrap();
+    if cached.as_ref().is_none_or(|(p, _)| *p != pattern) {
+        let re = Regex::new(&pattern).or_else(|_| Regex::new(WAITING_PATTERN)).unwrap();
+        *cached = Some((pattern, re));
+    }
+    let re = &cached.as_ref().unwrap().1;
     let text = strip_ansi(pane);
     let lines: Vec<&str> = text.lines().collect();
-    re.is_match(&lines[lines.len().saturating_sub(25)..].join("\n"))
+    re.is_match(&lines[lines.len().saturating_sub(crate::config::count("waiting_pane_lines", 25))..].join("\n"))
 }
 
 /** The prompt suggestion in Claude Code's input box: the line after "❯\u{a0}" between two rules,
@@ -204,10 +232,13 @@ when everything on it is drawn dim or grey (typed text is drawn plain). */
 pub(crate) fn suggestion(pane: &str) -> Option<String> {
     let raw: Vec<&str> = pane.lines().collect();
     let plain: Vec<String> = raw.iter().map(|l| strip_ansi(l)).collect();
-    let rule = |i: usize| plain.get(i).is_some_and(|l| l.trim_start().starts_with("──"));
-    let i = (1..plain.len()).rev().find(|&i| plain[i].trim_start().starts_with("❯\u{a0}") && rule(i - 1) && rule(i + 1))?;
-    let marker = "❯\u{a0}";
-    let rest = &raw[i][raw[i].find(marker)? + marker.len()..];
+    // `suggestion_prompt` (the input box's prompt and the no-break space after it) between two
+    // `suggestion_rule` lines.
+    let rule_mark = crate::config::text("suggestion_rule", "──");
+    let marker = crate::config::text("suggestion_prompt", "❯\u{a0}");
+    let rule = |i: usize| plain.get(i).is_some_and(|l| l.trim_start().starts_with(rule_mark.as_str()));
+    let i = (1..plain.len()).rev().find(|&i| plain[i].trim_start().starts_with(marker.as_str()) && rule(i - 1) && rule(i + 1))?;
+    let rest = &raw[i][raw[i].find(marker.as_str())? + marker.len()..];
     static SGR: OnceLock<Regex> = OnceLock::new();
     let sgr = SGR.get_or_init(|| Regex::new(r"\x1b\[([0-9;]*)m").unwrap());
     let (mut dim, mut grey, mut text, mut pos) = (false, false, String::new(), 0);
@@ -250,7 +281,8 @@ pub(crate) fn suggestion(pane: &str) -> Option<String> {
     visible(&rest[pos..], dim || grey, &mut text)?;
     let text = text.trim().to_string();
     // A session with no turns yet shows a placeholder (`Try "fix lint errors"`) in the same style.
-    let placeholder = text.starts_with("Try \"") && text.ends_with('"');
+    let prefix = crate::config::text("suggestion_placeholder_prefix", "Try \"");
+    let placeholder = !prefix.is_empty() && text.starts_with(prefix.as_str()) && text.ends_with('"');
     (!text.is_empty() && !placeholder).then_some(text)
 }
 
