@@ -2022,6 +2022,10 @@
     // in move_note_kinds or whose name or folder matches move_note_match. Moved orchestrators then get
     // move_note ({from}, {to}, {section}, {paths}).
     "move_together": "section", "move_keep_section": false,
+    // The worktrees a move leaves on the machine it left: "keep" (listed under their project), "hide"
+    // (from the sidebar; the project menu shows them again), "remove" (the folder goes and wt frees its
+    // slot; the branch keeps its commits) or "delete" (also its bazel cache and local branch).
+    "move_leftovers": "hide",
     "move_sync_paths": ["~/.local/state/redo/", "~/.factory/", "~/.config/redo/"],
     "move_note_kinds": ["orchestrator"], "move_note_match": "(?i)ship.feature|orchestrat",
     "move_note": "a.box moved this chat from the {from} to the {to}, with its section {section}. Worktree paths changed: {paths}. Your ledger files were copied over and point at the new paths. Pick up where you left off, and re-arm any loop or wakeup you had scheduled.",

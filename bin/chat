@@ -336,7 +336,10 @@ def close_in_super_engineering(chat):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SUPER_ENGINEERING_", "SUPERCONDUCTOR_"))}
 
     def call(*args):
-        out = run([str(sc), *args], capture_output=True, check=False, env=env, timeout=30)
+        try:
+            out = run([str(sc), *args], capture_output=True, check=False, env=env, timeout=30)
+        except subprocess.TimeoutExpired:
+            return {}
         try:
             return json.loads(out.stdout)
         except json.JSONDecodeError:
@@ -368,7 +371,13 @@ def close_in_super_engineering(chat):
 def stop_elsewhere(chat):
     """Stop whatever else runs this session (super.engineering, usually) before a.box resumes it, so
     two processes never share one session. Exits if it won't stop."""
-    if not agent_def(chat).get("stop_elsewhere") or not session_pids(chat["id"]):
+    if not agent_def(chat).get("stop_elsewhere"):
+        return
+    # A process a.box just stopped takes a moment to exit.
+    deadline = time.time() + 5
+    while time.time() < deadline and session_pids(chat["id"]):
+        time.sleep(0.5)
+    if not session_pids(chat["id"]):
         return
     close_in_super_engineering(chat)
     for sig in (None, signal.SIGTERM):
@@ -926,8 +935,9 @@ def move_worktree(folder, branch, repo, chats, src, dst):
     if dst == "box":
         for c in chats:
             adopt_worktree_branch(c)
-            stop_elsewhere(c)
+            # a.box's own process first, so only another program's copy (super.engineering) is left to stop.
             release_here(c)
+            stop_elsewhere(c)
         if not chats and branch:
             cmd__snapshot_dir(argparse.Namespace(dir=folder))
         new = json.loads(on_box("_prepare_wt", repo, branch or "", src))["dir"]
@@ -1036,6 +1046,88 @@ def move_section(section, src, dst, moved, labels):
         sc_on(src, "section", "delete", section["section_id"])
 
 
+def wt_bin():
+    found = shutil.which("wt")
+    if found:
+        return found
+    for p in (WT, HOME / "dev" / "redo-monorepo-worktrees" / "bin" / "wt"):
+        if Path(p).is_absolute() and Path(p).exists():
+            return str(p)
+    return None
+
+
+SAVED_CHECK = r"""
+. "$(dirname "$0")/env.sh"
+top=$1
+key=$(wip_key "$top") || exit 1
+head=$(git -C "$top" rev-parse HEAD) || exit 1
+idx=$(mktemp)
+cp "$(git -C "$top" rev-parse --absolute-git-dir)/index" "$idx" 2> /dev/null || : > "$idx"
+GIT_INDEX_FILE=$idx git -C "$top" add -A 2> /dev/null
+tree=$(GIT_INDEX_FILE=$idx git -C "$top" write-tree)
+rm -f "$idx"
+git -C "$AGENT_SESSIONS_DIR" fetch -q origin "$SESSIONS_BRANCH" || exit 1
+[ "$(git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.json" | jq -r '.head + " " + .tree')" = "$head $tree" ]
+"""
+
+
+def saved_remotely(path):
+    """Whether everything in the worktree (unpushed commits, uncommitted and untracked files) is in the
+    WIP snapshot this machine pushed, the one the other machine restored."""
+    return run(["bash", "-c", SAVED_CHECK, str(Path(__file__).resolve()), path], check=False, capture_output=True).returncode == 0
+
+
+def cmd__drop_worktree(args):
+    """Take a worktree a move left behind off this machine: remove (the folder goes, wt frees its slot;
+    the branch and its commits stay) or delete (also its bazel cache and local branch). Main checkouts
+    and folders a chat still uses here are left alone."""
+    path = os.path.realpath(args.dir)
+    common = run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"], check=False, capture_output=True).stdout.strip()
+    repo = repo_of(Path(common).parent) if common else None
+    if not repo or os.path.realpath(str(PRIMARY[repo])) == path:
+        print(f"kept {path}: not a worktree of a known repo")
+        return
+    if any(c["host"] == HOST and c["status"] != "archived" and c.get("dir") and os.path.realpath(c["dir"]) == path for c in all_chats()):
+        print(f"kept {path}: a chat here still uses it")
+        return
+    if not saved_remotely(path):
+        print(f"kept {path}: it has work that isn't in the snapshot the other machine got")
+        return
+    branch = run(["git", "-C", path, "branch", "--show-current"], check=False, capture_output=True).stdout.strip()
+    primary = str(PRIMARY[repo])
+    wt = wt_bin() if repo == "redo" else None
+    listed = wt and path in run([wt, "list"], check=False, capture_output=True, env=dict(os.environ, WT_PRIMARY=primary, WT_BASE=str(WORKTREES))).stdout
+    if listed:
+        out = run([wt, "remove", path, "--force"] + (["--purge-cache"] if args.mode == "delete" else []), check=False, capture_output=True,
+                  env=dict(os.environ, WT_PRIMARY=primary, WT_BASE=str(WORKTREES)))
+    else:
+        out = run(["git", "-C", primary, "worktree", "remove", "--force", path], check=False, capture_output=True)
+    if out.returncode != 0 or os.path.exists(path):
+        sys.exit(f"couldn't remove {path}: {(out.stderr or out.stdout).strip()}")
+    if args.mode == "delete" and branch:
+        run(["git", "-C", primary, "branch", "-q", "-D", branch], check=False, capture_output=True)
+    print(f"{'deleted' if args.mode == 'delete' else 'removed'} {path}{f' and branch {branch}' if args.mode == 'delete' and branch else ''}")
+
+
+def leave_behind(src, folders):
+    """What happens to the worktrees a finished move left on src (move_leftovers): keep, hide (from the
+    sidebar; the project menu shows them again), remove or delete (see cmd__drop_worktree)."""
+    mode = option("move_leftovers", "hide")
+    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    in_use = {c["dir"] for c in all_chats() if c["host"] == src and c["status"] != "archived" and c.get("dir")}
+    for folder in folders:
+        if mode == "hide" and (folder in in_use or os.path.realpath(folder) in {os.path.realpath(d) for d in in_use}):
+            continue
+        try:
+            if mode == "hide":
+                run([str(Path(__file__).parent / "abx"), "do", json.dumps({"do": "state.set", "key": f"hidden:{folder}", "value": True})],
+                    check=False, capture_output=True, timeout=15)
+            elif mode in ("remove", "delete"):
+                print(on_host(src, "_drop_worktree", folder, mode).strip())
+        except (SystemExit, subprocess.CalledProcessError, subprocess.TimeoutExpired) as err:
+            print(f"left {folder} on the {src}: {err}", file=sys.stderr)
+
+
 def is_orchestrator(chat):
     """kind in move_note_kinds, or a name or folder matching move_note_match (chats brought in from
     super.engineering are all kind "feature")."""
@@ -1080,7 +1172,7 @@ def cmd_move(args):
         try:
             moved[folder] = move_worktree(folder, branch, repo, chats, src, dst)
             done.append((folder, branch, repo, chats))
-        except (SystemExit, subprocess.CalledProcessError) as err:
+        except (SystemExit, Exception) as err:
             put_back(chats, src)
             # Everything that already moved goes back, so a section never ends up split across machines.
             for f, b, r, cs in reversed(done):
@@ -1096,6 +1188,7 @@ def cmd_move(args):
         move_section(section, src, dst, moved, labels)
     note_moved(every, src, dst, section, moved)
     git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    leave_behind(src, [f for f, b, *_ in groups if b and f])
     what = f"section {section['name']}" if section else chat["name"]
     print(f"moved {what} to the {dst}: {len(every)} chat(s), {len(groups)} worktree(s)")
     for a, b in moved.items():
@@ -1261,6 +1354,10 @@ def main():
     h = sub.add_parser("_transcript_paths")
     h.add_argument("chat")
     h.set_defaults(fn=cmd__transcript_paths)
+    h = sub.add_parser("_drop_worktree")
+    h.add_argument("dir")
+    h.add_argument("mode", choices=["remove", "delete"])
+    h.set_defaults(fn=cmd__drop_worktree)
     h = sub.add_parser("_paths")
     h.add_argument("paths", nargs="*")
     h.set_defaults(fn=cmd__paths)
