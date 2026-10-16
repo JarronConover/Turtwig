@@ -20,12 +20,13 @@ pub struct Transition {
     start: Instant,
     duration: Duration,
     pub seen: u64,
+    easing: crate::ui::motion::Easing,
 }
 
 impl Transition {
     fn value(&self) -> (Vec<f32>, bool) {
         let t = (self.start.elapsed().as_secs_f32() / self.duration.as_secs_f32().max(0.001)).min(1.);
-        let e = 1. - (1. - t).powi(3);
+        let e = self.easing.apply(t);
         (self.from.iter().zip(&self.to).map(|(a, b)| a + (b - a) * e).collect(), t < 1.)
     }
 }
@@ -79,8 +80,11 @@ impl Workspace {
     }
 
     pub(crate) fn spinner(&mut self, size: Option<&str>, color: Option<Hsla>, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.anim_phase(800., cx);
-        let icon = Icon::new(gpui_kit::component::IconName::Loader);
+        let t = self.anim_phase(self.settings.num("motion.spinner.period_ms", 800.) as f32, cx);
+        let icon = match self.settings.get("motion.spinner.icon").and_then(Value::as_str) {
+            Some(name) => Icon::empty().path(format!("icons/{name}.svg")),
+            None => Icon::new(gpui_kit::component::IconName::Loader),
+        };
         let icon = match size {
             Some("xsmall") => icon.xsmall(),
             Some("small") => icon.small(),
@@ -214,7 +218,7 @@ impl Workspace {
                     icon = icon.text_color(c);
                 }
                 if props.get("spin").and_then(Value::as_bool) == Some(true) {
-                    let t = self.anim_phase(900., cx);
+                    let t = self.anim_phase(self.settings.num("motion.spin_period_ms", 900.) as f32, cx);
                     vec![icon.rotate(percentage(t)).into_any_element()]
                 } else {
                     vec![icon.into_any_element()]
@@ -449,12 +453,14 @@ impl Workspace {
                         Value::Object(by_kind) => by_kind.get(&item.kind).map(value_text).unwrap_or_else(|| "inside".into()),
                         _ => "inside".into(),
                     };
+                    let edge = ws.settings.num("drag.edge", 0.5) as f32;
+                    let band = ws.settings.num("drag.inside_band", 0.25) as f32;
                     let rel = (f32::from(e.event.position.y - e.bounds.origin.y) / f32::from(e.bounds.size.height).max(1.)).clamp(0., 1.);
                     let rel_x = (f32::from(e.event.position.x - e.bounds.origin.x) / f32::from(e.bounds.size.width).max(1.)).clamp(0., 1.);
                     let zone = match mode.as_str() {
-                        "edges" => if rel < 0.5 { "before" } else { "after" },
-                        "edges_x" => if rel_x < 0.5 { "before" } else { "after" },
-                        "edges+inside" => if rel < 0.25 { "before" } else if rel > 0.75 { "after" } else { "inside" },
+                        "edges" => if rel < edge { "before" } else { "after" },
+                        "edges_x" => if rel_x < edge { "before" } else { "after" },
+                        "edges+inside" => if rel < band { "before" } else if rel > 1. - band { "after" } else { "inside" },
                         _ => "inside",
                     };
                     if let Some(code) = valid {
@@ -704,7 +710,7 @@ impl Workspace {
             return;
         }
         window.request_animation_frame();
-        let e = 1. - (1. - t).powi(4);
+        let e = crate::ui::motion::Easing::parse_or(spec.get("easing").and_then(Value::as_str), crate::ui::motion::Easing::EaseOutQuart).apply(t);
         let from = spec.get("from").cloned().unwrap_or(Value::Null);
         let f = |k: &str| from.get(k).and_then(Value::as_f64).map(|x| x as f32);
         if let Some(o) = f("opacity") {
@@ -736,6 +742,7 @@ impl Workspace {
         }
         let generation = self.render_generation;
         let snap = !enabled || self.drag.is_some();
+        let style_easing = crate::ui::motion::Easing::parse_or(self.settings.motion.get("style").and_then(|s| s.get("easing")).and_then(Value::as_str), crate::ui::motion::Easing::EaseOut);
         for (prop, ms) in keys {
             let Some(v) = st.get(&prop) else { continue };
             let (target, color) = match v {
@@ -755,7 +762,7 @@ impl Workspace {
                     t.seen = generation;
                     if t.to.len() == target.len() && t.to.iter().zip(&target).any(|(a, b)| (a - b).abs() > 0.001) {
                         let (now, _) = t.value();
-                        *t = Transition { from: now, to: target, start: Instant::now(), duration: Duration::from_millis(ms), seen: generation };
+                        *t = Transition { from: now, to: target, start: Instant::now(), duration: Duration::from_millis(ms), seen: generation, easing: style_easing };
                     }
                     let (v, running) = t.value();
                     if running {
@@ -764,7 +771,7 @@ impl Workspace {
                     v
                 }
                 _ => {
-                    self.transitions.insert(key, Transition { from: target.clone(), to: target.clone(), start: Instant::now(), duration: Duration::ZERO, seen: generation });
+                    self.transitions.insert(key, Transition { from: target.clone(), to: target.clone(), start: Instant::now(), duration: Duration::ZERO, seen: generation, easing: style_easing });
                     target
                 }
             };
@@ -898,8 +905,8 @@ fn build_menu(
                 };
                 let accent = style::color(&Value::String("@accent".into()), theme);
                 let item = match (checked, icon, color) {
-                    (Some(true), _, _) => item.icon(menu_icon("square-check".into()).when_some(accent, |i, c| i.text_color(c))),
-                    (Some(false), _, _) => item.icon(menu_icon("square".into())),
+                    (Some(true), _, _) => item.icon(menu_icon(theme.get("menu_check_icon").and_then(Value::as_str).unwrap_or("square-check").into()).when_some(accent, |i, c| i.text_color(c))),
+                    (Some(false), _, _) => item.icon(menu_icon(theme.get("menu_uncheck_icon").and_then(Value::as_str).unwrap_or("square").into())),
                     (None, Some(i), Some(c)) => item.icon(menu_icon(i).text_color(c)),
                     (None, Some(i), None) => item.icon(menu_icon(i)),
                     _ => item,

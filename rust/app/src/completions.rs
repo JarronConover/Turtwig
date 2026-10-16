@@ -4,7 +4,7 @@ skills and commands in Claude Code's folders, for the chat's worktree. */
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -75,7 +75,7 @@ fn scan(dir: &Path, kind: &str, source: &str, out: &mut Vec<Entry>) {
 `chat.skill_dirs` (`{worktree}` is the worktree; a box worktree reads this Mac's checkout of the repo). */
 pub fn entries(settings: &crate::settings::Settings, worktree: Option<&str>, local_repo: Option<&str>) -> Vec<Entry> {
     let key = format!("{}|{}", worktree.unwrap_or(""), local_repo.unwrap_or(""));
-    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).filter(|(t, _)| t.elapsed() < Duration::from_secs(20)).map(|(_, e)| e.clone())) {
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).filter(|(t, _)| t.elapsed().as_secs_f64() < settings.chat.get("completion_cache_secs").and_then(Value::as_f64).unwrap_or(20.)).map(|(_, e)| e.clone())) {
         return hit;
     }
     let mut out: Vec<Entry> = vec![];

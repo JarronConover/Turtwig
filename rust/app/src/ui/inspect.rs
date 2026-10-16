@@ -66,7 +66,8 @@ impl Workspace {
             "transcripts": self.lists.iter().map(|(chat, l)| (chat.clone(), json!({"following": l.state.is_following_tail(), "at_end": l.state.is_scrolled_to_end(), "rows": l.state.item_count(), "top": l.state.logical_scroll_top().item_ix, "kinds": l.kinds()}))).collect::<serde_json::Map<_, _>>(),
             "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
             "context": ctx,
-            "clickable": self.clickables.iter().map(|(id, label, _)| json!({"id": id, "label": label})).collect::<Vec<_>>(),
+            "clickable": self.clickables_last.iter().map(|(id, label, _)| json!({"id": id, "label": label})).collect::<Vec<_>>(),
+            "menus": self.menus_last.iter().map(|(id, tip, _, _)| json!({"id": id, "label": tip})).collect::<Vec<_>>(),
             "composers": self.composers.iter().map(|(chat, c)| (chat.clone(), Value::String(c.read(cx).value().to_string()))).collect::<serde_json::Map<_, _>>(),
             "layout": layout.into_iter().map(|(k, b)| json!({"id": k, "x": b[0], "y": b[1], "w": b[2], "h": b[3]})).collect::<Vec<_>>(),
         });

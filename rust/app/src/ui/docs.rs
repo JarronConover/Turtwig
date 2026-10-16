@@ -28,6 +28,13 @@ full at the end of this file. Change anything by overriding it in your settings 
   with an `id` is drawn; `activity.log` lists every action run (clicks, keys, agents) with a timestamp;
   the `app.snapshot` action writes `snapshot.png`. From a shell, `abx` wraps all of this
   (`abx state`, `abx layout`, `abx do`, `abx shot`, `abx log`, `abx problems`).
+- Beyond the context, `inspect.json` has `views` (each transcript's recent items, open steps,
+  background work and attachments; the diff's files; every terminal's screen lines), `internal`
+  (back/forward visits, recent sends, opened and closed chats, subagent tabs, hook events),
+  `dialog` (an open text dialog's fields and values: answer it with `dialog.submit`), `palette`
+  (its entries: run one with `palette.run`), `clickable` (for `ui.click`, double-clicks and presses
+  included) and `menus` (right-click menus: run an item with `ui.menu`). `.app.notifications`,
+  `.app.dialog`, `.app.focus_area` and `.app.palette_open` are in the context itself.
 - The built-in defaults are read live from `default-settings.jsonc` in the source checkout when it
   exists, so editing them hot-reloads too; only changes to the app's Rust code need a restart.
 - UI state (selection, toggles, sizes) persists in `ui-state.json` next to the settings file.

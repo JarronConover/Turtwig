@@ -66,6 +66,8 @@ pub struct Workspace {
     /** The open text dialog (rename, new worktree, project settings, prompt), for agents. */
     pub(crate) dialog: Option<OpenDialog>,
     pub(crate) palette_open: bool,
+    /** Where typing goes this frame (`focus_area`), as `.app.focus_area`. */
+    focus_now: &'static str,
     nav_at: usize,
     nav_jumping: bool,
     /** This view, for click handlers built without a `cx` (message actions). */
@@ -139,6 +141,9 @@ pub struct Workspace {
     pub(crate) clickables: Vec<(String, String, Value)>,
     /** Right-click menus drawn this frame: (node id, tooltip, menu spec, its context), for `ui.menu`. */
     pub(crate) menus: Vec<(String, String, std::rc::Rc<Vec<Value>>, jaq_json::Val)>,
+    /** Last frame's, complete (virtual-list rows included), for inspect.json and agent clicks. */
+    pub(crate) clickables_last: Vec<(String, String, Value)>,
+    pub(crate) menus_last: Vec<(String, String, std::rc::Rc<Vec<Value>>, jaq_json::Val)>,
     pub(crate) scripts: Option<crate::script::Scripts>,
     pub(crate) script_data: Map<String, Value>,
     script_timers: HashMap<u64, Task<()>>,
@@ -172,7 +177,7 @@ impl Workspace {
         }
         let (mut remotes, mut guards, mut listeners) = (HashMap::new(), vec![], vec![]);
         for (host, ssh, daemon) in conns {
-            let (r, incoming, guard) = Remote::start(ssh, daemon, retry);
+            let (r, incoming, guard) = Remote::start(ssh, daemon, retry, settings.connection.ssh_options.clone());
             remotes.insert(host.clone(), r);
             guards.push(guard);
             listeners.push(cx.spawn_in(window, async move |this, cx| {
@@ -185,7 +190,11 @@ impl Workspace {
         }
         let remote = remotes.get("box").cloned().expect("the box connection");
         let watch = Self::watch_settings(window, cx);
+        let env_every = settings.connection.env_push_seconds;
         let env_push = cx.spawn(async move |_, cx| loop {
+            if env_every == 0 {
+                break;
+            }
             let home = std::env::var("HOME").unwrap_or_default();
             let _ = cx
                 .background_spawn(async move {
@@ -194,7 +203,7 @@ impl Workspace {
                         .output()
                 })
                 .await;
-            cx.background_executor().timer(Duration::from_secs(60)).await;
+            cx.background_executor().timer(Duration::from_secs(env_every)).await;
         });
         let (designer_tx, designer_rx) = flume::unbounded();
         let designer_listen = cx.spawn(async move |this, cx| {
@@ -243,6 +252,7 @@ impl Workspace {
             hooks: vec![],
             dialog: None,
             palette_open: false,
+            focus_now: "",
             nav_at: 0,
             nav_jumping: false,
             sub_chats: vec![],
@@ -302,6 +312,8 @@ impl Workspace {
             activity: vec![],
             clickables: vec![],
             menus: vec![],
+            clickables_last: vec![],
+            menus_last: vec![],
             scripts: None,
             script_data: Map::new(),
             script_timers: HashMap::new(),
@@ -362,7 +374,7 @@ impl Workspace {
     /** The context as JSON for scripts, reused until something changes it (`ctx_rev`) or 250ms pass. */
     fn script_context(&mut self) -> std::rc::Rc<str> {
         if let Some((rev, at, text)) = &self.ctx_cache {
-            if *rev == self.ctx_rev && at.elapsed() < Duration::from_millis(250) {
+            if *rev == self.ctx_rev && (at.elapsed().as_millis() as f64) < self.settings.num("scripts_options.context_cache_ms", 250.) {
                 return text.clone();
             }
         }
@@ -392,7 +404,7 @@ impl Workspace {
                 }
             }
             "timer" => {
-                let ms = m["ms"].as_u64().unwrap_or(1000).max(16);
+                let ms = m["ms"].as_u64().unwrap_or(1000).max(self.settings.num("scripts_options.min_timer_ms", 16.) as u64);
                 let repeat = m["repeat"].as_bool().unwrap_or(false);
                 let task = cx.spawn_in(window, async move |this, cx| loop {
                     cx.background_executor().timer(Duration::from_millis(ms)).await;
@@ -480,7 +492,7 @@ impl Workspace {
         let mut store = self.motion.borrow_mut();
         store.enabled = m.get("enabled").and_then(Value::as_bool) != Some(false) && self.settings.theme.get("animations").and_then(Value::as_bool) != Some(false);
         store.duration_ms = m.get("move").and_then(|x| x.get("duration")).and_then(Value::as_f64).unwrap_or(280.) as f32;
-        store.easing = crate::ui::motion::Easing::parse(m.get("move").and_then(|x| x.get("easing")).and_then(Value::as_str));
+        store.easing = crate::ui::motion::Easing::parse(m.get("move").and_then(|x| x.get("easing")).and_then(Value::as_str)).with_spring(m.get("move").and_then(|x| x.get("spring")));
     }
 
     fn on_designer(&mut self, out: crate::designer::Out, cx: &mut Context<Self>) {
@@ -561,7 +573,8 @@ impl Workspace {
             let _ = std::fs::create_dir_all(&scripts);
             let _ = watcher.watch(&scripts, RecursiveMode::NonRecursive);
             while let Ok(first) = rx.recv_async().await {
-                cx.background_executor().timer(Duration::from_millis(80)).await;
+                let wait = this.update(cx, |ws, _| ws.settings.num("settings_options.reload_debounce_ms", 80.)).unwrap_or(80.);
+                cx.background_executor().timer(Duration::from_millis(wait as u64)).await;
                 let (mut reload, mut run) = (!first, first);
                 while let Ok(r) = rx.try_recv() {
                     reload |= !r;
@@ -637,16 +650,20 @@ impl Workspace {
         let mut fired = vec![];
         for c in &self.model.chats {
             let Some(old) = before.get(&c.id) else { continue };
+            if old != &c.state {
+                // Any change, for settings `events` that want more than the three below: `.from` and `.chat.state`.
+                fired.push(("chat.state", c.clone(), old.clone()));
+            }
             let event = match (old.as_str(), c.state.as_str()) {
                 (o, "waiting") if o != "waiting" => "chat.waiting",
                 ("working", "idle") => "chat.finished",
                 ("working" | "waiting" | "idle", "stopped") => "chat.stopped",
                 _ => continue,
             };
-            fired.push((event, c.clone()));
+            fired.push((event, c.clone(), old.clone()));
         }
-        for (event, chat) in fired {
-            self.fire_event(event, vec![("chat".into(), to_val(&self.chat_json(&chat)))], window, cx);
+        for (event, chat, from) in fired {
+            self.fire_event(event, vec![("chat".into(), to_val(&self.chat_json(&chat))), ("from".into(), to_val(&Value::String(from)))], window, cx);
         }
     }
 
@@ -831,7 +848,9 @@ impl Workspace {
     /** Every host's model in one: this Mac's projects and sections first, then the box's. */
     fn merge_models(&mut self) {
         let mut hosts: Vec<&String> = self.models.keys().collect();
-        hosts.sort_by_key(|h| if h.as_str() == "mac" { 0 } else { 1 });
+        // `sidebar.host_order`: whose worktrees come first in a merged project.
+        let order: Vec<String> = self.settings.get("sidebar.host_order").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_else(|| vec!["mac".into(), "box".into()]);
+        hosts.sort_by_key(|h| order.iter().position(|x| x == *h).unwrap_or(order.len()));
         let mut merged = Model { host: "all".into(), ..Default::default() };
         let (mut project_hosts, mut section_hosts): (Vec<Vec<String>>, HashMap<String, String>) = (vec![], HashMap::new());
         // state.sidebar_projects: "merged" (default) lists each repo once with every machine's worktrees;
@@ -881,15 +900,17 @@ impl Workspace {
     pub(crate) fn load_history(&mut self, cx: &mut Context<Self>) {
         self.history_loading = true;
         let remotes: Vec<(String, Remote)> = self.remotes.iter().filter(|(h, _)| self.host_up.get(*h) == Some(&true)).map(|(h, r)| (h.clone(), r.clone())).collect();
+        let limit = self.settings.num("history.limit", 300.) as usize;
+        let age_fmt = self.age_format();
         cx.spawn(async move |this, cx| {
             let mut all: Vec<Value> = vec![];
             for (host, r) in remotes {
-                if let Ok(v) = r.call(Call::History { limit: Some(300) }).await {
+                if let Ok(v) = r.call(Call::History { limit: Some(limit) }).await {
                     for mut c in v["chats"].as_array().cloned().unwrap_or_default() {
                         if let Value::Object(o) = &mut c {
                             o.entry("host").or_insert(Value::String(host.clone()));
                             let age = o.get("last_activity").and_then(Value::as_f64);
-                            o.insert("age_text".into(), Value::String(age_text(age)));
+                            o.insert("age_text".into(), Value::String(age_text(age, &age_fmt)));
                             let folder = o.get("dir").and_then(Value::as_str).and_then(|d| d.rsplit('/').next()).unwrap_or("").to_string();
                             o.insert("folder".into(), Value::String(folder));
                         }
@@ -1019,8 +1040,17 @@ impl Workspace {
     /** Whether a chat shows as a tab: its process is running (or starting, or was just opened), and it
     wasn't closed. Worktrees open with no tabs unless a chat there is live. */
     pub(crate) fn chat_open(&self, c: &Chat) -> bool {
-        !self.closed.contains(&c.id)
-            && (self.opened.contains(&c.id) || c.alive || c.state == "working" || c.state == "waiting" || c.status == "running_elsewhere")
+        if self.closed.contains(&c.id) {
+            return false;
+        }
+        // `chat.open_when`: what makes a chat show as a tab (besides being opened by hand).
+        let when = self.settings.get("chat.open_when").and_then(Value::as_array);
+        let has = |k: &str| when.map_or(true, |w| w.iter().any(|x| x.as_str() == Some(k)));
+        self.opened.contains(&c.id)
+            || (has("alive") && c.alive)
+            || (has("working") && c.state == "working")
+            || (has("waiting") && c.state == "waiting")
+            || (has("running_elsewhere") && c.status == "running_elsewhere")
     }
 
     pub(crate) fn current_worktree(&self) -> Option<&Worktree> {
@@ -1077,7 +1107,9 @@ impl Workspace {
             .map(|s| {
                 // A section's orchestrator leads it; its workers follow.
                 let mut shown = self.visible_items(&s.items, |_| true);
-                shown.sort_by_key(|w| !self.chats_of(w).iter().any(|c| c.kind == "orchestrator"));
+                if self.settings.get("sidebar.orchestrators_first").and_then(Value::as_bool) != Some(false) {
+                    shown.sort_by_key(|w| !self.chats_of(w).iter().any(|c| c.kind == "orchestrator"));
+                }
                 let gaps = self.drop_gaps(&shown);
                 json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
                        "host": self.section_hosts.get(&s.id).cloned().unwrap_or_else(|| "box".into()),
@@ -1136,6 +1168,7 @@ impl Workspace {
                 "notifications": self.notices.iter().map(|(at, text)| json!({"at": at, "text": text})).collect::<Vec<_>>(),
                 "dialog": self.dialog.as_ref().map(|d| json!({"title": d.title, "fields": d.inputs.iter().map(|(l, _)| l.to_string()).collect::<Vec<_>>()})),
                 "palette_open": self.palette_open,
+                "focus_area": self.focus_now,
                 "nav": {"back": self.can_navigate(-1), "forward": self.can_navigate(1)},
                 "dragging": self.dragging,
                 "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
@@ -1238,23 +1271,24 @@ impl Workspace {
 
     fn worktree_json(&self, w: &Worktree, section: Value) -> Value {
         let chats = self.chats_of(w);
-        let status = if chats.iter().any(|c| c.state == "working") {
-            "working"
-        } else if chats.iter().any(|c| c.state == "waiting") {
-            "waiting"
-        } else if w.mr.as_ref().map(|m| m.state == "merged").unwrap_or(false) {
-            "merged"
-        } else if w.mr.as_ref().and_then(|m| m.checks.as_deref()) == Some("failing") {
-            "failing"
-        } else if w.mr.as_ref().and_then(|m| m.checks.as_deref()) == Some("pending") {
-            "pending"
-        } else if w.uncommitted > 0 || w.unpushed > 0 {
-            "dirty"
-        } else if w.behind {
-            "behind"
-        } else {
-            "idle"
+        // Which status wins when several apply: `sidebar.status_order`.
+        let applies = |s: &str| match s {
+            "working" => chats.iter().any(|c| c.state == "working"),
+            "waiting" => chats.iter().any(|c| c.state == "waiting"),
+            "merged" => w.mr.as_ref().is_some_and(|m| m.state == "merged"),
+            "failing" => w.mr.as_ref().and_then(|m| m.checks.as_deref()) == Some("failing"),
+            "pending" => w.mr.as_ref().and_then(|m| m.checks.as_deref()) == Some("pending"),
+            "dirty" => w.uncommitted > 0 || w.unpushed > 0,
+            "behind" => w.behind,
+            _ => false,
         };
+        let order: Vec<String> = self
+            .settings
+            .get("sidebar.status_order")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_else(|| ["working", "waiting", "merged", "failing", "pending", "dirty", "behind"].map(String::from).to_vec());
+        let status = order.iter().find(|s| applies(s)).map(String::as_str).unwrap_or("idle");
         let (emoji, label) = split_emoji(&w.title);
         let (_, project_letter, hue) = self.project_look(&w.repo, &w.project, w.hue);
         json!({
@@ -1262,7 +1296,7 @@ impl Workspace {
             "project": w.project, "repo": w.repo, "hue": hue, "letter": project_letter, "is_primary": w.is_primary,
             "pinned": self.flag(&format!("pinned:{}", w.path)), "hidden": self.flag(&format!("hidden:{}", w.path)), "external": w.external,
             "uncommitted": w.uncommitted, "unpushed": w.unpushed, "behind": w.behind, "mr": w.mr,
-            "age": w.age, "age_text": age_text(w.age), "status": status, "section": section,
+            "age": w.age, "age_text": age_text(w.age, &self.age_format()), "status": status, "section": section,
             "selected": self.selected.as_deref() == Some(&w.path),
             "host": w.host,
             "chats": chats.iter().map(|c| self.chat_json(c)).collect::<Vec<_>>(),
@@ -1275,11 +1309,11 @@ impl Workspace {
             o.insert("active".into(), Value::Bool(self.current_chat().map(|x| x.id == c.id).unwrap_or(false)));
             o.insert("open".into(), Value::Bool(self.chat_open(c)));
             o.insert("queued".into(), json!(self.queued.get(&c.id).cloned().unwrap_or_default()));
-            o.insert("age_text".into(), Value::String(age_text(c.last_activity)));
+            o.insert("age_text".into(), Value::String(age_text(c.last_activity, &self.age_format())));
             o.insert("attachments".into(), self.attachments_json(&c.id));
             let last = self.transcripts.get(&c.id).and_then(|t| t.items.iter().rev().find_map(|i| if let Item::Assistant { text } = i { Some(text.clone()) } else { None }));
-            o.insert("asks".into(), Value::Bool(last.as_deref().is_some_and(|t| t.trim_end().ends_with('?'))));
-            o.insert("last_message".into(), last.map(|t| Value::String(t.chars().take(280).collect())).unwrap_or(Value::Null));
+            o.insert("asks".into(), Value::Bool(last.as_deref().is_some_and(|t| self.asks(t))));
+            o.insert("last_message".into(), last.map(|t| Value::String(t.chars().take(self.settings.num("chat.last_message_chars", 280.) as usize).collect())).unwrap_or(Value::Null));
             let activity = self.transcripts.get(&c.id).filter(|_| c.state == "working").map(|t| t.activity()).unwrap_or_default();
             o.insert("activity".into(), Value::String(activity));
         }
@@ -1339,14 +1373,15 @@ impl Workspace {
         // enter_sends: Enter sends and Shift+Enter starts a new line; otherwise Enter is a new line.
         // Cmd+Enter always sends.
         let enter_sends = self.settings.chat.get("enter_sends").and_then(Value::as_bool).unwrap_or(true);
-        let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(placeholder).submit_on_enter(enter_sends));
+        let cmd_enter_sends = self.settings.chat.get("cmd_enter_sends").and_then(Value::as_bool).unwrap_or(true);
+        let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(self.settings.num("chat.composer_lines.min", 1.) as usize, self.settings.num("chat.composer_lines.max", 10.) as usize).placeholder(placeholder).submit_on_enter(enter_sends));
         let id = chat_id.to_string();
         self._subscriptions.push(cx.subscribe_in(&state, window, move |ws, _, ev: &InputEvent, window, cx| {
             match ev {
                 InputEvent::PressEnter { secondary, shift } => {
                     if ws.completion.as_ref().is_some_and(|c| c.0 == id) && !*shift {
                         ws.accept_completion(None, window, cx);
-                    } else if *secondary || (enter_sends && !*shift) {
+                    } else if (*secondary && cmd_enter_sends) || (enter_sends && !*shift && !*secondary) {
                         ws.send_composer(&id, window, cx);
                     }
                 }
@@ -1375,7 +1410,7 @@ impl Workspace {
             let w = self.all_worktrees().into_iter().find(|w| w.chat_ids.iter().any(|c| c == chat)).cloned();
             let local = w.as_ref().filter(|w| w.host != "mac").map(|w| format!("~/dev/{}", w.project));
             let all = crate::completions::entries(&self.settings, w.as_ref().map(|w| w.path.as_str()), local.as_deref());
-            let items = crate::completions::filter(&all, &query, 12);
+            let items = crate::completions::filter(&all, &query, self.settings.num("chat.completion_limit", 12.) as usize);
             let keep = self.completion.as_ref().filter(|c| c.0 == chat).map(|c| c.3).unwrap_or(0);
             (!items.is_empty()).then(|| (chat.to_string(), trigger, items.clone(), keep.min(items.len().saturating_sub(1))))
         });
@@ -1453,7 +1488,7 @@ impl Workspace {
             .iter()
             .filter(|(_, q)| !q.is_empty())
             .filter(|(id, _)| self.chat(id).is_some_and(|c| c.alive && c.state == "idle"))
-            .filter(|(id, _)| self.queue_sent.get(*id).map_or(true, |t| t.elapsed() > Duration::from_secs(8)))
+            .filter(|(id, _)| self.queue_sent.get(*id).map_or(true, |t| t.elapsed().as_secs_f64() > self.settings.num("chat.queue_resend_secs", 8.)))
             .map(|(id, _)| id.clone())
             .collect();
         for id in ready {
@@ -1468,6 +1503,19 @@ impl Workspace {
     fn configure_host(&self, host: &str) {
         let options = self.settings.get("daemon").cloned().unwrap_or(Value::Object(Map::new()));
         self.remote_for_host(host).send(Call::Configure { options });
+    }
+
+    /** Whether a reply asks you something: it ends with one of `chat.asks_endings` ("?"). */
+    pub(crate) fn asks(&self, text: &str) -> bool {
+        let t = text.trim_end();
+        match self.settings.get("chat.asks_endings").and_then(Value::as_array) {
+            Some(list) => list.iter().filter_map(Value::as_str).any(|e| !e.is_empty() && t.ends_with(e)),
+            None => t.ends_with('?'),
+        }
+    }
+
+    pub(crate) fn age_format(&self) -> Value {
+        self.settings.get("format.age").cloned().unwrap_or(Value::Null)
     }
 
     /** A user-facing string: settings `strings.KEY` (else `default`), with `{name}` filled from `vars`. */
@@ -1499,7 +1547,8 @@ impl Workspace {
 
     /** A chat shows as working from the moment you send, not from when its hook reports in a second later. */
     fn apply_just_sent(&mut self) {
-        self.just_sent.retain(|_, t| t.elapsed() < Duration::from_secs(10));
+        let hold = self.settings.num("chat.working_after_send_secs", 10.);
+        self.just_sent.retain(|_, t| t.elapsed().as_secs_f64() < hold);
         let mut seen = vec![];
         for c in self.model.chats.iter_mut() {
             if self.just_sent.contains_key(&c.id) {
@@ -1539,11 +1588,25 @@ impl Workspace {
         }
         self.nav.truncate(self.nav_at + 1);
         self.nav.push(here);
-        if self.nav.len() > 200 {
+        if self.nav.len() > self.settings.num("nav.max", 200.).max(2.) as usize {
             self.nav.remove(0);
         }
         self.nav_at = self.nav.len() - 1;
         self.ctx_rev += 1;
+    }
+
+    /** Settings `mouse.back` / `mouse.forward` / `mouse.middle`: the action for that button (back and forward
+    default to nav.back / nav.forward). */
+    fn mouse_button(&mut self, which: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let default = match which {
+            "back" => Value::String("nav.back".into()),
+            "forward" => Value::String("nav.forward".into()),
+            _ => Value::Null,
+        };
+        let action = self.settings.get(&format!("mouse.{which}")).cloned().unwrap_or(default);
+        let ctx = self.context();
+        let action = self.exprs.resolve_action(&action, &ctx);
+        self.run_action(&action, window, cx);
     }
 
     /** Back (-1) or forward (1) to the nearest visit whose worktree is still here. */
@@ -1607,7 +1670,6 @@ impl Workspace {
         let Some(state) = self.composers.get(id).cloned() else { return };
         let typed = state.read(cx).value().trim().to_string();
         let Some(paths) = self.take_attachments(id) else {
-            use gpui_kit::component::WindowExt as _;
             self.send_when_ready.insert(id.to_string());
             let t = self.tr("sending_after_upload", "Sending when the upload finishes", &[]);
             self.toast(t, window, cx);
@@ -1753,7 +1815,8 @@ impl Workspace {
                     .child(gpui_kit::component::button::Button::new("ok").label(save.clone()).on_click(move |_, window, cx| submit(window, cx))),
             )
         });
-        self.dialog = Some(OpenDialog { title: title_text, inputs, submit });
+        let done: std::rc::Rc<dyn Fn(&mut Workspace, Vec<String>, &mut Context<Workspace>)> = done;
+        self.dialog = Some(OpenDialog { title: title_text, inputs, need_first, done });
         if let Some(f) = focus {
             f.update(cx, |s, cx| s.focus(window, cx));
         }
@@ -1774,14 +1837,21 @@ impl Workspace {
 
     /** `dialog.submit {values?}`: fill the open dialog's fields (in order) and save it. */
     pub(crate) fn submit_dialog(&mut self, values: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
         let Some(d) = self.dialog.as_ref() else { return };
         if let Some(values) = values {
             for ((_, input), v) in d.inputs.iter().zip(values) {
                 input.update(cx, |s, cx| s.set_value(v, window, cx));
             }
         }
-        let submit = d.submit.clone();
-        submit(window, cx);
+        let vals: Vec<String> = d.inputs.iter().map(|(_, i)| i.read(cx).value().trim().to_string()).collect();
+        if d.need_first && vals.first().is_none_or(|v| v.is_empty()) {
+            return;
+        }
+        let done = d.done.clone();
+        self.dialog = None;
+        done(self, vals, cx);
+        window.close_dialog(cx);
     }
 
     pub(crate) fn cancel_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1851,7 +1921,6 @@ impl Workspace {
 
     /** Runs a Mac command off the UI thread with a usable PATH; `notify` shows its last output line. */
     fn run_command(&mut self, mut cmd: std::process::Command, notify: bool, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_kit::component::WindowExt as _;
         let home = std::env::var("HOME").unwrap_or_default();
         cmd.env("PATH", format!("{home}/.local/bin:{home}/.cargo/bin:{home}/dev/redo-monorepo-worktrees/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"));
         if notify {
@@ -2014,13 +2083,13 @@ impl Workspace {
         };
         let working = if designer { self.designer.working } else { self.chat(&chat_id).map(|c| c.state == "working").unwrap_or(false) };
         let state = self.sync_list(&chat_id, working);
-        if !designer && !state.is_following_tail() && state.item_count() > 0 && state.logical_scroll_top().item_ix == 0 && self.transcripts.get(&chat_id).is_some_and(|t| t.start > 0) {
+        if !designer && !state.is_following_tail() && state.item_count() > 0 && state.logical_scroll_top().item_ix <= self.settings.num("chat.load_earlier_within", 0.) as usize && self.transcripts.get(&chat_id).is_some_and(|t| t.start > 0) {
             self.load_earlier(&chat_id, cx);
         }
         let loading_earlier = self.loading_earlier.contains(&chat_id).then(|| {
-            let st = self.settings.chat.get("jump").and_then(Value::as_object).cloned().unwrap_or_default();
+            let st = self.settings.chat.get("loading_chip").or_else(|| self.settings.chat.get("jump")).and_then(Value::as_object).cloned().unwrap_or_default();
             let label = self.settings.chat.get("jump_labels").and_then(|l| l.get("loading")).and_then(Value::as_str).unwrap_or("Loading earlier messages…").to_string();
-            div().absolute().top(px(10.)).left_0().right_0().flex().justify_center()
+            div().absolute().top(px(self.settings.num("chat.loading_chip_top", 10.) as f32)).left_0().right_0().flex().justify_center()
                 .child(style::apply(h_flex().gap(px(6.)).items_center(), &st, &theme).child(self.spinner(Some("xsmall"), None, cx)).child(label))
                 .into_any_element()
         });
@@ -2193,13 +2262,13 @@ impl Workspace {
         let st = self.settings.chat.get("jump").and_then(Value::as_object).cloned().unwrap_or_default();
         let id = chat_id.to_string();
         let chip = style::apply(h_flex().id(SharedString::from(format!("jump:{chat_id}"))).gap(px(6.)).items_center().cursor_pointer(), &st, theme)
-            .child(gpui_kit::component::Icon::empty().path("icons/arrow-down.svg").size(px(13.)))
+            .child(gpui_kit::component::Icon::empty().path(format!("icons/{}.svg", self.settings.get("chat.jump_icon").and_then(Value::as_str).unwrap_or("arrow-down"))).size(px(self.settings.num("chat.jump_icon_size", 13.) as f32)))
             .child(text)
             .on_click(cx.listener(move |ws, _, _, cx| {
                 ws.jump_to_latest(&id);
                 cx.notify();
             }));
-        Some(div().absolute().bottom(px(14.)).left_0().right_0().flex().justify_center().child(chip).into_any_element())
+        Some(div().absolute().bottom(px(self.settings.num("chat.jump_bottom", 14.) as f32)).left_0().right_0().flex().justify_center().child(chip).into_any_element())
     }
 
     pub(crate) fn composer_view(&mut self, chat: Option<String>, props: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2223,7 +2292,8 @@ impl Workspace {
             .then(|| self.chat(&chat).filter(|c| c.state == "idle").and_then(|c| c.suggestion.clone()))
             .flatten();
         let fallback = self.settings.chat.get("placeholder").and_then(Value::as_str).unwrap_or("Message the agent…").to_string();
-        let wanted = suggestion.as_ref().map(|s| format!("{s}   ⇥ Tab")).unwrap_or(fallback);
+        let hint = self.settings.get("chat.suggestion_hint").and_then(Value::as_str).unwrap_or("   ⇥ Tab").to_string();
+        let wanted = suggestion.as_ref().map(|s| format!("{s}{hint}")).unwrap_or(fallback);
         if chat != crate::designer::CHAT_ID && self.placeholders.get(&chat) != Some(&wanted) {
             self.placeholders.insert(chat.clone(), wanted.clone());
             c.update(cx, |s, cx| s.set_placeholder(wanted, window, cx));
@@ -2301,10 +2371,10 @@ impl Workspace {
                 })
                 .flex()
                 .flex_col()
-                .gap(px(6.))
+                .gap(px(self.settings.num("chat.composer_gap", 6.) as f32))
                 .children(chips)
                 .child(textarea)
-                .rounded(px(6.))
+                .rounded(px(self.settings.num("chat.composer_radius", 6.) as f32))
                 .border_1()
                 .border_color(transparent_black())
                 .drag_over::<ExternalPaths>(move |mut s, _, _, _| {
@@ -2327,15 +2397,17 @@ impl Workspace {
         }
         let theme = self.settings.theme.clone();
         let st = self.settings.chat.get("drop_overlay").and_then(Value::as_object).cloned().unwrap_or_default();
-        let label = if chat_id == crate::designer::CHAT_ID { "the designer".to_string() } else { self.chat(chat_id).map(|c| format!("“{}”", c.name)).unwrap_or_else(|| "this chat".into()) };
+        let label = if chat_id == crate::designer::CHAT_ID { self.tr("the_designer", "the designer", &[]) } else { self.chat(chat_id).map(|c| format!("“{}”", c.name)).unwrap_or_else(|| self.tr("this_chat", "this chat", &[])) };
+        let icon = self.settings.get("chat.drop_overlay_icon").and_then(Value::as_str).unwrap_or("paperclip").to_string();
+        let text = self.tr("drop_to_attach", "Drop to attach to {chat}", &[("chat", &label)]);
         let accent = style::color(&Value::from("@accent"), &theme).unwrap_or(blue());
         let (view, chat) = (cx.entity().downgrade(), chat_id.to_string());
         Some(
             style::apply(div().id(SharedString::from(format!("drop:{chat_id}"))).absolute().inset(px(8.)).flex().flex_col().items_center().justify_center(), &st, &theme)
                 .opacity(0.)
                 .drag_over::<ExternalPaths>(|s, _, _, _| s.opacity(1.))
-                .child(gpui_kit::component::Icon::empty().path("icons/paperclip.svg").size(px(22.)).text_color(accent))
-                .child(format!("Drop to attach to {label}"))
+                .child(gpui_kit::component::Icon::empty().path(format!("icons/{icon}.svg")).size(px(22.)).text_color(accent))
+                .child(text)
                 .on_drop(move |paths: &ExternalPaths, window, cx| {
                     let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
                     let chat = chat.clone();
@@ -2353,13 +2425,12 @@ impl Workspace {
             _ => Map::new(),
         };
         let w = chat.waiting_on.clone().unwrap_or_default();
-        let message = w["message"].as_str().or(w["tool_name"].as_str()).unwrap_or("The agent is waiting for you").to_string();
-        let options: Vec<String> = w["tool_input"]["questions"][0]["options"]
-            .as_array()
-            .map(|o| o.iter().filter_map(|x| x["label"].as_str().map(str::to_string)).collect())
-            .unwrap_or_else(|| vec!["Yes".into(), "Yes, don't ask again".into(), "No".into()]);
+        let fallback = self.tr("waiting", "The agent is waiting for you", &[]);
+        let message = w["message"].as_str().or(w["tool_name"].as_str()).map(str::to_string).unwrap_or(fallback);
+        let (options, questions) = waiting_options(&w, &self.settings);
         let mut row = h_flex().gap(px(6.)).flex_wrap();
-        for (i, label) in options.iter().enumerate().chain(std::iter::once((usize::MAX, &"Cancel".to_string()))) {
+        let cancel = self.tr("waiting_cancel", "Cancel", &[]);
+        for (i, label) in options.iter().enumerate().chain(std::iter::once((usize::MAX, &cancel))) {
             let id = chat.id.clone();
             let key = if i == usize::MAX { "Escape".to_string() } else { (i + 1).to_string() };
             row = row.child(
@@ -2368,12 +2439,63 @@ impl Workspace {
                     .on_click(cx.listener(move |ws, _, _, cx| ws.call(Call::ChatKeys { chat_id: id.clone(), keys: vec![key.clone()] }, cx))),
             );
         }
-        style::apply(v_flex().gap(px(10.)), &st("waiting"), theme).child(div().child(message)).child(row).into_any_element()
+        style::apply(v_flex().gap(px(10.)), &st("waiting"), theme)
+            .child(div().child(message))
+            .children(questions.into_iter().map(|q| div().child(q)))
+            .child(row)
+            .into_any_element()
+    }
+
+    /** Where typing goes now: "terminal", "composer", "input" (another text field), or "" (none). */
+    pub(crate) fn focus_area(&self, window: &mut Window, cx: &mut Context<Self>) -> &'static str {
+        use gpui_kit::component::WindowExt as _;
+        if self.terminals.values().any(|t| t.read(cx).is_focused(window)) {
+            "terminal"
+        } else if self.composers.values().any(|c| c.read(cx).focus_handle(cx).is_focused(window)) {
+            "composer"
+        } else if window.has_focused_input(cx) {
+            "input"
+        } else {
+            ""
+        }
     }
 
     fn handle_keys(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let pressed = e.keystroke.unparse();
-        let found = self.settings.keys.iter().rev().find(|k| k.get("key").and_then(Value::as_str) == Some(pressed.as_str())).cloned();
+        let area = self.focus_area(window, cx);
+        // The composer's completion list: `chat.completion_keys` {next, prev, accept, close}, each a list of keys.
+        if let Some(chat) = self.completion.as_ref().map(|c| c.0.clone()) {
+            let keys = self.settings.get("chat.completion_keys").cloned().unwrap_or(Value::Null);
+            let hit = |k: &str| keys.get(k).and_then(Value::as_array).is_some_and(|l| l.iter().any(|x| x.as_str() == Some(pressed.as_str())));
+            if hit("next") {
+                self.move_completion(1, cx);
+            } else if hit("prev") {
+                self.move_completion(-1, cx);
+            } else if hit("accept") {
+                self.accept_completion(None, window, cx);
+            } else if hit("close") {
+                self.completion = None;
+            } else {
+                let _ = chat;
+            }
+            if ["next", "prev", "accept", "close"].iter().any(|k| hit(k)) {
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+        }
+        // `chat.suggestion_keys`: keys that take Claude's suggestion into an empty composer (Tab works too).
+        if area == "composer" && self.settings.get("chat.suggestion_keys").and_then(Value::as_array).is_some_and(|l| l.iter().any(|x| x.as_str() == Some(pressed.as_str()))) {
+            if let Some(id) = self.current_chat().map(|c| c.id.clone()) {
+                self.on_tab(&id, window, cx);
+                return;
+            }
+        }
+        // A key's `not_in` (["terminal", "composer", "input"]) leaves it to whatever has focus there.
+        let found = self.settings.keys.iter().rev().find(|k| {
+            k.get("key").and_then(Value::as_str) == Some(pressed.as_str())
+                && !k.get("not_in").and_then(Value::as_array).is_some_and(|l| l.iter().any(|x| x.as_str() == Some(area)))
+        }).cloned();
         if let Some(k) = found {
             let ctx = self.context();
             if let Some(cond) = k.get("if").and_then(Value::as_str) {
@@ -2399,8 +2521,8 @@ impl Render for Workspace {
         self.refresh_sub_chats();
         self.perf.borrow_mut().spans.insert("flush", t.elapsed().as_secs_f32() * 1000.);
         self.render_generation += 1;
-        self.clickables.clear();
-        self.menus.clear();
+        self.clickables_last = std::mem::take(&mut self.clickables);
+        self.menus_last = std::mem::take(&mut self.menus);
         let generation = self.render_generation;
         self.entered.retain(|_, (_, seen, _)| *seen + 2 >= generation);
         self.transitions.retain(|_, t| t.seen + 2 >= generation);
@@ -2425,6 +2547,11 @@ impl Render for Workspace {
                 self.ctx_rev += 1;
             }
         }
+        let area = self.focus_area(window, cx);
+        if area != self.focus_now {
+            self.focus_now = area;
+            self.ctx_rev += 1;
+        }
         self.dragging = cx.has_active_drag();
         if self.dragging {
             self.drop_preview = false;
@@ -2432,7 +2559,7 @@ impl Render for Workspace {
             self.drag_item.borrow_mut().take();
             self.drop_hint = None;
         }
-        let into = self.drop_into().map(|(_, name)| format!("Move to {name}")).unwrap_or_default();
+        let into = self.drop_into().map(|(_, name)| self.tr("drag_move_to", "Move to {name}", &[("name", &name)])).unwrap_or_default();
         if *self.drag_note.borrow() != into {
             *self.drag_note.borrow_mut() = into;
         }
@@ -2478,8 +2605,9 @@ impl Render for Workspace {
                 }
             }))
             // The mouse's back and forward buttons (and trackpad swipes) move through where you've been.
-            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Back), cx.listener(|ws, _, window, cx| ws.navigate(-1, window, cx)))
-            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Forward), cx.listener(|ws, _, window, cx| ws.navigate(1, window, cx)))
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Back), cx.listener(|ws, _, window, cx| ws.mouse_button("back", window, cx)))
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Forward), cx.listener(|ws, _, window, cx| ws.mouse_button("forward", window, cx)))
+            .on_mouse_down(MouseButton::Middle, cx.listener(|ws, _, window, cx| ws.mouse_button("middle", window, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|ws, _, _, _| {
                 if ws.drag.take().is_some() {
                     ws.save_state();
@@ -2515,7 +2643,7 @@ impl Workspace {
 }
 
 fn letter(name: &str) -> String {
-    name.chars().next().unwrap_or('R').to_ascii_uppercase().to_string()
+    name.chars().next().map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_else(|| "·".into())
 }
 
 fn split_emoji(title: &str) -> (Option<String>, String) {
@@ -2529,20 +2657,22 @@ fn split_emoji(title: &str) -> (Option<String>, String) {
     (None, title.to_string())
 }
 
-fn age_text(ts: Option<f64>) -> String {
+/** "now", "5m", "3h", "2d", "1w" (settings `format.age`: now, m, h, d, w, each with `{n}`). */
+fn age_text(ts: Option<f64>, fmt: &Value) -> String {
     let Some(ts) = ts else { return String::new() };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
     let s = now - ts;
+    let unit = |k: &str, d: &str, n: u64| fmt.get(k).and_then(Value::as_str).unwrap_or(d).replace("{n}", &n.to_string());
     if s < 60. {
-        "now".into()
+        unit("now", "now", 0)
     } else if s < 3600. {
-        format!("{}m", (s / 60.) as u64)
+        unit("m", "{n}m", (s / 60.) as u64)
     } else if s < 86400. {
-        format!("{}h", (s / 3600.) as u64)
+        unit("h", "{n}h", (s / 3600.) as u64)
     } else if s < 604800. {
-        format!("{}d", (s / 86400.) as u64)
+        unit("d", "{n}d", (s / 86400.) as u64)
     } else {
-        format!("{}w", (s / 604800.) as u64)
+        unit("w", "{n}w", (s / 604800.) as u64)
     }
 }
 
@@ -2560,7 +2690,8 @@ impl TranscriptList {
 pub(crate) struct OpenDialog {
     pub(crate) title: String,
     pub(crate) inputs: Vec<(SharedString, Entity<gpui_kit::component::input::InputState>)>,
-    pub(crate) submit: std::rc::Rc<dyn Fn(&mut Window, &mut App)>,
+    need_first: bool,
+    done: std::rc::Rc<dyn Fn(&mut Workspace, Vec<String>, &mut Context<Workspace>)>,
 }
 
 pub(crate) struct TranscriptList {
@@ -2677,4 +2808,24 @@ pub(crate) fn decode_image(media_type: &str, data: &str) -> Option<std::sync::Ar
         _ => ImageFormat::Png,
     };
     Some(std::sync::Arc::new(Image::from_bytes(format, bytes)))
+}
+
+/** A waiting chat's choices: the first question's options (or `chat.waiting_options`), and the text of
+every question when there are several (`chat.waiting_all_questions`). */
+pub(crate) fn waiting_options(w: &Value, settings: &Settings) -> (Vec<String>, Vec<String>) {
+    let qs = w["tool_input"]["questions"].as_array().cloned().unwrap_or_default();
+    let options = qs
+        .first()
+        .and_then(|q| q["options"].as_array())
+        .map(|o| o.iter().filter_map(|x| x["label"].as_str().map(str::to_string)).collect())
+        .unwrap_or_else(|| {
+            settings
+                .get("chat.waiting_options")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_else(|| vec!["Yes".into(), "Yes, don't ask again".into(), "No".into()])
+        });
+    let all = settings.get("chat.waiting_all_questions").and_then(Value::as_bool).unwrap_or(true);
+    let questions = if all && qs.len() > 1 { qs.iter().filter_map(|q| q["question"].as_str().map(str::to_string)).collect() } else { vec![] };
+    (options, questions)
 }

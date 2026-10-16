@@ -67,6 +67,20 @@ pub struct Connection {
     pub ssh_host: String,
     pub daemon: String,
     pub retry_seconds: u64,
+    /** Extra `ssh` arguments for the box connection. */
+    #[serde(default = "default_ssh_options")]
+    pub ssh_options: Vec<String>,
+    /** How often to copy skills, CLAUDE.md and the like to the box (`bin/env-push`); 0 turns it off. */
+    #[serde(default = "default_env_push")]
+    pub env_push_seconds: u64,
+}
+
+fn default_ssh_options() -> Vec<String> {
+    ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"].map(String::from).to_vec()
+}
+
+fn default_env_push() -> u64 {
+    60
 }
 
 /** The daemon on this Mac (its worktrees and chats, from super.engineering), run locally without ssh. */
@@ -101,8 +115,12 @@ impl Default for Settings {
     }
 }
 
+/** The settings folder: `AGENT_BOX_SETTINGS_DIR`, else ~/.agent-box/state/settings. */
 pub fn dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agent-box/state/settings")
+    match std::env::var("AGENT_BOX_SETTINGS_DIR") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d),
+        _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agent-box/state/settings"),
+    }
 }
 
 pub fn path() -> PathBuf {

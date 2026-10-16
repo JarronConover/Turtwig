@@ -16,14 +16,23 @@ mod workspace;
 
 use gpui_kit::*;
 
+/** Settings `window`: title, width, height, traffic_lights {x, y}, appearance ("dark" | "light" | "system"). */
+fn window_setting(key: &str) -> Option<serde_json::Value> {
+    settings::load().ok().and_then(|s| s.get(&format!("window.{key}")).cloned())
+}
+
 fn open_main(cx: &mut App) {
+    let num = |k: &str, d: f32| window_setting(k).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(d);
+    let lights = window_setting("traffic_lights");
+    let light = |k: &str, d: f32| lights.as_ref().and_then(|l| l.get(k)).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(d);
+    let title = window_setting("title").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| "a.box".into());
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
-            title: Some("a.box".into()),
+            title: Some(title.into()),
             appears_transparent: true,
-            traffic_light_position: Some(point(px(20.), px(15.))),
+            traffic_light_position: Some(point(px(light("x", 20.)), px(light("y", 15.)))),
         }),
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1500.), px(940.)), cx))),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(num("width", 1500.)), px(num("height", 940.))), cx))),
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| workspace::Workspace::new(window, cx)))
@@ -73,7 +82,16 @@ fn main() {
     });
     app.run(|cx: &mut App| {
         gpui_kit::init(cx);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        // The component kit's light or dark look (the app's own colors are `theme`).
+        let mode = match window_setting("appearance").as_ref().and_then(|v| v.as_str()) {
+            Some("light") => gpui_kit::component::ThemeMode::Light,
+            Some("system") => match cx.window_appearance() {
+                WindowAppearance::Light | WindowAppearance::VibrantLight => gpui_kit::component::ThemeMode::Light,
+                _ => gpui_kit::component::ThemeMode::Dark,
+            },
+            _ => gpui_kit::component::ThemeMode::Dark,
+        };
+        gpui_kit::component::Theme::change(mode, None, cx);
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
         cx.set_menus([Menu {
             name: "a.box".into(),

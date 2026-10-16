@@ -351,6 +351,10 @@ impl TerminalView {
         .detach();
     }
 
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
     /** Closes the terminal and ends its shell (a closed terminal tab). */
     pub fn kill(&self) {
         if let Some(id) = self.term_id.filter(|id| *id != 0) {

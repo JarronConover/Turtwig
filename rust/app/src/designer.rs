@@ -95,7 +95,9 @@ impl Designer {
             cfg.get(k).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_else(|| d.iter().map(|x| x.to_string()).collect())
         };
         let mode = cfg.get("permission_mode").and_then(|v| v.as_str()).unwrap_or("acceptEdits").to_string();
-        let mut cmd = Command::new(format!("{home}/.local/bin/claude"));
+        let claude = cfg.get("claude").and_then(|v| v.as_str()).map(crate::script::expand).unwrap_or_else(|| format!("{home}/.local/bin/claude"));
+        let prompt = cfg.get("prompt").and_then(|v| v.as_str()).unwrap_or(PROMPT).to_string();
+        let mut cmd = Command::new(claude);
         cmd.current_dir(settings::dir())
             .env("PATH", format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"))
             .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
@@ -105,7 +107,7 @@ impl Designer {
             cmd.args(["--add-dir", &crate::script::expand(&dir)]);
         }
         cmd
-            .args(["--append-system-prompt", PROMPT])
+            .args(["--append-system-prompt", &prompt])
             // The app plays its own sounds (settings `sounds`); without this, Claude Code hooks (such as a
             // Stop sound) fire on every designer reply too.
             .args(["--settings", r#"{"disableAllHooks": true}"#])

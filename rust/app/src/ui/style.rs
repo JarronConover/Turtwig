@@ -275,6 +275,21 @@ pub fn refine(s: &mut StyleRefinement, style: &Map<String, Value>, theme: &Map<S
             "bottom" => s.inset.bottom = inset(v),
             "left" => s.inset.left = inset(v),
             "shadow" => {
+                // `theme.shadows.NAME`: {color, x, y, blur, spread} (or a list of them) replaces or adds a preset.
+                if let Some(custom) = v.as_str().and_then(|n| theme.get("shadows").and_then(|s| s.get(n))) {
+                    let one = |c: &Value| BoxShadow {
+                        color: c.get("color").and_then(|x| color(x, theme)).unwrap_or(hsla(0., 0., 0., 0.3)),
+                        offset: point(px(c.get("x").and_then(Value::as_f64).unwrap_or(0.) as f32), px(c.get("y").and_then(Value::as_f64).unwrap_or(4.) as f32)),
+                        blur_radius: px(c.get("blur").and_then(Value::as_f64).unwrap_or(10.) as f32),
+                        spread_radius: px(c.get("spread").and_then(Value::as_f64).unwrap_or(0.) as f32),
+                        inset: c.get("inset").and_then(Value::as_bool).unwrap_or(false),
+                    };
+                    s.box_shadow = Some(match custom {
+                        Value::Array(list) => list.iter().map(one).collect(),
+                        c => vec![one(c)],
+                    });
+                    continue;
+                }
                 s.box_shadow = match v.as_str() {
                     Some("sm") => Some(vec![BoxShadow { color: hsla(0., 0., 0., 0.25), offset: point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.), inset: false }]),
                     Some("md") => Some(vec![BoxShadow { color: hsla(0., 0., 0., 0.3), offset: point(px(0.), px(4.)), blur_radius: px(10.), spread_radius: px(0.), inset: false }]),

@@ -36,7 +36,7 @@ pub struct Remote {
 }
 
 impl Remote {
-    pub fn start(ssh_host: String, daemon: String, retry: Duration) -> (Remote, flume::Receiver<Incoming>, RemoteGuard) {
+    pub fn start(ssh_host: String, daemon: String, retry: Duration, ssh_options: Vec<String>) -> (Remote, flume::Receiver<Incoming>, RemoteGuard) {
         let alive = Arc::new(AtomicBool::new(true));
         let (out_tx, out_rx) = flume::unbounded::<String>();
         let (in_tx, in_rx) = flume::unbounded::<Incoming>();
@@ -47,7 +47,7 @@ impl Remote {
             if !flag.load(Ordering::Relaxed) {
                 break;
             }
-            let err = session(&ssh_host, &daemon, &out_rx, &in_tx, &pending, &flag);
+            let err = session(&ssh_host, &daemon, &ssh_options, &out_rx, &in_tx, &pending, &flag);
             for (_, waiter) in pending.lock().unwrap().drain() {
                 let _ = waiter.send(Err(anyhow!("disconnected")));
             }
@@ -75,6 +75,7 @@ impl Remote {
 fn session(
     host: &str,
     daemon: &str,
+    ssh_options: &[String],
     out_rx: &flume::Receiver<String>,
     in_tx: &flume::Sender<Incoming>,
     pending: &Pending,
@@ -90,7 +91,7 @@ fn session(
         c
     } else {
         let mut c = Command::new("/usr/bin/ssh");
-        c.args(["-T", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", host, &format!("{daemon} connect")])
+        c.arg("-T").args(ssh_options).args([host, &format!("{daemon} connect")])
             .env("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin");
         c
     };

@@ -11,15 +11,36 @@ use std::time::Instant;
 pub enum Easing {
     Linear,
     EaseOut,
-    Spring,
+    /** Ease out, stronger: what enter animations use unless told otherwise. */
+    EaseOutQuart,
+    /** Overshoot and settle: `c1` and `c3` shape it (1.2, 2.2 by default; `motion.move.spring`). */
+    Spring(f32, f32),
 }
 
 impl Easing {
     pub fn parse(s: Option<&str>) -> Self {
+        Self::parse_or(s, Self::Spring(1.2, 2.2))
+    }
+
+    /** "linear", "ease_out", "ease_out_quart", or "spring"; anything else is `default`. */
+    pub fn parse_or(s: Option<&str>, default: Self) -> Self {
         match s {
             Some("linear") => Self::Linear,
             Some("ease_out") => Self::EaseOut,
-            _ => Self::Spring,
+            Some("ease_out_quart") => Self::EaseOutQuart,
+            Some("spring") => Self::Spring(1.2, 2.2),
+            _ => default,
+        }
+    }
+
+    /** A spring's shape from `{"c1", "c3"}`; other easings unchanged. */
+    pub fn with_spring(self, spring: Option<&serde_json::Value>) -> Self {
+        match (self, spring) {
+            (Self::Spring(a, b), Some(v)) => Self::Spring(
+                v.get("c1").and_then(serde_json::Value::as_f64).map(|x| x as f32).unwrap_or(a),
+                v.get("c3").and_then(serde_json::Value::as_f64).map(|x| x as f32).unwrap_or(b),
+            ),
+            (e, _) => e,
         }
     }
 
@@ -27,10 +48,8 @@ impl Easing {
         match self {
             Self::Linear => t,
             Self::EaseOut => 1. - (1. - t).powi(3),
-            Self::Spring => {
-                let (c1, c3) = (1.2_f32, 2.2_f32);
-                1. + c3 * (t - 1.).powi(3) + c1 * (t - 1.).powi(2)
-            }
+            Self::EaseOutQuart => 1. - (1. - t).powi(4),
+            Self::Spring(c1, c3) => 1. + c3 * (t - 1.).powi(3) + c1 * (t - 1.).powi(2),
         }
     }
 }
@@ -65,7 +84,7 @@ impl Default for MotionStore {
             frame: 0,
             trigger: 0,
             duration_ms: 280.,
-            easing: Easing::Spring,
+            easing: Easing::Spring(1.2, 2.2),
             enabled: true,
             viewport: Size::default(),
             snap_frame: 0,

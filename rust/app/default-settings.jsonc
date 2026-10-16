@@ -4,7 +4,11 @@
   "connection": {
     "ssh_host": "coder.tj-agents",
     "daemon": "~/agent-box/rust/target/release/agent-boxd",
-    "retry_seconds": 3
+    "retry_seconds": 3,
+    // Extra ssh arguments for the box connection.
+    "ssh_options": ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"],
+    // How often skills, CLAUDE.md, memory and hooks are copied to the box (bin/env-push); 0 turns it off.
+    "env_push_seconds": 60
   },
 
   // This Mac: its worktrees, sections, and chats (super.engineering's, in place), through a local
@@ -15,6 +19,11 @@
   },
 
   "theme": {
+    // Named shadows for `shadow` styles, beside the built-in sm/md/lg/xl: {color, x, y, blur, spread, inset} or a list.
+    "shadows": {},
+    // Right-click menu checkbox icons.
+    "menu_check_icon": "square-check",
+    "menu_uncheck_icon": "square",
     "animations": true,
     "font_ui": ".SystemUIFont",
     "font_mono": "Menlo",
@@ -69,9 +78,13 @@
   // in. style: colors and sizes ease. Set "enabled": false to turn all motion off.
   "motion": {
     "enabled": true,
-    "move": { "duration": 320, "easing": "spring" },
-    "enter": { "from": { "opacity": 0, "y": 8 }, "duration": 260 },
-    "style": { "duration": 180 },
+    // easing: "spring" | "ease_out" | "ease_out_quart" | "linear"; spring shape {c1, c3}.
+    "move": { "duration": 320, "easing": "spring", "spring": { "c1": 1.2, "c3": 2.2 } },
+    "enter": { "from": { "opacity": 0, "y": 8 }, "duration": 260, "easing": "ease_out_quart" },
+    "style": { "duration": 180, "easing": "ease_out" },
+    // Spinners: an icon name (null: the built-in loader) and one turn's length; `spin` icons turn at spin_period_ms.
+    "spinner": { "icon": null, "period_ms": 800 },
+    "spin_period_ms": 900,
     // How often spinners and pulsing lines redraw (each redraw repaints the window). 0 holds them still.
     "animation_fps": 30
   },
@@ -1346,6 +1359,9 @@
   // it can't ask for permissions: add_dirs are the folders it may read besides this one (uploads hold
   // the images you paste or drop into it).
   "designer": {
+    // The designer's instructions (null: the built-in ones) and the claude it runs.
+    "prompt": null,
+    "claude": "~/.local/bin/claude",
     "add_dirs": ["~/.agent-box/uploads", "~/Desktop", "~/Downloads"],
     "tools": ["Read", "Edit", "Write", "Glob", "Grep"],
     "permission_mode": "acceptEdits"
@@ -1375,7 +1391,8 @@
   "dock": { "badge": "{{ [.chats[] | select(.state == \"waiting\")] | length }}" },
 
   "keys": [
-    { "key": "cmd-k", "do": "palette.open" },
+    // `not_in`: leave the key to the focused "terminal", "composer", or other "input" (cmd-k clears a terminal).
+    { "key": "cmd-k", "do": "palette.open", "not_in": ["terminal"] },
     { "key": "cmd-shift-p", "do": "palette.open" },
     { "key": "cmd-\\", "do": { "do": "state.toggle", "key": "sidebar_open" } },
     { "key": "cmd-j", "do": { "do": "state.toggle", "key": "terminal_open" } },
@@ -1428,6 +1445,70 @@
   ],
 
   "chat": {
+    // ---- Transcript text and look ----
+    // Lines Claude Code writes that aren't conversation: meta and wrappers show as notices when true;
+    // compaction / agent_messages: "step" | "message" | "hidden"; task_notifications: "notice" | "message" | "hidden".
+    "show": { "meta": false, "sidechain": false, "wrappers": false, "compaction": "step", "agent_messages": "step", "task_notifications": "notice", "errors": true },
+    // The "Thinking…"/"Working…" row while the agent works.
+    "pending": { "show": true },
+    // Tool step summaries are cut to this many characters.
+    "summary_chars": 140,
+    "labels": {
+      "steps": "{n} step{s}{failed}", "steps_failed": ", {n} failed", "earlier_steps": "{n} earlier step{s}",
+      "thinking": "Thinking", "thought": "Thought", "pending_thinking": "Thinking", "pending_working": "Working",
+      "activity_thinking": "Thinking", "activity_writing": "Writing", "more_lines": "… {n} more lines",
+      "compacted": "Compacted the conversation", "compacted_auto": "Compacted the conversation automatically",
+      "message_from": "Message from {from}", "message_from_summary": "Message from {from}: {summary}",
+      "skill_subject": "the {skill} skill", "background_finished": "A background task finished", "another_session": "another session"
+    },
+    // Per tool name (or "*"): { "doing", "done", "failed", "icon", "activity" }; any field overrides the built-in table.
+    "tools": {},
+    "tool_names": { "strip": "mcp__", "separator": " · " },
+    "step_line": {
+      "icon_size": 14, "chevron_size": 12, "pulse_ms": 1400, "pulse_min": 0.35, "pulse_max": 1,
+      "icons": { "pending": "brain", "thinking": "brain", "fold": "list-checks", "open": "chevron-down", "closed": "chevron-right" }
+    },
+    "step_detail": {
+      "removed": "@diff_del", "removed_background": "@diff_del_bg", "added": "@diff_add", "added_background": "@diff_add_bg",
+      "error": "@danger", "removed_prefix": "- ", "added_prefix": "+ ", "command_prefix": "$ ", "json_fallback": true,
+      "tab_width": 4, "padding_x": 8, "padding_bottom": 12
+    },
+    "attachments": {
+      "size": 64, "image_width_factor": 2.5, "image_extensions": ["png", "jpg", "jpeg", "gif", "webp"], "strip_prefix": true,
+      "file_icon": "file", "name_size": 10, "uploading_overlay": "#00000073", "failed_border": "@danger",
+      "remove": { "size": 18, "icon_size": 11, "icon": "x", "top": 3, "right": 3, "background": "#000000a6", "color": "#ffffff" }
+    },
+    // ---- Chips over the transcript ----
+    "jump_icon": "arrow-down", "jump_icon_size": 13, "jump_bottom": 14,
+    // The "Loading earlier messages…" chip (its look falls back to `jump`), and how close to the top loads more.
+    "loading_chip_top": 10, "load_earlier_within": 0,
+    "drop_overlay_icon": "paperclip",
+    // ---- The message box ----
+    "composer_lines": { "min": 1, "max": 10 }, "composer_gap": 6, "composer_radius": 6,
+    "suggestion_hint": "   ⇥ Tab",
+    // Keys besides Tab that take Claude's suggestion into an empty message box.
+    "suggestion_keys": [],
+    "cmd_enter_sends": true,
+    // The completion list's keys (the arrows, Enter, Tab, and Esc work too).
+    "completion_keys": { "next": ["ctrl-n"], "prev": ["ctrl-p"], "accept": [], "close": [] },
+    "completion_limit": 12, "completion_cache_secs": 20,
+    // ---- Waiting chats ----
+    // Choices when a waiting chat gives none (a permission prompt); every question shows when there are several.
+    "waiting_options": ["Yes", "Yes, don't ask again", "No"], "waiting_all_questions": true,
+    // ---- Behavior ----
+    // What makes a chat show as a tab (besides opening it yourself): alive, working, waiting, running_elsewhere.
+    "open_when": ["alive", "working", "waiting", "running_elsewhere"],
+    // A reply "asks" (the chat.question sound) when it ends with one of these.
+    "asks_endings": ["?"],
+    // A chat shows as working this long after you send, until its hook says so.
+    "working_after_send_secs": 10,
+    // Wait at least this long between queued messages to one chat.
+    "queue_resend_secs": 8,
+    // Closing a Mac chat's tab: "archive" (ends it in super.engineering too) or "stop".
+    "close_on_mac": "archive",
+    // A new chat's kind: with no folder, and in a folder without a branch.
+    "new_kind": "orchestrator", "new_kind_in_folder": "primary",
+    "last_message_chars": 280,
     "enter_sends": true,
     "placeholder": "Message the agent…",
     "designer_placeholder": "Describe a change to the app…",
@@ -1454,6 +1535,10 @@
     // How replies' Markdown looks. Style objects take the usual style keys (padding, radius, font_size,
     // font_family, background, overflow_x...). Tables scroll sideways instead of squeezing.
     "markdown": {
+      // theme: "dark" | "light" | "auto" (follows window.appearance); highlight: a code theme, or null for the theme's.
+      "theme": "dark", "highlight": null,
+      // Show <placeholders> as text instead of hiding them as HTML.
+      "show_angle_brackets": true,
       "paragraph_gap": 0.75,
       "heading_sizes": [20, 17, 15, 14, 13, 13],
       "code_block": { "radius": 8, "padding": [10, 12], "font_family": "@font_mono", "font_size": 12.5 },
@@ -1508,6 +1593,13 @@
   },
 
   "diff": {
+    "row_height": 20, "gutter_width": 44, "sign_width": 14, "note_font_size": 12,
+    "header": { "font_family": ".SystemUIFont", "font_size": 12.5 },
+    "max_lines_per_file": 4000, "refresh_ms": 2000,
+    // Each a color or @token.
+    "colors": { "add_bg": "@diff_add_bg", "del_bg": "@diff_del_bg", "add": "@diff_add", "del": "@diff_del", "muted": "@text_faint", "hunk_bg": "@diff_hunk_bg", "file_bg": "@diff_file_bg", "hover": "@hover" },
+    // The line link for Mac worktrees (open_url is for box ones); both take {host} {machine} {path} {line}.
+    "open_url_local": "cursor://file{path}:{line}",
     "font_size": 12,
     "open_url": "cursor://vscode-remote/ssh-remote+{host}{path}:{line}",
     "file_list": { "width": 260, "shrink": 0, "height": "full", "border_right": 1, "border_color": "@line", "padding": [6, 0] },
@@ -1516,6 +1608,18 @@
   },
 
   "terminal": {
+    // The 16 ANSI colors, normal then bright.
+    "palette": ["#1e1e1f", "#e5534b", "#3fb950", "#d29922", "#488efc", "#bc8cff", "#39c5cf", "#d6d6d8",
+                "#6e7681", "#ff7b72", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff"],
+    // shape: block | bar | underline | hollow | app; optional "color".
+    "cursor": { "shape": "block", "focused_alpha": 0.75, "unfocused_alpha": 0.3 },
+    "size": { "cols": 100, "rows": 30 },
+    "scrollback": 10000,
+    // The wheel: "auto" (to the program when it asks for the mouse, e.g. tmux with daemon.terminal_mouse; else
+    // this view's own scrollback), "local", "app", or "off".
+    "wheel": "auto", "wheel_lines": 1,
+    // Drag to select (double-click a word, triple-click a line); copy_key copies it.
+    "select": true, "selection": "#3a425299", "copy_key": "cmd-c",
     "font_family": "Menlo",
     "font_size": 13,
     "line_height": 1.25,
@@ -1537,5 +1641,97 @@
       "cmd-v": { "paste": true },
       "cmd-k": "\u000c"
     }
+  },
+
+  // The window: title, starting size, the traffic lights' position, and the component kit's look
+  // ("dark" | "light" | "system"; the app's own colors are `theme`). Read at launch.
+  "window": { "title": "a.box", "width": 1500, "height": 940, "traffic_lights": { "x": 20, "y": 15 }, "appearance": "dark" },
+
+  // Words the app shows that aren't in the layout above. {name} parts are filled in.
+  "strings": {
+    "app_name": "a.box", "connected": "Connected", "reconnecting": "Reconnecting to {host}… ({why})",
+    "starting_chat": "Starting a chat…", "start_failed": "Couldn't start the chat: {error}", "making_worktree": "Making a worktree for {branch}…",
+    "working": "Working…", "done": "Done", "failed": "Failed", "copied": "Copied", "nothing_to_undo": "Nothing to undo", "no_window": "No window to capture",
+    "sending_after_upload": "Sending when the upload finishes", "stop_elsewhere": "This chat is running in super.engineering: stop it there, or take it over first",
+    "rename_branch_failed": "Couldn't rename the branch: {error}", "new_worktree_failed": "Couldn't make the worktree: {error}", "no_remote": "This project has no origin remote",
+    "no_chat": "No chat here yet.", "new_chat_name": "New chat", "terminal_n": "Terminal {n}", "background_shell": "Background shell", "subagent": "Subagent",
+    "waiting": "The agent is waiting for you", "waiting_cancel": "Cancel", "drop_to_attach": "Drop to attach to {chat}", "drag_move_to": "Move to {name}",
+    "the_designer": "the designer", "this_chat": "this chat", "a_file": "a file", "n_files": "{n} files",
+    "attaching": "Attaching {what} to {chat}", "attach_failed": "Couldn't attach: {error}", "upload_failed": "Upload failed: {error}",
+    "dialog_save": "Save", "dialog_name": "Name", "settings_title": "Settings",
+    "settings_intro": "Everything about the app is here. Your file is merged over the built-in defaults; set a key to null to remove a default. Reference for you and agents: {docs}",
+    "diff.select_worktree": "Select a worktree", "diff.no_changes": "No changes", "diff.loading": "Loading changes…", "diff.binary": "Binary file",
+    "diff.more_lines": "{n} more lines; open the file to see them"
+  },
+
+  // How ages read in the sidebar and lists.
+  "format": { "age": { "now": "now", "m": "{n}m", "h": "{n}h", "d": "{n}d", "w": "{n}w" } },
+
+  // In-window notifications: shown at all, hidden after a few seconds, and how many recent ones `.app.notifications` keeps.
+  "notifications": { "show": true, "autohide": true, "keep": 20 },
+
+  // The command palette.
+  "palette": { "placeholder": "Type a command or a worktree…", "worktrees": true, "worktree_label": "Go to {title}" },
+
+  "settings_editor": { "width": 760 },
+
+  "sidebar": {
+    // Which status a worktree shows when several apply (idle when none).
+    "status_order": ["working", "waiting", "merged", "failing", "pending", "dirty", "behind"],
+    // A section's orchestrator first, its workers after.
+    "orchestrators_first": true,
+    // Whose worktrees come first in a project shared by both machines.
+    "host_order": ["mac", "box"]
+  },
+
+  // Back and forward: how many visits to remember.
+  "nav": { "max": 200 },
+
+  // The History list: how many past chats to fetch from each machine.
+  "history": { "limit": 300 },
+
+  // The mouse's extra buttons: an action each (back and forward default to nav.back / nav.forward).
+  "mouse": { "back": "nav.back", "forward": "nav.forward", "middle": null },
+
+  // Dragging: where a row's before/after split is, and how much of it means "inside".
+  "drag": { "edge": 0.5, "inside_band": 0.25 },
+
+  // inspect.json, activity.log and perf, for agents.
+  "inspect": {
+    "interval_ms": 500, "activity_lines": 400, "activity_chars": 600, "perf_window_secs": 2,
+    "hook_events": 50, "transcript_items": 20, "transcript_chars": 2000, "terminal_lines": 40
+  },
+
+  "scripts_options": { "context_cache_ms": 250, "min_timer_ms": 16 },
+  "settings_options": { "reload_debounce_ms": 80 },
+
+  // Each machine's daemon and scripts (sent to it on connect and when settings change; kept in
+  // ~/.agent-box/config.json there for bin/chat and sync-worker).
+  "daemon": {
+    "tool_text_max": 20000,              // cut tool output at this many characters (0: never)
+    "tool_text_cut_note": "\n… (cut here; the full output is in the transcript file)",
+    "drop_tool_images": true,            // drop image bytes from tool results
+    "drop_tool_use_result": true,        // drop the toolUseResult copy from entries
+    "events_poll_ms": 250, "events_batch": 500,
+    "model_poll_ms": 2000, "model_debounce_ms": 250,
+    "transcripts_poll_ms": 300,
+    "warm_index_chats": 60,              // newest chats line-indexed at startup
+    "transcript_page": 600, "history_limit": 200,
+    "send_paste_wait_ms": 150, "send_enter_tries": 4, "send_enter_wait_ms": 350,
+    "prompt_char": "❯",                  // Claude's input prompt ("" skips Enter retries)
+    "escape_marks_idle": true,           // stop (Esc) marks the chat idle
+    "connect_tries": 50, "connect_wait_ms": 200,
+    "git_ttl_secs": 90, "git_at_once": 2, "mr_ttl_secs": 90,
+    "hook_states": {},                   // {hook event: state, or null to ignore}, over the built-in map
+    "waiting_notification_types": ["permission_prompt", "elicitation_dialog"],
+    "idle_notification_prefix": "Claude is waiting for your input",
+    "waiting_pattern": "(?i)Enter to select|Esc to cancel|Do you want to proceed|❯ 1\\. Yes",
+    "waiting_pane_lines": 25,
+    "suggestion_prompt": "❯\u00a0", "suggestion_rule": "──", "suggestion_placeholder_prefix": "Try \"",
+    "diff_max_bytes": 3000000, "diff_max_untracked": 200, "diff_include_untracked": true, "diff_default_base": "origin/main",
+    "terminal_mouse": false,             // tmux mouse mode on terminal shells (wheel scrolls tmux history)
+    "terminal_history_limit": null,
+    "chat_tmux_cols": 220, "chat_tmux_rows": 60, "rc_url_wait_secs": 45, "chat_send_pause_secs": 0.5, "supervise_secs": 30,
+    "sync_transcript_max_mb": 95, "sync_bundle_warn_mb": 50, "sync_lock_wait_secs": 600
   }
 }
