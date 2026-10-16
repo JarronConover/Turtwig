@@ -181,7 +181,7 @@ impl Workspace {
 
     fn markdown(&self, key: &str, text: &str, theme: &Map<String, Value>) -> TextView {
         let selectable = self.settings.chat.get("selectable").and_then(Value::as_bool) != Some(false);
-        let view = TextView::markdown(SharedString::from(key.to_string()), text.to_string()).selectable(selectable);
+        let view = TextView::markdown(SharedString::from(key.to_string()), show_angle_brackets(text)).selectable(selectable);
         match self.markdown_style(theme) {
             Some(st) => view.style(st),
             None => view,
@@ -457,5 +457,60 @@ mod tests {
         let running = vec![Item::User { text: "hi".into() }, tool(false)];
         assert!(matches!(blocks_of(&running, true).last(), Some(Block::Steps(_))), "a running tool shows its own progress");
         assert!(!blocks_of(&items, false).iter().any(|b| matches!(b, Block::Pending(_))));
+    }
+}
+
+/** Markdown hides anything shaped like an HTML tag, so "Move to <name>" loses "<name>". Outside code,
+`<` becomes `&lt;` (autolinks like <https://…> stay links). */
+pub(crate) fn show_angle_brackets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut fence: Option<&str> = None;
+    for line in text.split_inclusive('\n') {
+        let t = line.trim_start();
+        if let Some(f) = fence {
+            if t.starts_with(f) {
+                fence = None;
+            }
+            out.push_str(line);
+            continue;
+        }
+        if let Some(f) = ["```", "~~~"].into_iter().find(|f| t.starts_with(f)) {
+            fence = Some(f);
+            out.push_str(line);
+            continue;
+        }
+        let mut ticks = 0;
+        let mut chars = line.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if c == '`' {
+                let mut run = 1;
+                while chars.peek().is_some_and(|(_, c)| *c == '`') {
+                    chars.next();
+                    run += 1;
+                }
+                ticks = if ticks == 0 { run } else if ticks == run { 0 } else { ticks };
+                out.push_str(&"`".repeat(run));
+                continue;
+            }
+            let rest = &line[i + c.len_utf8()..];
+            if c == '<' && ticks == 0 && !["http://", "https://", "mailto:"].iter().any(|p| rest.starts_with(p)) {
+                out.push_str("&lt;");
+            } else {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod angle_tests {
+    #[test]
+    fn keeps_placeholders_visible_outside_code() {
+        let f = super::show_angle_brackets;
+        assert_eq!(f("Move to <section name>"), "Move to &lt;section name>");
+        assert_eq!(f("`a <b>` and <https://x.io>"), "`a <b>` and <https://x.io>");
+        assert_eq!(f("```\n<div>\n```\n<x>"), "```\n<div>\n```\n&lt;x>");
+        assert_eq!(f("café → <x> ✓"), "café → &lt;x> ✓");
     }
 }
