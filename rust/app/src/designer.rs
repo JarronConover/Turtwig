@@ -56,10 +56,12 @@ fn user_text(e: &Value) -> Option<String> {
     c.as_str().map(str::to_string).or_else(|| c.as_array()?.iter().find_map(|b| (b["type"] == "text").then(|| b["text"].as_str().map(str::to_string)).flatten()))
 }
 
-/** Every designer conversation, newest first: `{id, title, last, current}` (last: seconds since the epoch;
-title: its first message). One-shot `settings.agent` runs share the folder and are left out. */
+/** Every designer conversation, newest first: `{id, title, first, messages, last, current}` (title: the
+latest thing you asked, which is how you'd recognize it; first: what it started with; last: seconds since
+the epoch). One-shot `settings.agent` runs share the folder and are left out. */
 pub fn sessions() -> Vec<Value> {
     let current = current();
+    let one_line = |t: &str| -> String { t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect() };
     let mut out: Vec<(f64, Value)> = std::fs::read_dir(sessions_dir())
         .into_iter()
         .flatten()
@@ -69,13 +71,22 @@ pub fn sessions() -> Vec<Value> {
             let id = p.file_name()?.to_str()?.strip_suffix(".jsonl")?.to_string();
             let last = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
             let text = std::fs::read_to_string(&p).ok()?;
-            let first = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|e| user_text(&e))?;
+            // What you typed: not a compaction summary or an attached image's caption.
+            let asked: Vec<String> = text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter_map(|e| user_text(&e))
+                .filter(|t| !t.starts_with("This session is being continued") && !t.starts_with("[Image"))
+                .collect();
+            let first = asked.first()?;
             if first.starts_with("You are customizing the ") {
                 return None;
             }
-            let title: String = first.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
             let is_current = current.as_deref() == Some(id.as_str());
-            Some((last, json!({"id": id, "title": title, "last": last, "current": is_current})))
+            Some((last, json!({
+                "id": id, "title": one_line(asked.last()?), "first": one_line(first), "messages": asked.len(),
+                "last": last, "current": is_current,
+            })))
         })
         .collect();
     out.sort_by(|a, b| b.0.total_cmp(&a.0));

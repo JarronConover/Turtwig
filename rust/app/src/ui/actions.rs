@@ -75,7 +75,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("diff.collapse_all / diff.expand_all", "collapse or expand every file in the diff"),
     ("designer.send", "{text}: ask the designer (a local agent that edits these settings live) for a change"),
     ("designer.reset", "end the designer conversation and start fresh"),
-    ("designer.history", "reread the designer's past conversations into `.designer.sessions` (newest first: id, title, age_text, current)"),
+    ("designer.history", "reread the designer's past conversations into `.designer.sessions` (newest first: id, title (the latest message), first, messages, age_text, current)"),
     ("designer.open", "{id}: show and continue an earlier designer conversation (one from `.designer.sessions`)"),
     ("settings.undo", "put the settings file back as it was before the last designer request (repeatable)"),
     ("settings.open / settings.reload / settings.docs", "edit, reload, or read the settings reference"),

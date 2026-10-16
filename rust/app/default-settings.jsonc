@@ -416,14 +416,20 @@
                           "for": ".designer.sessions", "as": "d", "key": ".d.id",
                           "type": "row",
                           "style": {
-                            "height": 32, "padding": [0, 8], "gap": 8, "align": "center", "radius": 6, "cursor": "pointer", "font_size": 13,
+                            "padding": [6, 8], "gap": 8, "align": "center", "radius": 6, "cursor": "pointer", "font_size": 13,
                             "background": "{{ if .d.current then \"@selection\" else \"transparent\" end }}", "hover": { "background": "@hover" }
                           },
                           "tooltip": "{{ if .d.current then \"Showing now\" elif .designer.working then \"Wait for the designer to finish first\" else \"Continue this conversation\" end }}",
                           "on": { "click": [{ "do": "designer.open", "id": "{{ .d.id }}" }, { "do": "state.set", "key": "designer_history_open", "value": false }] },
                           "children": [
-                            { "type": "text", "props": { "text": "{{ .d.title }}" }, "style": { "grow": 1, "min_width": 0, "truncate": true } },
-                            { "type": "text", "props": { "text": "{{ .d.age_text }}" }, "style": { "font_size": 12, "color": "@text_faint", "shrink": 0 } }
+                            {
+                              "type": "column", "style": { "grow": 1, "min_width": 0, "gap": 2 },
+                              "children": [
+                                { "type": "text", "props": { "text": "{{ .d.title }}" }, "style": { "truncate": true } },
+                                { "type": "text", "props": { "text": "{{ .d.messages }} message{{ if .d.messages == 1 then \"\" else \"s\" end }} · began with “{{ .d.first }}”" }, "style": { "truncate": true, "font_size": 11.5, "color": "@text_faint" } }
+                              ]
+                            },
+                            { "type": "text", "props": { "text": "{{ .d.age_text }}" }, "style": { "font_size": 12, "color": "@text_faint", "shrink": 0, "self": "start" } }
                           ]
                         }
                       ]
