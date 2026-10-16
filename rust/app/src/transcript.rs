@@ -222,6 +222,11 @@ impl Transcript {
         self.orphans.len()
     }
 
+    /** How many finished task and tool ids it has seen (for inspect.json). */
+    pub fn finished_count(&self) -> usize {
+        self.finished.len()
+    }
+
     /** Background shells and subagents started in the loaded lines that haven't finished. */
     pub fn background(&self) -> Vec<Background> {
         let mut out = vec![];
@@ -733,3 +738,4 @@ mod options_tests {
         set_options(&json!({}));
     }
 }
+

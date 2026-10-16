@@ -742,7 +742,7 @@ pub(crate) fn inspect(ws: &crate::workspace::Workspace) -> serde_json::Value {
             serde_json::json!({
                 "total": t.items.len(), "start": t.start, "lines": t.lines, "revision": t.revision,
                 "waiting_results": t.orphan_count(),
-                "items": items, "expanded": expanded, "background": background,
+                "items": items, "expanded": expanded, "background": background, "finished": t.finished_count(),
                 "attachments": ws.attachments_json(chat),
             }),
         );

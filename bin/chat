@@ -521,18 +521,38 @@ def prepare_here(chat, frm):
     return PRIMARY[chat.get("repo", "redo")]
 
 
+def real_dir(host, directory):
+    """The folder with symlinks resolved, on its own machine (Claude Code files a session under that)."""
+    if host == "box" and HOST != "box":
+        out = run(["ssh", "-n", BOX_SSH, f"realpath -m {shlex.quote(str(directory))}"], check=False, capture_output=True)
+        return out.stdout.strip().splitlines()[-1] if out.returncode == 0 and out.stdout.strip() else str(directory)
+    return os.path.realpath(str(directory))
+
+
 def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id):
-    """Copy a chat's transcript (and its subagent folder) between machines."""
-    src = f".claude/projects/{project_slug(src_dir)}/"
-    dst = f".claude/projects/{project_slug(dst_dir)}/"
-    remote_src = f"{BOX_SSH}:{src}" if src_host == "box" else f"{HOME}/{src}"
+    """Copy a chat's transcript (and its subagent folder) between machines. Claude Code keeps a session
+    under its folder's real path, so both ends use that (a box chat in ~/dev/redo lives under ~/project);
+    the copy is checked, so a move never resumes a chat whose conversation didn't arrive."""
+    src_real, dst_real = real_dir(src_host, src_dir), real_dir(dst_host, dst_dir)
+    sources = [project_slug(src_real)] + ([project_slug(src_dir)] if project_slug(src_dir) != project_slug(src_real) else [])
+    dst = f".claude/projects/{project_slug(dst_real)}/"
     remote_dst = f"{BOX_SSH}:{dst}" if dst_host == "box" else f"{HOME}/{dst}"
     if dst_host == "box":
         run(["ssh", "-n", BOX_SSH, f"mkdir -p {shlex.quote(dst)}"], check=False, capture_output=True)
     else:
         (HOME / dst).mkdir(parents=True, exist_ok=True)
-    run(["rsync", "-a", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
-         remote_src, remote_dst], capture_output=True)
+    for slug in sources:
+        src = f".claude/projects/{slug}/"
+        remote_src = f"{BOX_SSH}:{src}" if src_host == "box" else f"{HOME}/{src}"
+        run(["rsync", "-a", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
+             remote_src, remote_dst], check=False, capture_output=True)
+        if dst_host == "box":
+            arrived = run(["ssh", "-n", BOX_SSH, f"test -s {shlex.quote(dst + chat_id + '.jsonl')}"], check=False, capture_output=True).returncode == 0
+        else:
+            arrived = (HOME / dst / f"{chat_id}.jsonl").is_file()
+        if arrived:
+            return
+    sys.exit(f"the conversation didn't copy to the {dst_host} (looked in {', '.join(sources)} on the {src_host})")
 
 
 def adopt_worktree_branch(chat):
