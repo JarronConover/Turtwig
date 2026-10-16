@@ -606,7 +606,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             return Ok(json!({}));
         }
         Call::TermScroll { session, lines } => {
-            let target = format!("={session}");
+            let target = format!("={session}:");
             let tmux = |args: &[&str]| util::run("tmux", args, &[], None, Duration::from_secs(5));
             if lines == 0 {
                 tmux(&["send-keys", "-t", &target, "-X", "cancel"]);
