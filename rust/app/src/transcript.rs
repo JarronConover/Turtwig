@@ -328,6 +328,8 @@ impl Transcript {
         older.items.append(&mut self.items);
         self.items = older.items;
         self.orphans = older.orphans;
+        // Background work that finished within the older lines (its notice can sit right after the call).
+        self.finished.extend(older.finished);
         self.start = from;
         self.revision += 1;
     }
@@ -672,6 +674,18 @@ mod paging_tests {
         t.append(1, &[json!({"type": "user", "message": {"content": "fix it"}})]);
         assert_eq!(t.items.len(), 2);
         assert!(t.echoes.is_empty());
+    }
+
+    #[test]
+    fn work_that_finished_in_an_older_page_stays_finished() {
+        let launch = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t7", "name": "Agent", "input": {"description": "Look"}}]}});
+        let launched = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t7", "content": "Async agent launched successfully.\nagentId: a1 (internal)"}]}});
+        let done = json!({"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>t7</tool-use-id>\n</task-notification>"});
+        let later = json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}});
+        let mut t = Transcript::default();
+        t.append(3, &[later]);
+        t.prepend(0, &[launch, launched, done]);
+        assert!(t.background().is_empty());
     }
 
     #[test]
