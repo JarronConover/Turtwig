@@ -55,6 +55,8 @@ pub enum Call {
     /** Put a worktree in `section` (None: back under its project) before `before` (a path), or last. */
     WorktreeMove { path: String, section: Option<String>, before: Option<String> },
     SectionMove { id: String, index: usize },
+    /** The worktree's name in the sidebar (a leading emoji becomes its icon). */
+    WorktreeLabel { path: String, label: String },
     /** Run a shell command on the box (bash -lc): `{code, stdout, stderr}`. For scripts that add box-side abilities. */
     Exec { cmd: String, cwd: Option<String>, timeout_secs: Option<u64> },
     ProjectMove { repo: String, index: usize },

@@ -394,6 +394,7 @@
       },
       "on": {
         "click": { "do": "select", "worktree": "{{ .props.w.path }}" },
+        "double_click": { "do": "worktree.label", "path": "{{ .props.w.path }}" },
         "drop_item": {
           "accept": "worktree",
           "valid": ".dragged as $d | .props.w as $t | .zone as $z | (if $t.section then [.sections[] | select(.id == $t.section.id) | .items[].path] else [.projects[] | select(.repo == $t.repo) | .items[].path] end) as $list | ($list | index($t.path)) as $ti | ($list | index($d)) as $di | $d != $t.path and ($t.section != null or ([.worktrees[] | select(.path == $d)][0].repo == $t.repo)) and ($di == null or ($z == \"before\" and $di != $ti - 1) or ($z == \"after\" and $di != $ti + 1))",
@@ -405,6 +406,8 @@
       "drop_zones": "edges",
       "tooltip": "{{ .props.w.branch // \"\" }}",
       "menu": [
+        { "label": "Rename…", "do": { "do": "worktree.label", "path": "{{ .props.w.path }}" } },
+        { "separator": true },
         { "for": ".sections", "as": "s", "label": "Move to {{ .s.name }}", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": "{{ .s.id }}" } },
         { "if": ".props.w.section", "label": "Remove from section", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": null } },
         { "label": "New section…", "do": { "do": "section.new", "assign": "{{ .props.w.path }}" } },

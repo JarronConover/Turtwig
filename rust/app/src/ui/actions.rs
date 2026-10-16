@@ -40,6 +40,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("project.move", "{repo?, index? | target: repo with zone}: reorder a project (repo defaults to `dragged`)"),
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
     ("worktree.delete", "{path}"),
+    ("worktree.label", "{path, label?}: rename a worktree in the sidebar; a leading emoji becomes its icon (asks when label is missing)"),
     ("worktree.test_local", "{branch}: check the branch out on the Mac with the box's latest work"),
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
     ("palette.open", "the command palette"),
@@ -101,6 +102,17 @@ impl Workspace {
             let at = before.and_then(|b| list.iter().position(|x| x.path == b)).unwrap_or(list.len());
             list.insert(at, w);
         }
+    }
+
+    fn label_worktree(&mut self, path: String, label: String, cx: &mut Context<Self>) {
+        let m = &mut self.model;
+        for w in m.projects.iter_mut().flat_map(|p| p.items.iter_mut()).chain(m.sections.iter_mut().flat_map(|s| s.items.iter_mut())) {
+            if w.path == path {
+                w.title = label.clone();
+            }
+        }
+        self.call(Call::WorktreeLabel { path, label }, cx);
+        cx.notify();
     }
 
     pub(crate) fn run_action(&mut self, action: &Value, window: &mut Window, cx: &mut Context<Self>) {
@@ -403,6 +415,17 @@ impl Workspace {
             "section.assign" => {
                 if let Some(path) = s("path") {
                     self.call(Call::SectionAssign { path, section: s("section") }, cx);
+                }
+            }
+            "worktree.label" => {
+                if let Some(path) = s("path") {
+                    match s("label") {
+                        Some(l) => self.label_worktree(path, l, cx),
+                        None => {
+                            let current = self.worktree(&path).map(|w| w.title.clone()).unwrap_or_default();
+                            self.name_dialog("Rename worktree", &current, window, cx, move |ws, l, cx| ws.label_worktree(path.clone(), l, cx));
+                        }
+                    }
                 }
             }
             "worktree.move" => {

@@ -874,7 +874,7 @@ impl Workspace {
             Call::SectionRename { id, .. } | Call::SectionDelete { id } | Call::SectionMove { id, .. } => {
                 self.section_hosts.get(id).cloned().unwrap_or_else(|| "box".into())
             }
-            Call::SectionAssign { path, .. } | Call::WorktreeDelete { path } | Call::WorktreeMove { path, .. } | Call::WorktreeDiff { path, .. } => {
+            Call::SectionAssign { path, .. } | Call::WorktreeDelete { path } | Call::WorktreeMove { path, .. } | Call::WorktreeLabel { path, .. } | Call::WorktreeDiff { path, .. } => {
                 self.host_of_path(path)
             }
             Call::TermOpen { cwd: Some(c), .. } => self.host_of_path(c),

@@ -392,6 +392,11 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             }
             sc_tool(&args, None)
         }
+        Call::WorktreeLabel { path, label } => {
+            let ws = sc_tool(&["workspace", "list"], None)?;
+            let id = find_item_id(&ws, &path).ok_or("no such worktree")?;
+            sc_tool(&["worktree", "set-label", &id, &label], None)
+        }
         Call::Exec { cmd, cwd, timeout_secs } => {
             let home = util::home();
             let cwd = cwd.unwrap_or_else(|| home.to_string_lossy().into_owned());

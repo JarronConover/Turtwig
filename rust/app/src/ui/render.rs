@@ -563,7 +563,7 @@ impl Workspace {
         let list_id = id.to_string();
         list(state, cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| {
             let Some(row) = ws.virtual_lists.get(&list_id).and_then(|l| l.2.get(ix).cloned()) else { return div().into_any_element() };
-            div().flex().flex_col().children(ws.render(&row.0, &row.1, &row.2, window, cx)).into_any_element()
+            div().w_full().flex().flex_col().children(ws.render(&row.0, &row.1, &row.2, window, cx)).into_any_element()
         }))
         .size_full()
         .into_any_element()
