@@ -142,8 +142,15 @@
                     { "id": "brand-name", "type": "text", "props": { "text": "a.box" }, "style": { "font_size": 15, "font_weight": "semibold" } }
                   ]
                 },
-                { "type": "SectionLabel", "props": { "text": "Projects" } },
                 {
+                  "type": "SectionLabel",
+                  "props": { "text": "Projects", "collapsed": "{{ .state[\"collapsed:projects\"] // false }}" },
+                  "style": { "cursor": "pointer", "radius": 6 },
+                  "tooltip": "{{ if .state[\"collapsed:projects\"] then \"Show\" else \"Hide\" end }} projects",
+                  "on": { "click": { "do": "state.toggle", "key": "collapsed:projects" } }
+                },
+                {
+                  "if": ".state[\"collapsed:projects\"] | not",
                   "for": ".projects", "as": "p", "key": ".p.name",
                   "type": "column",
                   "children": [
@@ -160,6 +167,18 @@
                       "tooltip": "{{ if .state[\"collapsed:proj:\" + .p.repo] then \"Show\" else \"Hide\" end }} {{ .p.name }}'s worktrees",
                       "drop_key": "proj:{{ .p.repo }}",
                       "drop_zones": { "worktree": "inside", "project": "edges" },
+                      "menu": [
+                        { "label": "Rename Project", "icon": "pencil", "do": { "do": "prompt", "title": "Rename project", "value": "{{ .p.name }}", "then": { "do": "state.set", "key": "project_name:{{ .p.repo }}", "value": "{{ .input }}" } } },
+                        { "label": "Project settings", "icon": "settings", "do": { "do": "project.settings", "repo": "{{ .p.repo }}" } },
+                        { "if": ".p.primary_path", "label": "View on GitLab", "icon": "gitlab", "do": { "do": "project.open_remote", "path": "{{ .p.primary_path }}" } },
+                        { "separator": true },
+                        { "label": "Show external worktrees", "checked": ".p.show_external", "do": { "do": "state.toggle", "key": "hide_external:{{ .p.repo }}" } },
+                        { "label": "Show primary worktree", "checked": ".p.show_primary", "do": { "do": "state.toggle", "key": "hide_primary:{{ .p.repo }}" } },
+                        { "if": ".p.hidden_count > 0", "label": "Show {{ .p.hidden_count }} hidden worktree{{ if .p.hidden_count == 1 then \"\" else \"s\" end }}", "icon": "eye", "do": { "do": "project.unhide", "repo": "{{ .p.repo }}" } },
+                        { "label": "New worktree from…", "icon": "git-branch", "shortcut": "⌘⇧N", "do": { "do": "worktree.new", "repo": "{{ .p.repo }}", "host": "{{ .p.primary_host // .p.host }}" } },
+                        { "separator": true },
+                        { "label": "Remove Project", "icon": "trash", "danger": true, "do": { "do": "confirm", "title": "Remove {{ .p.name }} from the sidebar?", "text": "Its worktrees and chats stay on disk. Bring it back from the command palette (Restore removed projects).", "confirm": "Remove", "then": { "do": "state.set", "key": "removed_project:{{ .p.repo }}", "value": true } } }
+                      ],
                       "on": {
                         "click": { "do": "state.toggle", "key": "collapsed:proj:{{ .p.repo }}" },
                         "drop_item": [
@@ -406,17 +425,40 @@
       "drop_zones": "edges",
       "tooltip": "{{ .props.w.branch // \"\" }}",
       "menu": [
-        { "label": "Rename…", "do": { "do": "worktree.label", "path": "{{ .props.w.path }}" } },
+        { "label": "Rename feature label…", "do": { "do": "worktree.label", "path": "{{ .props.w.path }}" } },
+        { "label": "Rename current branch", "do": { "do": "worktree.rename_branch", "path": "{{ .props.w.path }}" } },
+        { "label": "Hide worktree", "do": { "do": "state.set", "key": "hidden:{{ .props.w.path }}", "value": true } },
         { "separator": true },
-        { "for": ".sections", "as": "s", "label": "Move to {{ .s.name }}", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": "{{ .s.id }}" } },
-        { "if": ".props.w.section", "label": "Remove from section", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": null } },
-        { "label": "New section…", "do": { "do": "section.new", "assign": "{{ .props.w.path }}" } },
+        {
+          "label": "New section",
+          "items": [
+            { "label": "With this worktree…", "do": { "do": "section.new", "assign": "{{ .props.w.path }}" } },
+            { "label": "Empty…", "do": "section.new" }
+          ]
+        },
         { "separator": true },
-        { "label": "New chat here", "do": { "do": "chat.new", "dir": "{{ .props.w.path }}" } },
-        { "for": ".props.w.chats", "as": "c", "label": "Archive chat “{{ .c.name }}”", "do": { "do": "chat.archive", "chat": "{{ .c.id }}" } },
-        { "label": "Open in Cursor", "do": { "do": "open", "url": "{{ if .props.w.host == \"mac\" then \"cursor://file\" + .props.w.path else \"cursor://vscode-remote/ssh-remote+\" + .app.ssh_host + .props.w.path end }}" } },
+        { "label": "Copy path", "shortcut": "⌘⇧C", "do": { "do": "clipboard.copy", "text": "{{ .props.w.path }}" } },
+        { "if": ".props.w.host == \"mac\"", "label": "Open in Finder", "do": { "do": "shell", "run": "open \"$P\"", "env": { "P": "{{ .props.w.path }}" } } },
+        { "if": ".props.w.host == \"mac\"", "label": "Open in Terminal", "do": { "do": "shell", "run": "open -a Terminal \"$P\"", "env": { "P": "{{ .props.w.path }}" } } },
+        {
+          "if": ".props.w.host != \"mac\"", "label": "Open in Terminal",
+          "do": {
+            "do": "shell",
+            "run": "osascript -e 'on run argv' -e 'tell application \"Terminal\" to do script \"ssh -t \" & item 1 of argv & \" \" & quoted form of (\"cd \" & quoted form of (item 2 of argv) & \" && exec $SHELL -l\")' -e 'tell application \"Terminal\" to activate' -e 'end run' \"$H\" \"$P\"",
+            "env": { "P": "{{ .props.w.path }}", "H": "{{ .app.ssh_host }}" }
+          }
+        },
         { "if": ".props.w.is_primary | not", "separator": true },
-        { "if": ".props.w.is_primary | not", "label": "Delete worktree", "do": { "do": "worktree.delete", "path": "{{ .props.w.path }}" } }
+        { "if": ".props.w.is_primary | not", "label": "Delete worktree", "danger": true, "do": { "do": "confirm", "title": "Delete {{ .props.w.title }}?", "text": "Removes the worktree folder, with any uncommitted changes in it. The branch stays.", "confirm": "Delete", "then": { "do": "worktree.delete", "path": "{{ .props.w.path }}" } } },
+        { "separator": true },
+        { "label": "{{ if .props.w.pinned then \"Unpin\" else \"Pin\" end }} worktree", "do": { "do": "state.toggle", "key": "pinned:{{ .props.w.path }}" } },
+        {
+          "label": "Move to section",
+          "items": [
+            { "for": ".props.w.section.id as $cur | [.sections[] | select(.id != $cur)]", "as": "s", "label": "{{ .s.name }}", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": "{{ .s.id }}" } }
+          ]
+        },
+        { "if": ".props.w.section", "label": "Remove from section", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": null } }
       ],
       "children": [
         { "type": "DropLine", "props": { "key": "wt:{{ .props.w.path }}" } },
@@ -430,6 +472,7 @@
           "children": [
             { "type": "text", "props": { "text": "{{ if .props.in_section then .props.w.label else .props.w.title end }}" }, "style": { "truncate": true, "font_size": 14 } },
             { "if": ".props.w.is_primary", "type": "icon", "props": { "name": "star-fill", "size": 11, "color": "@text_muted" } },
+            { "if": ".props.w.pinned", "type": "icon", "props": { "name": "pin", "size": 11, "color": "@text_muted" }, "tooltip": "Pinned" },
             { "id": "wt-host", "type": "HostIcon", "props": { "host": "{{ .props.w.host }}", "size": 11 } },
             { "for": ".props.w.host as $h | [.props.w.chats[] | select(.open) | .host] | unique | map(select(. != $h))", "as": "h", "type": "HostIcon", "props": { "host": "{{ .h }}", "size": 11 } }
           ]
@@ -988,7 +1031,14 @@
           "style": { "grow": 1, "gap": 10, "align": "center" },
           "children": [
             { "type": "icon", "props": { "name": "git-branch", "size": 13, "color": "@age" } },
-            { "type": "text", "props": { "text": "{{ .selected.worktree.branch // \"detached\" }}" }, "style": { "font_size": 13 } },
+            {
+              "id": "branch-input",
+              "type": "input",
+              "tooltip": "Click to rename the branch; Enter saves",
+              "props": { "value": "{{ .selected.worktree.branch // \"\" }}", "placeholder": "detached", "appearance": false },
+              "on": { "submit": { "do": "worktree.rename_branch", "path": "{{ .selected.worktree.path }}", "branch": "{{ .input }}" } },
+              "style": { "grow": 1, "min_width": 0, "max_width": 460, "font_size": 13, "radius": 6, "padding": [2, 6], "margin": [0, 0, 0, -6], "cursor": "text", "hover": { "background": "@hover" } }
+            },
             { "type": "spacer" },
             {
               "if": ".selected.diff.files > 0",
@@ -1151,6 +1201,8 @@
     { "key": "cmd-,", "do": "settings.open" },
     { "key": "cmd-shift-d", "do": { "do": "state.toggle", "key": "designer_open" } },
     { "key": "cmd-n", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
+    { "key": "cmd-shift-c", "if": ".selected.worktree", "do": { "do": "clipboard.copy", "text": "{{ .selected.worktree.path }}" } },
+    { "key": "cmd-shift-n", "if": ".selected.worktree", "do": { "do": "worktree.new", "repo": "{{ .selected.worktree.repo }}", "host": "{{ .selected.worktree.host }}" } },
     { "key": "cmd-]", "do": { "do": "select", "offset": 1 } },
     { "key": "cmd-[", "do": { "do": "select", "offset": -1 } },
     { "key": "cmd-q", "do": "app.quit" },
@@ -1165,6 +1217,7 @@
     { "label": "New orchestrator chat in redo", "do": { "do": "chat.new", "repo": "redo", "kind": "orchestrator" } },
     { "label": "New feature chat in redo…", "do": { "do": "prompt", "title": "Branch name", "then": { "do": "chat.new", "repo": "redo", "kind": "feature", "branch": "{{ .input }}" } } },
     { "label": "New section…", "do": "section.new" },
+    { "label": "Restore removed projects", "if": ".app.removed_projects | length > 0", "do": "project.restore" },
     { "label": "Sidebar: list chats under worktrees", "if": ".state.sidebar_rows != \"chats\"", "do": { "do": "state.set", "key": "sidebar_rows", "value": "chats" } },
     { "label": "Sidebar: worktrees only", "if": ".state.sidebar_rows == \"chats\"", "do": { "do": "state.set", "key": "sidebar_rows", "value": "worktrees" } },
     { "label": "Toggle sidebar", "do": { "do": "state.toggle", "key": "sidebar_open" } },

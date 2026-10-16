@@ -138,6 +138,8 @@ A node is an object (or a string, shorthand for a text node, or an array of node
   "style": { "padding": [0, 12], "background": "@card", "hover": { "background": "@hover" } },
   "on": { "click": {"do": "select", "worktree": "{{ .w.path }}"}, "double_click": "window.zoom" },
   "menu": [ {"label": "Rename", "do": {"do": "section.rename", "id": "{{ .s.id }}"}}, {"separator": true} ],
+  // menu items also take "icon", "shortcut" (shown at the right), "checked" (jq: a checkbox),
+  // "danger" (red), "disabled", and "items" (a submenu)
   "tooltip": "{{ .w.branch }}",
   "drag": { "kind": "worktree", "value": "{{ .w.path }}", "label": "{{ .w.title }}" },  // makes the node draggable
   // and on a drop target: "on": { "drop_item": { "accept": "worktree", "do": {"do": "worktree.move", "before": "{{ .w.path }}"} } }

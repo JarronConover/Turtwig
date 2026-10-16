@@ -31,6 +31,29 @@ fn open_main(cx: &mut App) {
     cx.activate(true);
 }
 
+/** The built-in icon set, plus `icons/NAME.svg` from the settings folder (which wins) and a few brand marks it lacks. */
+struct Assets;
+
+const GITLAB_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="m23.6 9.6-.03-.09-3.27-8.52a.85.85 0 0 0-1.62.09l-2.2 6.75H7.53L5.32 1.08a.85.85 0 0 0-1.62-.09L.43 9.51l-.03.09a6.07 6.07 0 0 0 2.01 7.01l.01.01.03.02 4.98 3.73 2.46 1.86 1.5 1.13a1 1 0 0 0 1.22 0l1.5-1.13 2.46-1.86 5.01-3.75.01-.01a6.07 6.07 0 0 0 2.01-7.01z"/></svg>"#;
+
+impl gpui_kit::AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(name) = path.strip_prefix("icons/") {
+            if let Ok(bytes) = std::fs::read(settings::dir().join("icons").join(name)) {
+                return Ok(Some(bytes.into()));
+            }
+            if name == "gitlab.svg" {
+                return Ok(Some(GITLAB_SVG.into()));
+            }
+        }
+        gpui_kit::AssetSource::load(&gpui_kit::assets::AllAssets, path)
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        gpui_kit::AssetSource::list(&gpui_kit::assets::AllAssets, path)
+    }
+}
+
 fn main() {
     // `--iconset DIR` writes the bundle icon's PNGs from the settings' logo (bundle.sh turns them into AppIcon.icns).
     let args: Vec<String> = std::env::args().collect();
@@ -41,7 +64,7 @@ fn main() {
         }
         return;
     }
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    let app = gpui_kit::application().with_assets(Assets);
     // Clicking the Dock icon (or opening the app again) after closing the window brings it back.
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {

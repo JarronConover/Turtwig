@@ -57,6 +57,9 @@ pub enum Call {
     SectionMove { id: String, index: usize },
     /** The worktree's name in the sidebar (a leading emoji becomes its icon). */
     WorktreeLabel { path: String, label: String },
+    WorktreeRenameBranch { path: String, branch: String },
+    /** A worktree on `branch` (checked out if it exists here or on origin, else new from origin/main); replies `{path, branch}`. */
+    WorktreeCreate { repo: String, branch: String },
     /** Run a shell command on the box (bash -lc): `{code, stdout, stderr}`. For scripts that add box-side abilities. */
     Exec { cmd: String, cwd: Option<String>, timeout_secs: Option<u64> },
     ProjectMove { repo: String, index: usize },
@@ -146,6 +149,9 @@ pub struct Worktree {
     /** The machine it's on: "box" or "mac". */
     #[serde(default = "default_host")]
     pub host: String,
+    /** Made outside a.box and super.engineering (by hand with `git worktree add`, or another tool). */
+    #[serde(default)]
+    pub external: bool,
 }
 
 fn default_host() -> String {

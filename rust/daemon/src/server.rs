@@ -397,6 +397,8 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let id = find_item_id(&ws, &path).ok_or("no such worktree")?;
             sc_tool(&["worktree", "set-label", &id, &label], None)
         }
+        Call::WorktreeRenameBranch { path, branch } => sc_tool(&["worktree", "rename-branch", &branch], Some(&path)),
+        Call::WorktreeCreate { repo, branch } => sc_tool(&["worktree", "create", "--project", &repo, "--branch", &branch], None),
         Call::Exec { cmd, cwd, timeout_secs } => {
             let home = util::home();
             let cwd = cwd.unwrap_or_else(|| home.to_string_lossy().into_owned());

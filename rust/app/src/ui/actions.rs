@@ -5,7 +5,7 @@ use super::expr::{to_val, with};
 use crate::workspace::Workspace;
 use agent_box_protocol::Call;
 use gpui_kit::*;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub const ACTIONS: &[(&str, &str)] = &[
     ("state.set", "{key, value}: set a state value (value may be any JSON or a template)"),
@@ -40,6 +40,12 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("project.move", "{repo?, index? | target: repo with zone}: reorder a project (repo defaults to `dragged`)"),
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
     ("worktree.delete", "{path}"),
+    ("worktree.rename_branch", "{path, branch?}: rename the worktree's git branch (asks when branch is missing)"),
+    ("worktree.new", "{repo, host: mac|box, branch?}: a worktree on that branch, checked out if it exists, else new from origin/main (asks when branch is missing)"),
+    ("project.settings", "{repo}: edit the project's name, badge letter and color (saved in state as project_name:REPO, project_letter:REPO, project_hue:REPO)"),
+    ("project.open_remote", "{path}: open the repo's origin (GitLab, GitHub) in the browser"),
+    ("project.unhide", "{repo}: show the project's hidden worktrees again (hidden ones have state hidden:PATH)"),
+    ("project.restore", "{repo?}: bring back a removed project (state removed_project:REPO), or all of them"),
     ("worktree.label", "{path, label?}: rename a worktree in the sidebar; a leading emoji becomes its icon (asks when label is missing)"),
     ("worktree.test_local", "{branch}: check the branch out on the Mac with the box's latest work"),
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
@@ -102,6 +108,71 @@ impl Workspace {
             let at = before.and_then(|b| list.iter().position(|x| x.path == b)).unwrap_or(list.len());
             list.insert(at, w);
         }
+    }
+
+    fn rename_branch(&mut self, path: String, branch: String, cx: &mut Context<Self>) {
+        let branch = branch.trim().to_string();
+        if branch.is_empty() || self.worktree(&path).and_then(|w| w.branch.as_deref()) == Some(branch.as_str()) {
+            return;
+        }
+        let call = Call::WorktreeRenameBranch { path: path.clone(), branch: branch.clone() };
+        let remote = self.route(&call);
+        let m = &mut self.model;
+        for w in m.projects.iter_mut().flat_map(|p| p.items.iter_mut()).chain(m.sections.iter_mut().flat_map(|s| s.items.iter_mut())) {
+            if w.path == path {
+                w.branch = Some(branch.clone());
+            }
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = remote.call(call).await {
+                this.update(cx, |ws, cx| {
+                    ws.pending_actions.push(json!({"do": "notify", "text": format!("Couldn't rename the branch: {e}")}));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn new_worktree(&mut self, repo: String, host: String, branch: String, cx: &mut Context<Self>) {
+        let remote = self.remote_for_host(&host);
+        self.status = format!("Making a worktree for {branch}…");
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = remote.call(Call::WorktreeCreate { repo, branch: branch.trim().to_string() }).await;
+            this.update(cx, |ws, cx| {
+                match res {
+                    Ok(v) => {
+                        if let Some(p) = v["path"].as_str().or_else(|| v["response"]["path"].as_str()) {
+                            ws.selected = Some(p.to_string());
+                            ws.set_state("selected_worktree".into(), Value::String(p.to_string()));
+                        }
+                        ws.status = "Connected".into();
+                    }
+                    Err(e) => {
+                        ws.status = "Connected".into();
+                        ws.pending_actions.push(json!({"do": "notify", "text": format!("Couldn't make the worktree: {e}")}));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn project_settings(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.model.projects.iter().find(|p| p.repo == repo) else { return };
+        let (name, letter, hue) = self.project_look(&repo, &p.name, p.hue);
+        let fields = vec![("Name".to_string(), name), ("Badge letter".to_string(), letter), ("Badge color (hue, 0–360)".to_string(), format!("{hue:.0}"))];
+        self.fields_dialog(&format!("{} settings", p.name), fields, window, cx, move |ws, vals, cx| {
+            for (key, v) in ["project_name", "project_letter", "project_hue"].iter().zip(vals) {
+                ws.set_state(format!("{key}:{repo}"), if v.trim().is_empty() { Value::Null } else { Value::String(v.trim().to_string()) });
+            }
+            cx.notify();
+        });
     }
 
     fn label_worktree(&mut self, path: String, label: String, cx: &mut Context<Self>) {
@@ -428,6 +499,70 @@ impl Workspace {
                     }
                 }
             }
+            "worktree.rename_branch" => {
+                if let Some(path) = s("path") {
+                    match s("branch") {
+                        Some(b) => self.rename_branch(path, b, cx),
+                        None => {
+                            let current = self.worktree(&path).and_then(|w| w.branch.clone()).unwrap_or_default();
+                            self.name_dialog("Rename branch", &current, window, cx, move |ws, b, cx| ws.rename_branch(path.clone(), b, cx));
+                        }
+                    }
+                }
+            }
+            "worktree.new" => {
+                let repo = s("repo").unwrap_or_else(|| "redo".into());
+                let host = s("host").unwrap_or_else(|| "box".into());
+                match s("branch") {
+                    Some(b) => self.new_worktree(repo, host, b, cx),
+                    None => {
+                        let title = format!("New {repo} worktree from branch (new or existing)");
+                        self.name_dialog(&title, "", window, cx, move |ws, b, cx| ws.new_worktree(repo.clone(), host.clone(), b, cx));
+                    }
+                }
+            }
+            "project.settings" => {
+                if let Some(repo) = s("repo") {
+                    self.project_settings(repo, window, cx);
+                }
+            }
+            "project.open_remote" => {
+                if let Some(path) = s("path") {
+                    let remote = self.remote_for_host(&self.host_of_path(&path));
+                    let call = Call::Exec { cmd: "git remote get-url origin".into(), cwd: Some(path), timeout_secs: Some(15) };
+                    cx.spawn(async move |this, cx| {
+                        let res = remote.call(call).await;
+                        this.update(cx, |ws, cx| {
+                            match res.ok().and_then(|v| v["stdout"].as_str().and_then(|u| web_url(u.trim()))) {
+                                Some(url) => cx.open_url(&url),
+                                None => ws.pending_actions.push(json!({"do": "notify", "text": "This project has no origin remote"})),
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+            "project.unhide" => {
+                if let Some(repo) = s("repo") {
+                    let keys: Vec<String> = self.all_worktrees().iter().filter(|w| w.repo == repo).map(|w| format!("hidden:{}", w.path)).filter(|k| self.state.contains_key(k)).collect();
+                    for k in keys {
+                        self.set_state(k, Value::Null);
+                    }
+                }
+            }
+            "project.restore" => {
+                let repos: Vec<String> = match s("repo") {
+                    Some(r) => vec![r],
+                    None => self.model.projects.iter().map(|p| p.repo.clone()).collect(),
+                };
+                for r in repos {
+                    if self.state.contains_key(&format!("removed_project:{r}")) {
+                        self.set_state(format!("removed_project:{r}"), Value::Null);
+                    }
+                }
+            }
             "worktree.move" => {
                 if let Some(path) = s("path").or_else(|| s("dragged")) {
                     let before = match (s("target"), s("zone").as_deref()) {
@@ -635,5 +770,34 @@ impl Workspace {
         self.pending_motion = true;
         self.ctx_rev += 1;
         cx.notify();
+    }
+}
+
+/** The browser page for a git remote: `git@host:group/repo.git` or `https://host/group/repo.git`. */
+fn web_url(remote: &str) -> Option<String> {
+    let r = remote.trim().trim_end_matches(".git");
+    if r.is_empty() {
+        return None;
+    }
+    if let Some(rest) = r.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        return Some(format!("https://{host}/{path}"));
+    }
+    if let Some(rest) = r.strip_prefix("ssh://") {
+        let rest = rest.split_once('@').map(|x| x.1).unwrap_or(rest);
+        let (host, path) = rest.split_once('/')?;
+        return Some(format!("https://{}/{path}", host.split(':').next().unwrap_or(host)));
+    }
+    r.starts_with("http").then(|| r.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn web_urls_from_remotes() {
+        assert_eq!(super::web_url("git@gitlab.com:redo/redoapp/product/redo.git\n").as_deref(), Some("https://gitlab.com/redo/redoapp/product/redo"));
+        assert_eq!(super::web_url("ssh://git@gitlab.com:22/tj15/agent-box.git").as_deref(), Some("https://gitlab.com/tj15/agent-box"));
+        assert_eq!(super::web_url("https://gitlab.com/tj15/agent-box.git").as_deref(), Some("https://gitlab.com/tj15/agent-box"));
+        assert_eq!(super::web_url(""), None);
     }
 }

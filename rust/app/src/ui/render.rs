@@ -6,7 +6,8 @@ use super::style;
 use crate::workspace::Workspace;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{Icon, Sizable as _};
+use gpui_kit::component::{h_flex, Icon, Sizable as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jaq_json::Val;
 use serde_json::{Map, Value};
@@ -41,7 +42,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("text", "Text. `props.text` (templates allowed); a plain string node is shorthand for this."),
     ("icon", "A Lucide icon. `props.name` (e.g. git-branch, panel-left, plus), `props.size` (points), `props.spin` (bool)."),
     ("logo", "The app's logo (settings `logo`) at `props.size` (24). Any `logo` key in props overrides it for this node, e.g. `{\"tile\": null}` for bare art."),
-    ("input", "A one-line text field bound to a state key: `props.state` (key), `props.placeholder`, `props.autofocus`, `props.appearance` (false: no border). Read the text as `.state.<key>`."),
+    ("input", "A one-line text field bound to a state key: `props.state` (key), `props.placeholder`, `props.autofocus`, `props.appearance` (false: no border). Read the text as `.state.<key>`. Or `props.value` (follows the context while the field isn't focused) with `on.submit` (an action run on Enter, with the text as `.input`)."),
     ("spinner", "A loading spinner. `props.size`: xsmall | small | medium | large."),
     ("spacer", "Takes the remaining space (grow 1)."),
     ("divider", "A 1-point line. `props.axis`: x (default, horizontal) | y."),
@@ -237,13 +238,25 @@ impl Workspace {
                         let placeholder = props.get("placeholder").map(value_text).unwrap_or_default();
                         let start = self.state.get(&key).map(value_text).unwrap_or_default();
                         let e = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(start));
-                        let k = key.clone();
-                        self._subscriptions.push(cx.subscribe_in(&e, window, move |ws: &mut Workspace, e, ev: &InputEvent, _, cx| {
-                            if matches!(ev, InputEvent::Change) && !k.is_empty() {
+                        let (k, input_id) = (key.clone(), id.clone());
+                        self._subscriptions.push(cx.subscribe_in(&e, window, move |ws: &mut Workspace, e, ev: &InputEvent, window, cx| match ev {
+                            InputEvent::Change if !k.is_empty() => {
                                 let v = e.read(cx).value().to_string();
                                 ws.set_state(k.clone(), Value::String(v));
                                 cx.notify();
                             }
+                            InputEvent::PressEnter { .. } => {
+                                if let Some((action, ctx)) = ws.input_submits.get(&input_id).cloned() {
+                                    let text = e.read(cx).value().to_string();
+                                    let c = with(&ctx, vec![("input".into(), to_val(&Value::String(text)))]);
+                                    let resolved = ws.exprs.resolve_action(&action, &c);
+                                    ws.pending_actions.push(resolved);
+                                    // Leave the field so it shows the saved value again.
+                                    window.blur(cx);
+                                    cx.notify();
+                                }
+                            }
+                            _ => {}
                         }));
                         if props.get("autofocus").and_then(Value::as_bool) == Some(true) {
                             e.update(cx, |s, cx| s.focus(window, cx));
@@ -251,6 +264,17 @@ impl Workspace {
                         self.inputs.insert(id.clone(), e.clone());
                         e
                     }
+                };
+                // `value` follows the context while the field isn't being edited; `on.submit` runs on Enter with `.input`.
+                if let Some(v) = props.get("value").map(value_text) {
+                    let editing = entity.read(cx).focus_handle(cx).is_focused(window);
+                    if !editing && entity.read(cx).value().as_ref() != v.as_str() {
+                        entity.update(cx, |s, cx| s.set_value(v, window, cx));
+                    }
+                }
+                match obj.get("on").and_then(|o| o.get("submit")) {
+                    Some(a) => self.input_submits.insert(id.clone(), (a.clone(), ctx.clone())),
+                    None => self.input_submits.remove(&id),
                 };
                 vec![Input::new(&entity).appearance(props.get("appearance").and_then(Value::as_bool).unwrap_or(true)).into_any_element()]
             }
@@ -292,6 +316,10 @@ impl Workspace {
         let kids = if virtual_list { vec![self.virtual_list(obj, ctx, path, &id, cx)] } else { children(self, window, cx) };
 
         let mut el = el.id(SharedString::from(id.clone()));
+        if kind == "input" {
+            // Clicks in a field are for the field, not a drag or click handler around it.
+            el = el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        }
         if virtual_list {
             el = el.overflow_hidden();
         } else if kind == "scroll" {
@@ -444,7 +472,7 @@ impl Workspace {
                 }));
             }
             for event in on.keys() {
-                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down" | "drop" | "drop_item") {
+                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down" | "drop" | "drop_item") && !(event == "submit" && kind == "input") {
                     self.exprs.note(format!("unknown event `{event}` at {path}"));
                 }
             }
@@ -491,18 +519,8 @@ impl Workspace {
             let view = cx.entity();
             el.context_menu(move |menu, window, cx| {
                 let entries = view.read(cx).menu_entries(&spec, &menu_ctx);
-                let mut m = menu;
-                for (label, action, sep) in entries.iter() {
-                    if *sep {
-                        m = m.separator();
-                        continue;
-                    }
-                    let action = action.clone();
-                    m = m.item(PopupMenuItem::new(label.clone()).on_click(window.listener_for(&view, move |ws: &mut Workspace, _, window, cx| {
-                        ws.run_action(&action, window, cx)
-                    })));
-                }
-                m
+                let theme = view.read(cx).settings.theme.clone();
+                build_menu(menu, entries, &view, &theme, window, cx)
             })
             .into_any_element()
         } else {
@@ -569,8 +587,8 @@ impl Workspace {
         .into_any_element()
     }
 
-    /** Menu entries with `if` applied and `for` expanded: (label, action, is_separator). */
-    fn menu_entries(&self, menu: &[Value], ctx: &Val) -> Vec<(String, Value, bool)> {
+    /** Menu entries with `if` applied and `for` expanded. */
+    pub(crate) fn menu_entries(&self, menu: &[Value], ctx: &Val) -> Vec<MenuEntry> {
         let mut out = vec![];
         for m in menu {
             if let Some(code) = m.get("for").and_then(Value::as_str) {
@@ -594,11 +612,38 @@ impl Workspace {
                     continue;
                 }
             }
-            out.push((
-                value_text(&self.exprs.resolve(m.get("label").unwrap_or(&Value::Null), ctx)),
-                self.exprs.resolve_action(m.get("do").unwrap_or(&Value::Null), ctx),
-                m.get("separator").and_then(Value::as_bool) == Some(true),
-            ));
+            if m.get("separator").and_then(Value::as_bool) == Some(true) {
+                if !matches!(out.last(), None | Some(MenuEntry::Separator)) {
+                    out.push(MenuEntry::Separator);
+                }
+                continue;
+            }
+            let text = |k: &str| m.get(k).map(|v| value_text(&self.exprs.resolve(v, ctx))).filter(|t| !t.is_empty());
+            let flag = |k: &str| match m.get(k) {
+                Some(Value::Bool(b)) => *b,
+                Some(Value::String(code)) => self.exprs.truthy(code, ctx),
+                _ => false,
+            };
+            let label = text("label").unwrap_or_default();
+            if let Some(Value::Array(items)) = m.get("items") {
+                let children = self.menu_entries(items, ctx);
+                if !children.is_empty() {
+                    out.push(MenuEntry::Submenu { label, icon: text("icon"), children });
+                }
+                continue;
+            }
+            out.push(MenuEntry::Item {
+                label,
+                action: self.exprs.resolve_action(m.get("do").unwrap_or(&Value::Null), ctx),
+                icon: text("icon"),
+                shortcut: text("shortcut"),
+                checked: m.get("checked").map(|_| flag("checked")),
+                danger: flag("danger"),
+                disabled: flag("disabled"),
+            });
+        }
+        while matches!(out.last(), Some(MenuEntry::Separator)) {
+            out.pop();
         }
         out
     }
@@ -775,4 +820,68 @@ pub fn value_text(v: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/** One line of a right-click menu (settings `menu`). Items take `icon`, `shortcut` (shown at the right),
+`checked` (a checkbox), `danger` (red), and `disabled`; `items` makes a submenu. */
+#[derive(Clone)]
+pub(crate) enum MenuEntry {
+    Separator,
+    Item { label: String, action: Value, icon: Option<String>, shortcut: Option<String>, checked: Option<bool>, danger: bool, disabled: bool },
+    Submenu { label: String, icon: Option<String>, children: Vec<MenuEntry> },
+}
+
+fn build_menu(
+    mut m: gpui_kit::component::menu::PopupMenu,
+    entries: Vec<MenuEntry>,
+    view: &Entity<Workspace>,
+    theme: &Map<String, Value>,
+    window: &mut Window,
+    cx: &mut Context<gpui_kit::component::menu::PopupMenu>,
+) -> gpui_kit::component::menu::PopupMenu {
+    let danger_color = style::color(&Value::String("@danger".into()), theme);
+    let faint = style::color(&Value::String("@text_faint".into()), theme);
+    for e in entries {
+        match e {
+            MenuEntry::Separator => m = m.separator(),
+            MenuEntry::Submenu { label, icon, children } => {
+                let (view, theme) = (view.clone(), theme.clone());
+                m = m.submenu_with_icon(icon.map(menu_icon), label, window, cx, move |sub, window, cx| {
+                    build_menu(sub, children.clone(), &view, &theme, window, cx)
+                });
+            }
+            MenuEntry::Item { label, action, icon, shortcut, checked, danger, disabled } => {
+                let color = if danger { danger_color } else { None };
+                let item = if color.is_some() || shortcut.is_some() {
+                    let (label, shortcut) = (SharedString::from(label), shortcut.map(SharedString::from));
+                    PopupMenuItem::element(move |_, _| {
+                        h_flex()
+                            .w_full()
+                            .gap_4()
+                            .justify_between()
+                            .child(div().when_some(color, |d, c| d.text_color(c)).child(label.clone()))
+                            .when_some(shortcut.clone(), |d, k| d.child(div().when_some(faint, |d, c| d.text_color(c)).child(k)))
+                    })
+                } else {
+                    PopupMenuItem::new(label)
+                };
+                let accent = style::color(&Value::String("@accent".into()), theme);
+                let item = match (checked, icon, color) {
+                    (Some(true), _, _) => item.icon(menu_icon("square-check".into()).when_some(accent, |i, c| i.text_color(c))),
+                    (Some(false), _, _) => item.icon(menu_icon("square".into())),
+                    (None, Some(i), Some(c)) => item.icon(menu_icon(i).text_color(c)),
+                    (None, Some(i), None) => item.icon(menu_icon(i)),
+                    _ => item,
+                };
+                let item = item.disabled(disabled);
+                let view = view.clone();
+                m = m.item(item.on_click(window.listener_for(&view, move |ws: &mut Workspace, _, window, cx| ws.run_action(&action, window, cx))));
+            }
+        }
+    }
+    m
+}
+
+fn menu_icon(name: String) -> Icon {
+    Icon::empty().path(format!("icons/{name}.svg"))
 }

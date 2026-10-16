@@ -334,6 +334,7 @@ fn worktree(caches: &Arc<Caches>, d: &Value, chats: &[Chat]) -> Option<Worktree>
         age,
         chat_ids: mine.iter().map(|c| c.id.clone()).collect(),
         host: crate::mac::host().into(),
+        external: d.get("external").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }
 

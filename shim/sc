@@ -34,6 +34,8 @@ WORKTREE_BASE = {
     "redo-data": HOME / "dev" / "redo-data-worktrees",
 }
 WORKSPACE = "box"
+# Worktrees a.box (wt) or super.engineering made; any other is "external".
+MANAGED_BASES = {repo: [WORKTREE_BASE[repo], HOME / ".superconductor" / "worktrees"] for repo in REPOS}
 BUILT_IN = [
     {"section_id": "pinned", "name": "Pinned", "kind": "manual", "rules": [], "priority": None,
      "collapsed": False, "built_in": True},
@@ -123,6 +125,7 @@ def items(store):
                 "agent_status": "idle", "attention": None, "pr": None, "local": {},
                 "section": meta.get("section"),
                 "order": meta.get("order"),
+                "external": not primary and not any(real(path).startswith(real(b) + os.sep) for b in MANAGED_BASES[repo]),
             })
     rank = {name: i for i, name in enumerate(store.data.get("project_order", []))}
     repo_rank = {repo: rank.get(repo, len(rank) + i) for i, repo in enumerate(REPOS)}

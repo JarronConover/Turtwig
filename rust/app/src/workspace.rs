@@ -44,6 +44,8 @@ pub struct Workspace {
     pub(crate) history: Vec<Value>,
     pub(crate) history_loading: bool,
     pub(crate) inputs: HashMap<String, Entity<gpui_kit::component::input::InputState>>,
+    /** Each `input` node's `on.submit` action and the context it was drawn in. */
+    pub(crate) input_submits: HashMap<String, (Value, jaq_json::Val)>,
     /** The open completion list under a composer: (chat, trigger, entries, selected). */
     pub(crate) completion: Option<(String, String, Vec<crate::completions::Entry>, usize)>,
     /** Messages typed while a chat was working, sent one per turn as it finishes (`chat.queue`). */
@@ -205,6 +207,7 @@ impl Workspace {
             history: vec![],
             history_loading: false,
             inputs: HashMap::new(),
+            input_submits: HashMap::new(),
             completion: None,
             queued: HashMap::new(),
             view_handle: None,
@@ -874,7 +877,7 @@ impl Workspace {
             Call::SectionRename { id, .. } | Call::SectionDelete { id } | Call::SectionMove { id, .. } => {
                 self.section_hosts.get(id).cloned().unwrap_or_else(|| "box".into())
             }
-            Call::SectionAssign { path, .. } | Call::WorktreeDelete { path } | Call::WorktreeMove { path, .. } | Call::WorktreeLabel { path, .. } | Call::WorktreeDiff { path, .. } => {
+            Call::SectionAssign { path, .. } | Call::WorktreeDelete { path } | Call::WorktreeMove { path, .. } | Call::WorktreeLabel { path, .. } | Call::WorktreeRenameBranch { path, .. } | Call::WorktreeDiff { path, .. } => {
                 self.host_of_path(path)
             }
             Call::TermOpen { cwd: Some(c), .. } => self.host_of_path(c),
@@ -946,11 +949,20 @@ impl Workspace {
             .projects
             .iter()
             .enumerate()
+            .filter(|(_, p)| !self.project_removed(&p.repo))
             .map(|(i, p)| {
-                json!({"name": p.name, "repo": p.repo, "hue": p.hue, "letter": letter(&p.name),
+                let (name, letter, hue) = self.project_look(&p.repo, &p.name, p.hue);
+                let (show_external, show_primary) = (!self.flag(&format!("hide_external:{}", p.repo)), !self.flag(&format!("hide_primary:{}", p.repo)));
+                let shown = self.visible_items(&p.items, |w| (show_external || !w.external) && (show_primary || !w.is_primary));
+                let primary = p.items.iter().find(|w| w.is_primary).or(p.items.first());
+                json!({"name": name, "repo": p.repo, "hue": hue, "letter": letter,
                        "hosts": self.project_hosts.get(i).cloned().unwrap_or_else(|| vec!["box".into()]),
                        "host": self.project_hosts.get(i).and_then(|h| h.first().cloned()).unwrap_or_else(|| "box".into()),
-                       "items": p.items.iter().map(|w| self.worktree_json(w, Value::Null)).collect::<Vec<_>>()})
+                       "show_external": show_external, "show_primary": show_primary,
+                       "external_count": p.items.iter().filter(|w| w.external).count(),
+                       "hidden_count": p.items.iter().chain(self.model.sections.iter().flat_map(|s| s.items.iter())).filter(|w| w.repo == p.repo && self.flag(&format!("hidden:{}", w.path))).count(),
+                       "primary_path": primary.map(|w| w.path.clone()), "primary_host": primary.map(|w| w.host.clone()),
+                       "items": shown.into_iter().map(|w| self.worktree_json(w, Value::Null)).collect::<Vec<_>>()})
             })
             .collect();
         let sections: Vec<Value> = self
@@ -960,9 +972,10 @@ impl Workspace {
             .map(|s| {
                 json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
                        "host": self.section_hosts.get(&s.id).cloned().unwrap_or_else(|| "box".into()),
-                       "items": s.items.iter().map(|w| self.worktree_json(w, json!({"id": s.id, "name": s.name}))).collect::<Vec<_>>()})
+                       "items": self.visible_items(&s.items, |_| true).into_iter().map(|w| self.worktree_json(w, json!({"id": s.id, "name": s.name}))).collect::<Vec<_>>()})
             })
             .collect();
+        let removed: Vec<Value> = self.model.projects.iter().filter(|p| self.project_removed(&p.repo)).map(|p| json!({"repo": p.repo, "name": self.project_look(&p.repo, &p.name, p.hue).0})).collect();
         let selected_w = self.current_worktree().map(|w| self.worktree_json(w, Value::Null));
         let selected_diff = self.selected.as_deref().map(|p| self.diff_summary(p)).unwrap_or(Value::Null);
         let selected_c = self.current_chat().map(|c| self.chat_json(c));
@@ -987,6 +1000,7 @@ impl Workspace {
                 })),
                 "history_loading": self.history_loading,
                 "connected": self.connected,
+                "removed_projects": removed,
                 "dragging": self.dragging,
                 "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
                 "focused": self.focused,
@@ -1004,6 +1018,30 @@ impl Workspace {
                 "has_messages": self.transcripts.get(crate::designer::CHAT_ID).map(|t| !t.items.is_empty()).unwrap_or(false),
             },
         }))
+    }
+
+    fn flag(&self, key: &str) -> bool {
+        self.state.get(key).and_then(Value::as_bool).unwrap_or(false)
+    }
+
+    fn project_removed(&self, repo: &str) -> bool {
+        self.flag(&format!("removed_project:{repo}"))
+    }
+
+    /** A project's name, badge letter, and hue, with Project settings' overrides (`project_name:REPO` and so on in state). */
+    pub(crate) fn project_look(&self, repo: &str, name: &str, hue: f32) -> (String, String, f32) {
+        let text = |k: &str| self.state.get(&format!("{k}:{repo}")).map(crate::ui::render::value_text).map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        let name = text("project_name").unwrap_or_else(|| name.to_string());
+        let letter = text("project_letter").map(|l| l.chars().take(2).collect()).unwrap_or_else(|| letter(&name));
+        let hue = text("project_hue").and_then(|h| h.parse::<f32>().ok()).unwrap_or(hue);
+        (name, letter, hue)
+    }
+
+    /** What the sidebar lists: not hidden, its project not removed, passing `keep`; pinned ones first. */
+    fn visible_items<'a>(&self, items: &'a [Worktree], keep: impl Fn(&Worktree) -> bool) -> Vec<&'a Worktree> {
+        let mut out: Vec<&Worktree> = items.iter().filter(|w| !self.flag(&format!("hidden:{}", w.path)) && !self.project_removed(&w.repo) && keep(w)).collect();
+        out.sort_by_key(|w| !self.flag(&format!("pinned:{}", w.path)));
+        out
     }
 
     fn worktree_json(&self, w: &Worktree, section: Value) -> Value {
@@ -1026,9 +1064,11 @@ impl Workspace {
             "idle"
         };
         let (emoji, label) = split_emoji(&w.title);
+        let (_, project_letter, hue) = self.project_look(&w.repo, &w.project, w.hue);
         json!({
             "id": w.id, "path": w.path, "branch": w.branch, "title": w.title, "emoji": emoji, "label": label,
-            "project": w.project, "repo": w.repo, "hue": w.hue, "letter": letter(&w.project), "is_primary": w.is_primary,
+            "project": w.project, "repo": w.repo, "hue": hue, "letter": project_letter, "is_primary": w.is_primary,
+            "pinned": self.flag(&format!("pinned:{}", w.path)), "hidden": self.flag(&format!("hidden:{}", w.path)), "external": w.external,
             "uncommitted": w.uncommitted, "unpushed": w.unpushed, "behind": w.behind, "mr": w.mr,
             "age": w.age, "age_text": age_text(w.age), "status": status, "section": section,
             "selected": self.selected.as_deref() == Some(&w.path),
@@ -1311,6 +1351,57 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /** A dialog of labeled text fields; `done` gets their values in order when saved (Enter in any field saves). */
+    pub(crate) fn fields_dialog(
+        &mut self,
+        title: &str,
+        fields: Vec<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        done: impl Fn(&mut Workspace, Vec<String>, &mut Context<Workspace>) + 'static,
+    ) {
+        use gpui_kit::component::input::{Input, InputState};
+        use gpui_kit::component::WindowExt as _;
+        let inputs: Vec<(SharedString, Entity<InputState>)> =
+            fields.into_iter().map(|(label, value)| (label.into(), cx.new(|cx| InputState::new(window, cx).default_value(value)))).collect();
+        let view = cx.entity();
+        let title: SharedString = title.to_string().into();
+        let done = std::rc::Rc::new(done);
+        let submit = {
+            let (inputs, view, done) = (inputs.clone(), view.clone(), done.clone());
+            std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+                let vals: Vec<String> = inputs.iter().map(|(_, i)| i.read(cx).value().to_string()).collect();
+                let done = done.clone();
+                view.update(cx, |ws, cx| done(ws, vals, cx));
+                window.close_dialog(cx);
+            })
+        };
+        for (_, input) in &inputs {
+            let s2 = submit.clone();
+            self._subscriptions.push(cx.subscribe_in(input, window, move |_, _, ev: &InputEvent, window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    s2(window, cx);
+                }
+            }));
+        }
+        let focus = inputs.first().map(|i| i.1.clone());
+        window.open_dialog(cx, move |dialog, _, _| {
+            let submit = submit.clone();
+            let body = v_flex().gap_3().children(inputs.iter().map(|(label, input)| {
+                v_flex().gap_1().child(div().text_sm().child(label.clone())).child(Input::new(input))
+            }));
+            dialog.title(title.clone()).child(body).footer(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(gpui_kit::component::button::Button::new("ok").label("Save").on_click(move |_, window, cx| submit(window, cx))),
+            )
+        });
+        if let Some(f) = focus {
+            f.update(cx, |s, cx| s.focus(window, cx));
+        }
     }
 
     pub(crate) fn name_dialog(
