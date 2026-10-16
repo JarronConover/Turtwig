@@ -198,7 +198,7 @@ impl Workspace {
                     .map(|p| {
                         if self.is_image_path(&p) {
                             let (w, h) = crate::workspace::fit(&p, mw, mh);
-                            style::apply(img(p).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme).into_any_element()
+                            style::apply_plain(img(p).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme).into_any_element()
                         } else {
                             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                             let name = if strip { strip_stamp(&name, 1) } else { name };
@@ -216,7 +216,7 @@ impl Workspace {
             }
             Item::Image { media_type, data } => {
                 let image = self.images.entry(key.clone()).or_insert_with(|| crate::workspace::decode_image(media_type, data)).clone();
-                image.map(|i| h_flex().w_full().justify_end().child(style::apply(img(i).object_fit(ObjectFit::Contain), &st("image"), theme)).into_any_element())
+                image.map(|i| h_flex().w_full().justify_end().child(style::apply_plain(img(i).object_fit(ObjectFit::Contain), &st("image"), theme)).into_any_element())
             }
             Item::Assistant { text } => {
                 let body = style::apply(div(), &st("assistant"), theme).child(self.markdown(&key, text, theme));

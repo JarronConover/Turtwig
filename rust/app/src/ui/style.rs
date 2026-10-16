@@ -3,6 +3,7 @@ theme; lengths are points; anything unknown is ignored (and reported in the sett
 
 use crate::settings::parse_color;
 use gpui_kit::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use serde_json::{Map, Value};
 
 pub const STYLE_KEYS: &[(&str, &str)] = &[
@@ -17,6 +18,7 @@ pub const STYLE_KEYS: &[(&str, &str)] = &[
     ("align", "cross-axis: start | center | end | stretch | baseline"),
     ("justify", "main-axis: start | center | end | between | around"),
     ("wrap", "bool: wrap children onto new lines"),
+    ("background_image", "a picture behind the node's content: a file (absolute, ~/, or in the settings folder) or http(s) URL; works on every node and every style object in settings (chat bubbles, cards, chips, the composer). With `background_fit` (cover, contain, fill, scale_down, none), `background_opacity` (0..1) and `background_dim` (a color laid over it). It follows the node's `radius`. Give `background` a see-through color (or none) so it shows."),
     ("background", "color: `#rrggbb`, `#rrggbbaa`, `hsl(h, s, l)` / `hsl(h, s, l, a)` (degrees, percents, 0..1), `@token`, or `transparent`"),
     ("color", "text color"),
     ("border", "number: border width on all sides; border_top/right/bottom/left for one side"),
@@ -313,7 +315,38 @@ pub fn refine(s: &mut StyleRefinement, style: &Map<String, Value>, theme: &Map<S
     }
 }
 
-pub fn apply<E: Styled>(mut el: E, style: &Map<String, Value>, theme: &Map<String, Value>) -> E {
+/** `apply` for elements that can't hold children (images): no `background_image`. */
+pub fn apply_plain<E: Styled>(mut el: E, style: &Map<String, Value>, theme: &Map<String, Value>) -> E {
     refine(el.style(), style, theme);
+    el
+}
+
+pub fn apply<E: Styled + ParentElement>(mut el: E, style: &Map<String, Value>, theme: &Map<String, Value>) -> E {
+    refine(el.style(), style, theme);
+    // `background_image` (any node, any style map): a picture behind the node's content, cut to its corners.
+    if let Some(src) = style.get("background_image").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        let fit = style.get("background_fit").and_then(Value::as_str).unwrap_or("cover");
+        let opacity = style.get("background_opacity").and_then(Value::as_f64).unwrap_or(1.) as f32;
+        let radius = match style.get("radius") {
+            Some(Value::Number(n)) => n.as_f64().unwrap_or(0.) as f32,
+            _ => 0.,
+        };
+        if style.get("position").is_none() {
+            el.style().position = Some(Position::Relative);
+        }
+        let dim = style.get("background_dim").and_then(|d| color(d, theme));
+        el = el.child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(px(radius))
+                .overflow_hidden()
+                .child(crate::workspace::image_element(src, fit).size_full().opacity(opacity))
+                .when_some(dim, |d, c| d.child(div().absolute().inset_0().bg(c)))
+                .into_any_element(),
+        );
+    }
     el
 }

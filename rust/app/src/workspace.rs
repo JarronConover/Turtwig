@@ -109,6 +109,9 @@ pub struct Workspace {
     /** Subagent conversations opened as tabs (read-only): (worktree path, a chat with id `sub:PARENT:AGENT`). */
     pub(crate) sub_chats: Vec<(String, Chat)>,
     queue_saved: String,
+    /** Drafts read at startup, waiting for their chat's message box; and what drafts.json holds. */
+    drafts_loaded: HashMap<String, String>,
+    drafts_saved: String,
     /** Chats sent a message in the last few seconds whose hook hasn't said they're working yet. */
     just_sent: HashMap<String, std::time::Instant>,
     /** Where you've been, browser-style: (worktree, chat) visits and the one showing now. */
@@ -302,6 +305,8 @@ impl Workspace {
             completion: None,
             queued: std::fs::read_to_string(settings::dir().join("queued.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             queue_saved: String::new(),
+            drafts_loaded: std::fs::read_to_string(settings::dir().join("drafts.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+            drafts_saved: String::new(),
             just_sent: HashMap::new(),
             nav: vec![],
             notices: vec![],
@@ -1432,7 +1437,8 @@ impl Workspace {
         // Cmd+Enter always sends.
         let enter_sends = self.settings.chat.get("enter_sends").and_then(Value::as_bool).unwrap_or(true);
         let cmd_enter_sends = self.settings.chat.get("cmd_enter_sends").and_then(Value::as_bool).unwrap_or(true);
-        let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(self.settings.num("chat.composer_lines.min", 1.) as usize, self.settings.num("chat.composer_lines.max", 10.) as usize).placeholder(placeholder).submit_on_enter(enter_sends));
+        let draft = self.drafts_loaded.remove(chat_id).unwrap_or_default();
+        let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(self.settings.num("chat.composer_lines.min", 1.) as usize, self.settings.num("chat.composer_lines.max", 10.) as usize).placeholder(placeholder).submit_on_enter(enter_sends).default_value(draft));
         let id = chat_id.to_string();
         self._subscriptions.push(cx.subscribe_in(&state, window, move |ws, _, ev: &InputEvent, window, cx| {
             match ev {
@@ -1734,6 +1740,24 @@ impl Workspace {
     }
 
     /** Queued messages survive a restart: kept in `queued.json` in the settings folder. */
+    /** Unsent text in each message box survives a restart: `drafts.json` in the settings folder. */
+    fn save_drafts(&mut self, cx: &mut Context<Self>) {
+        let mut drafts: std::collections::BTreeMap<String, String> = self.drafts_loaded.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (id, c) in &self.composers {
+            let v = c.read(cx).value().to_string();
+            if v.trim().is_empty() {
+                drafts.remove(id);
+            } else {
+                drafts.insert(id.clone(), v);
+            }
+        }
+        let text = serde_json::to_string_pretty(&drafts).unwrap_or_default();
+        if text != self.drafts_saved {
+            let _ = std::fs::write(settings::dir().join("drafts.json"), &text);
+            self.drafts_saved = text;
+        }
+    }
+
     fn save_queue(&mut self) {
         self.queued.retain(|_, q| !q.is_empty());
         let text = serde_json::to_string_pretty(&self.queued).unwrap_or_default();
@@ -2596,6 +2620,7 @@ impl Render for Workspace {
         self.flush(window, cx);
         self.track_nav();
         self.save_queue();
+        self.save_drafts(cx);
         self.refresh_sub_chats();
         self.perf.borrow_mut().spans.insert("flush", t.elapsed().as_secs_f32() * 1000.);
         self.render_generation += 1;
