@@ -605,6 +605,22 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             crate::config::set(options);
             return Ok(json!({}));
         }
+        Call::TermScroll { session, lines } => {
+            let target = format!("={session}");
+            let tmux = |args: &[&str]| util::run("tmux", args, &[], None, Duration::from_secs(5));
+            if lines == 0 {
+                tmux(&["send-keys", "-t", &target, "-X", "cancel"]);
+            } else {
+                let n = lines.unsigned_abs().to_string();
+                if lines > 0 {
+                    tmux(&["copy-mode", "-e", "-t", &target]);
+                    tmux(&["send-keys", "-t", &target, "-X", "-N", &n, "scroll-up"]);
+                } else if tmux(&["display-message", "-p", "-t", &target, "#{pane_in_mode}"]).stdout.trim() == "1" {
+                    tmux(&["send-keys", "-t", &target, "-X", "-N", &n, "scroll-down"]);
+                }
+            }
+            return Ok(json!({}));
+        }
         Call::TermKill { session } => {
             if session.starts_with("sh-") {
                 util::run("tmux", &["kill-session", "-t", &format!("={session}")], &[], None, Duration::from_secs(5));

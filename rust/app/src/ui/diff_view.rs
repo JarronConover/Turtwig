@@ -161,7 +161,16 @@ impl Workspace {
         let note_size = num("note_font_size", 12.);
         let row_files = files.clone();
         let collapsed = self.diff_collapsed.clone();
+        let geom = self.diff_geom.clone();
+        *geom.borrow_mut() = json!({
+            "row_height": row_height,
+            "file_rows": files.iter().zip(starts.iter()).map(|(f, r)| json!({"path": f.path, "row": r})).collect::<Vec<_>>(),
+            "rows": rows.len(),
+        });
         let list = uniform_list("diff-rows", rows.len(), move |range, _, _| {
+            if let Value::Object(o) = &mut *geom.borrow_mut() {
+                o.insert("visible".into(), json!([range.start, range.end]));
+            }
             range
                 .map(|ix| {
                     let base = div().h(px(row_height)).min_w_full().flex().flex_row().items_center().whitespace_nowrap();
@@ -374,5 +383,7 @@ pub(crate) fn inspect(ws: &Workspace) -> Value {
             "path": f.path, "old_path": f.old_path, "status": f.status.to_string(), "adds": f.added, "dels": f.removed,
             "binary": f.binary, "collapsed": ws.diff_collapsed.contains(&f.path),
         })).collect::<Vec<_>>(),
+        // Rows: `visible` [first, end) are drawn, each `row_height` tall, from the top of the diff node.
+        "rows": ws.diff_geom.borrow().clone(),
     })
 }

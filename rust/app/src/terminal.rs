@@ -104,6 +104,8 @@ pub struct TerminalView {
     command: Option<String>,
     /** The tmux session the daemon attached, once open. */
     opened: Option<String>,
+    /** Scrolled back into tmux's history (copy mode) by the wheel. */
+    tmux_scrolled: Cell<bool>,
     size: (u16, u16),
     focus: FocusHandle,
     font: Font,
@@ -144,6 +146,7 @@ impl TerminalView {
             name,
             command,
             opened: None,
+            tmux_scrolled: Cell::new(false),
             size: (cols, rows),
             focus: cx.focus_handle(),
             font: font(ts.font_family.clone()),
@@ -229,7 +232,10 @@ impl TerminalView {
     /** What inspect.json shows about one terminal. */
     pub fn describe(&self, lines: usize) -> Value {
         let cursor = self.term.renderable_content().cursor.point;
+        let (origin, cw, lh) = self.geom.get();
         json!({
+            // Where the grid is drawn, in window points: cell (col, line) is at x + col*cell_w, y + line*cell_h.
+            "grid": {"x": f32::from(origin.x), "y": f32::from(origin.y), "cell_w": f32::from(cw), "cell_h": f32::from(lh)},
             "host": self.host, "session": self.opened.clone().or(self.session.clone()), "term_id": self.term_id,
             "cwd": self.cwd, "command": self.command, "cols": self.size.0, "rows": self.size.1,
             "cursor": {"line": cursor.line.0, "column": cursor.column.0},
@@ -300,10 +306,21 @@ impl TerminalView {
         let to_app = match self.look.wheel.as_str() {
             "off" => return,
             "app" => true,
-            "local" => false,
+            "local" | "tmux" => false,
             _ => mode.intersects(TermMode::MOUSE_MODE),
         };
-        if to_app {
+        // A tmux shell draws on the alternate screen, so its history is tmux's: scroll that (copy mode)
+        // without turning on tmux's mouse mode, which would take drags away from selection here.
+        let tmux_session = self.opened.clone().filter(|s| s.starts_with("sh-") || s.starts_with("chat-"));
+        let via_tmux = !to_app && tmux_session.is_some() && (self.look.wheel == "tmux" || mode.contains(TermMode::ALT_SCREEN));
+        if via_tmux {
+            if let Some(session) = tmux_session {
+                if lines > 0 || self.tmux_scrolled.get() {
+                    self.tmux_scrolled.set(true);
+                    self.remote.send(Call::TermScroll { session, lines });
+                }
+            }
+        } else if to_app {
             let (at, _) = self.cell_at(e.position);
             let (col, row) = (at.column.0 + 1, (at.line.0 + self.term.grid().display_offset() as i32).max(0) as usize + 1);
             let button = if lines > 0 { 64 } else { 65 };
@@ -373,6 +390,12 @@ impl TerminalView {
     }
 
     fn write(&self, bytes: &[u8]) {
+        // Typing while scrolled back in tmux: leave copy mode first, so the keys reach the shell.
+        if self.tmux_scrolled.replace(false) {
+            if let Some(session) = self.opened.clone() {
+                self.remote.send(Call::TermScroll { session, lines: 0 });
+            }
+        }
         if let Some(id) = self.term_id.filter(|id| *id != 0) {
             // The daemon writes `data` to the PTY as is.
             self.remote.send(Call::TermInput { term_id: id, data: String::from_utf8_lossy(bytes).into_owned() });

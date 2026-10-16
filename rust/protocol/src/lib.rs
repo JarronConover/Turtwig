@@ -84,6 +84,9 @@ pub enum Call {
     /** The app's `daemon` settings for this host's daemon and scripts (timings, limits, parsing); sent on
     connect and whenever settings change. */
     Configure { options: Value },
+    /** Scrolls a terminal's tmux history without tmux mouse mode: positive lines go back (entering copy
+    mode), negative come forward; 0 leaves copy mode. */
+    TermScroll { session: String, lines: i32 },
     /** Ends a terminal's tmux session (closing a terminal tab). */
     TermKill { session: String },
     TermInput { term_id: u64, data: String },

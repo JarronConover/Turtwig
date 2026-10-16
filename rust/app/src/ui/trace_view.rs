@@ -742,6 +742,16 @@ pub(crate) fn inspect(ws: &crate::workspace::Workspace) -> serde_json::Value {
             serde_json::json!({
                 "total": t.items.len(), "start": t.start, "lines": t.lines, "revision": t.revision,
                 "waiting_results": t.orphan_count(),
+                "rows": ws.lists.get(chat).map(|l| {
+                    // Each row drawn now: its block (one:ITEM / steps:N / pending) and window bounds.
+                    let kinds = l.kinds();
+                    (0..l.state.item_count())
+                        .filter_map(|ix| l.state.bounds_for_item(ix).map(|b| serde_json::json!({
+                            "row": ix, "kind": kinds.get(ix), "x": f32::from(b.origin.x), "y": f32::from(b.origin.y),
+                            "w": f32::from(b.size.width), "h": f32::from(b.size.height),
+                        })))
+                        .collect::<Vec<_>>()
+                }),
                 "items": items, "expanded": expanded, "background": background, "finished": t.finished_count(),
                 "attachments": ws.attachments_json(chat),
             }),

@@ -1250,8 +1250,8 @@
             }
           ]
         },
-        { "if": "(.state.bottom_tab == \"changes\" and .state.changes_place != \"right\") | not", "type": "terminal", "style": { "grow": 1, "min_height": 0 } },
-        { "if": "(.state.bottom_tab == \"changes\" and .state.changes_place != \"right\")", "type": "diff", "style": { "grow": 1, "min_height": 0, "border_top": 1, "border_color": "@line" } }
+        { "if": "(.state.bottom_tab == \"changes\" and .state.changes_place != \"right\") | not", "id": "terminal-view", "type": "terminal", "style": { "grow": 1, "min_height": 0 } },
+        { "if": "(.state.bottom_tab == \"changes\" and .state.changes_place != \"right\")", "id": "bottom-diff", "type": "diff", "style": { "grow": 1, "min_height": 0, "border_top": 1, "border_color": "@line" } }
       ]
     },
 
@@ -1298,7 +1298,7 @@
             {
               "type": "column",
               "style": { "grow": 1, "min_height": 0, "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" },
-              "children": [{ "type": "diff", "style": { "grow": 1, "min_height": 0 } }]
+              "children": [{ "id": "panel-diff", "type": "diff", "style": { "grow": 1, "min_height": 0 } }]
             }
           ]
         },
@@ -1621,8 +1621,9 @@
     "cursor": { "shape": "block", "focused_alpha": 0.75, "unfocused_alpha": 0.3 },
     "size": { "cols": 100, "rows": 30 },
     "scrollback": 10000,
-    // The wheel: "auto" (to the program when it asks for the mouse, e.g. tmux with daemon.terminal_mouse; else
-    // this view's own scrollback), "local", "app", or "off".
+    // The wheel: "auto" (to the program when it asks for the mouse; in a tmux shell, tmux's own history,
+    // without tmux's mouse mode so drags still select here; else this view's scrollback), "tmux", "local",
+    // "app", or "off". Typing while scrolled back returns to the prompt.
     "wheel": "auto", "wheel_lines": 1,
     // Drag to select (double-click a word, triple-click a line); copy_key copies it.
     "select": true, "selection": "#3a425299", "copy_key": "cmd-c",
@@ -1649,6 +1650,11 @@
     }
   },
 
+  // A picture behind the whole window: a file (absolute, ~/, or in the settings folder) or URL; fit
+  // cover | contain | fill | scale_down | none; dim lays a color over it. Panels need see-through colors
+  // in `theme` (e.g. "#2e2218cc") for it to show.
+  "background": { "image": null, "fit": "cover", "opacity": 1, "dim": null },
+
   // The window: title, starting size, the traffic lights' position, and the component kit's look
   // ("dark" | "light" | "system"; the app's own colors are `theme`). Read at launch.
   "window": { "title": "a.box", "width": 1500, "height": 940, "traffic_lights": { "x": 20, "y": 15 }, "appearance": "dark" },
@@ -1664,7 +1670,8 @@
     "waiting": "The agent is waiting for you", "waiting_cancel": "Cancel", "drop_to_attach": "Drop to attach to {chat}", "drag_move_to": "Move to {name}",
     "the_designer": "the designer", "this_chat": "this chat", "a_file": "a file", "n_files": "{n} files",
     "attaching": "Attaching {what} to {chat}", "attach_failed": "Couldn't attach: {error}", "upload_failed": "Upload failed: {error}",
-    "dialog_save": "Save", "dialog_name": "Name", "settings_title": "Settings",
+    "dialog_save": "Save", "dialog_name": "Name", "settings_title": "Settings", "new_section_title": "New section",
+    "menu_settings": "Settings…", "menu_palette": "Command Palette", "menu_quit": "Quit {app}",
     "settings_intro": "Everything about the app is here. Your file is merged over the built-in defaults; set a key to null to remove a default. Reference for you and agents: {docs}",
     "diff.select_worktree": "Select a worktree", "diff.no_changes": "No changes", "diff.loading": "Loading changes…", "diff.binary": "Binary file",
     "diff.more_lines": "{n} more lines; open the file to see them"
@@ -1680,6 +1687,10 @@
   "palette": { "placeholder": "Type a command or a worktree…", "worktrees": true, "worktree_label": "Go to {title}" },
 
   "settings_editor": { "width": 760 },
+
+  // The macOS menu bar: `app` items join the a.box menu; each of `menus` is a menu of its own.
+  // Items are {label, do} or {separator: true}.
+  "menu_bar": { "app": [], "menus": [] },
 
   "sidebar": {
     // Which status a worktree shows when several apply (idle when none).

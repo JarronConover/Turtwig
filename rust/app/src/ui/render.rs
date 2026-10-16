@@ -42,6 +42,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("scroll", "A scrolling container. `props.axis`: y (default) | x | both. `props.virtual`: true builds only the children on screen (each `for` item is one row), for long lists."),
     ("text", "Text. `props.text` (templates allowed); a plain string node is shorthand for this."),
     ("icon", "A Lucide icon. `props.name` (e.g. git-branch, panel-left, plus), `props.size` (points), `props.spin` (bool)."),
+    ("image", "A picture: `props.src` (a file: absolute, ~/, or relative to the settings folder; or an http(s) URL) and `props.fit` (cover, contain, fill, scale_down, none). Size it with `style`; settings `background` puts one behind the whole window."),
     ("logo", "The app's logo (settings `logo`) at `props.size` (24). Any `logo` key in props overrides it for this node, e.g. `{\"tile\": null}` for bare art."),
     ("input", "A one-line text field bound to a state key: `props.state` (key), `props.placeholder`, `props.autofocus`, `props.appearance` (false: no border). Read the text as `.state.<key>`. Or `props.value` (follows the context while the field isn't focused) with `on.submit` (an action run on Enter, with the text as `.input`)."),
     ("spinner", "A loading spinner. `props.size`: xsmall | small | medium | large."),
@@ -223,6 +224,12 @@ impl Workspace {
                 } else {
                     vec![icon.into_any_element()]
                 }
+            }
+            "image" => {
+                // props: src (a file or URL), fit (cover | contain | fill | scale_down | none). Size it with style.
+                let src = props.get("src").map(value_text).unwrap_or_default();
+                let fit = props.get("fit").and_then(Value::as_str).unwrap_or("cover").to_string();
+                if src.is_empty() { vec![] } else { vec![crate::workspace::image_element(&src, &fit).size_full().into_any_element()] }
             }
             "logo" => {
                 let size = props.get("size").and_then(Value::as_f64).unwrap_or(24.) as f32;

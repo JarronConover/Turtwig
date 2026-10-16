@@ -93,16 +93,7 @@ fn main() {
         };
         gpui_kit::component::Theme::change(mode, None, cx);
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
-        cx.set_menus([Menu {
-            name: "a.box".into(),
-            items: vec![
-                MenuItem::action("Settings…", workspace::OpenSettings),
-                MenuItem::action("Command Palette", workspace::Palette),
-                MenuItem::separator(),
-                MenuItem::action("Quit a.box", workspace::Quit),
-            ],
-            disabled: false,
-        }]);
+        workspace::set_menu_bar(&settings::load().unwrap_or_default(), cx);
         open_main(cx);
     });
 }

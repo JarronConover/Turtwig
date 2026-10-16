@@ -20,6 +20,60 @@ use std::time::Duration;
 
 actions!(agent_box, [Quit, OpenSettings, Palette]);
 
+/** A settings `menu_bar` item, by its place in the list built from settings. */
+#[derive(Action, Clone, PartialEq, serde::Deserialize)]
+#[action(namespace = agent_box, no_json)]
+pub struct MenuBarItem {
+    pub index: usize,
+}
+
+thread_local! {
+    static MENU_ACTIONS: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(vec![]) };
+}
+
+/** The macOS menu bar: the a.box menu (Settings, Command Palette, settings `menu_bar.app` items, Quit),
+then each of `menu_bar.menus` ({name, items: [{label, do} | {separator: true}]}). */
+pub fn set_menu_bar(settings: &Settings, cx: &mut App) {
+    let mut actions: Vec<Value> = vec![];
+    let items_of = |list: Option<&Value>, actions: &mut Vec<Value>| -> Vec<MenuItem> {
+        list.and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|it| {
+                        if it.get("separator").and_then(Value::as_bool) == Some(true) {
+                            MenuItem::separator()
+                        } else {
+                            actions.push(it.get("do").cloned().unwrap_or(Value::Null));
+                            let label = it.get("label").and_then(Value::as_str).unwrap_or("").to_string();
+                            MenuItem::action(label, MenuBarItem { index: actions.len() - 1 })
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let app_name = settings.text("app_name", "a.box");
+    let mut app_items = vec![
+        MenuItem::action(settings.text("menu_settings", "Settings…"), OpenSettings),
+        MenuItem::action(settings.text("menu_palette", "Command Palette"), Palette),
+    ];
+    let extra = items_of(settings.get("menu_bar.app"), &mut actions);
+    if !extra.is_empty() {
+        app_items.push(MenuItem::separator());
+        app_items.extend(extra);
+    }
+    app_items.push(MenuItem::separator());
+    app_items.push(MenuItem::action(settings.text("menu_quit", "Quit {app}").replace("{app}", &app_name), Quit));
+    let mut menus = vec![Menu { name: app_name.into(), items: app_items, disabled: false }];
+    for m in settings.get("menu_bar.menus").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let name = m.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        let items = items_of(m.get("items"), &mut actions);
+        menus.push(Menu { name: name.into(), items, disabled: false });
+    }
+    MENU_ACTIONS.with(|a| *a.borrow_mut() = actions);
+    cx.set_menus(menus);
+}
+
 pub struct Drag {
     pub key: String,
     pub vertical: bool,
@@ -156,6 +210,8 @@ pub struct Workspace {
     badge: Option<String>,
     dock_icon: Option<Vec<u8>>,
     pub(crate) diff_collapsed: HashSet<String>,
+    /** Where the diff's rows are: first and last row drawn, row height, each file's header row (inspect.json). */
+    pub(crate) diff_geom: std::rc::Rc<std::cell::RefCell<Value>>,
     pub(crate) diff_scroll: UniformListScrollHandle,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
@@ -326,6 +382,7 @@ impl Workspace {
             badge: None,
             dock_icon: None,
             diff_collapsed: HashSet::new(),
+            diff_geom: Default::default(),
             diff_scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             _tasks: [watch, env_push, designer_listen].into_iter().chain(listeners).chain(clicks).collect(),
@@ -617,6 +674,7 @@ impl Workspace {
                 self.state.extend(self.user_state.clone());
                 self.settings = s;
                 crate::transcript::set_options(&self.settings.chat);
+                set_menu_bar(&self.settings, cx);
                 self.settings_error = None;
                 self.exprs = Exprs::default();
                 self.configure_motion();
@@ -1518,6 +1576,25 @@ impl Workspace {
         self.settings.get("format.age").cloned().unwrap_or(Value::Null)
     }
 
+    /** Settings `background`: {image, fit, opacity, dim}: a picture behind the whole window (give panels
+    see-through colors in `theme` so it shows). */
+    fn background_layer(&self) -> Option<AnyElement> {
+        let b = self.settings.get("background")?;
+        let src = b.get("image").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+        let theme = &self.settings.theme;
+        let fit = b.get("fit").and_then(Value::as_str).unwrap_or("cover");
+        let opacity = b.get("opacity").and_then(Value::as_f64).unwrap_or(1.) as f32;
+        let dim = b.get("dim").and_then(|d| style::color(d, theme));
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .child(image_element(src, fit).size_full().opacity(opacity))
+                .when_some(dim, |d, c| d.child(div().absolute().inset_0().bg(c)))
+                .into_any_element(),
+        )
+    }
+
     /** A user-facing string: settings `strings.KEY` (else `default`), with `{name}` filled from `vars`. */
     pub(crate) fn tr(&self, key: &str, default: &str, vars: &[(&str, &str)]) -> String {
         let mut t = self.settings.text(key, default);
@@ -1885,20 +1962,16 @@ impl Workspace {
     }
 
     pub(crate) fn new_section(&mut self, assign: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        self.name_dialog("New section", "", window, cx, move |ws, name, cx| {
+        let title = self.tr("new_section_title", "New section", &[]);
+        self.name_dialog(&title, "", window, cx, move |ws, name, cx| {
             let remote = assign.as_deref().map(|p| ws.remote_for_host(&ws.host_of_path(p))).unwrap_or_else(|| ws.remote.clone());
             let assign = assign.clone();
-            cx.spawn(async move |this, cx| {
-                if remote.call(Call::SectionCreate { name: name.clone() }).await.is_ok() {
-                    if let Some(path) = assign {
-                        for _ in 0..10 {
-                            let id = this.update(cx, |ws, _| ws.model.sections.iter().find(|s| s.name == name).map(|s| s.id.clone())).ok().flatten();
-                            if let Some(id) = id {
-                                let _ = remote.call(Call::SectionAssign { path, section: Some(id) }).await;
-                                break;
-                            }
-                            cx.background_executor().timer(Duration::from_millis(300)).await;
-                        }
+            cx.spawn(async move |_, _| {
+                // The new section's id comes back with it, so the worktree moves in right away.
+                if let Ok(v) = remote.call(Call::SectionCreate { name }).await {
+                    let id = v["response"]["section_id"].as_str().or(v["section_id"].as_str()).map(str::to_string);
+                    if let (Some(path), Some(id)) = (assign, id) {
+                        let _ = remote.call(Call::SectionAssign { path, section: Some(id) }).await;
                     }
                 }
             })
@@ -2158,6 +2231,7 @@ impl Workspace {
         let added = blocks.len().saturating_sub(l.blocks.len());
         l.state.reset(blocks.len());
         l.state.scroll_to(ListOffset { item_ix: top.item_ix + added, offset_in_item: top.offset_in_item });
+        l.sigs = blocks.iter().map(|b| block_sig(&t.items, b)).collect();
         l.blocks = std::rc::Rc::new(blocks);
         (l.rev, l.items) = (t.revision, t.items.len());
     }
@@ -2177,14 +2251,17 @@ impl Workspace {
             if follow != "never" {
                 state.set_follow_mode(FollowMode::Tail);
             }
-            TranscriptList { state, blocks: Default::default(), rev: u64::MAX, working: false, items: 0, unseen: false }
+            TranscriptList { state, blocks: Default::default(), sigs: vec![], rev: u64::MAX, working: false, items: 0, unseen: false }
         });
         if l.rev != rev || l.working != working {
             let Some(t) = self.transcripts.get(chat_id) else { return l.state.clone() };
             let blocks = crate::ui::trace_view::blocks_of(&t.items, working);
+            let sigs: Vec<u64> = blocks.iter().map(|b| block_sig(&t.items, b)).collect();
             let (old, new) = (l.blocks.len(), blocks.len());
             if len >= l.items && l.rev != u64::MAX {
-                let keep = old.saturating_sub(2).min(new);
+                // Re-measure from the first row whose content changed (a late tool result can change an
+                // older row), not just the last two.
+                let keep = l.sigs.iter().zip(&sigs).take_while(|(a, b)| a == b).count().min(old).min(new);
                 l.state.splice(keep..old, new - keep);
             } else {
                 l.state.reset(new);
@@ -2200,6 +2277,7 @@ impl Workspace {
                 l.state.set_follow_mode(FollowMode::Tail);
             }
             l.blocks = std::rc::Rc::new(blocks);
+            l.sigs = sigs;
             (l.rev, l.working, l.items) = (rev, working, len);
         }
         if l.state.is_following_tail() {
@@ -2594,6 +2672,13 @@ impl Render for Workspace {
             .on_key_down(cx.listener(Self::type_to_focus))
             .on_action(cx.listener(|ws, _: &OpenSettings, w, cx| ws.open_settings(w, cx)))
             .on_action(cx.listener(|ws, _: &Palette, w, cx| ws.open_palette(w, cx)))
+            .on_action(cx.listener(|ws, item: &MenuBarItem, w, cx| {
+                if let Some(action) = MENU_ACTIONS.with(|a| a.borrow().get(item.index).cloned()) {
+                    let ctx = ws.context();
+                    let action = ws.exprs.resolve_action(&action, &ctx);
+                    ws.run_action(&action, w, cx);
+                }
+            }))
             .on_mouse_move(cx.listener(|ws, e: &MouseMoveEvent, _, cx| {
                 if let Some(d) = &ws.drag {
                     let pos = if d.vertical { f32::from(e.position.y) } else { f32::from(e.position.x) };
@@ -2613,6 +2698,8 @@ impl Render for Workspace {
                     ws.save_state();
                 }
             }))
+            .relative()
+            .children(self.background_layer())
             .child(body)
             .child(frame_end)
     }
@@ -2697,6 +2784,8 @@ pub(crate) struct OpenDialog {
 pub(crate) struct TranscriptList {
     pub(crate) state: ListState,
     blocks: std::rc::Rc<Vec<crate::ui::trace_view::Block>>,
+    /** A fingerprint of each row's content, to tell which rows changed. */
+    sigs: Vec<u64>,
     rev: u64,
     working: bool,
     items: usize,
@@ -2828,4 +2917,42 @@ pub(crate) fn waiting_options(w: &Value, settings: &Settings) -> (Vec<String>, V
     let all = settings.get("chat.waiting_all_questions").and_then(Value::as_bool).unwrap_or(true);
     let questions = if all && qs.len() > 1 { qs.iter().filter_map(|q| q["question"].as_str().map(str::to_string)).collect() } else { vec![] };
     (options, questions)
+}
+
+/** A picture from a file (absolute, ~/, or relative to the settings folder) or a URL, fit "cover" |
+"contain" | "fill" | "scale_down" | "none". */
+pub(crate) fn image_element(src: &str, fit: &str) -> Img {
+    let fit = match fit {
+        "contain" => ObjectFit::Contain,
+        "fill" => ObjectFit::Fill,
+        "scale_down" => ObjectFit::ScaleDown,
+        "none" => ObjectFit::None,
+        _ => ObjectFit::Cover,
+    };
+    let el = if src.starts_with("http://") || src.starts_with("https://") {
+        img(SharedUri::from(src.to_string()))
+    } else {
+        let p = std::path::PathBuf::from(crate::script::expand(src));
+        img(if p.is_absolute() { p } else { settings::dir().join(p) })
+    };
+    el.object_fit(fit)
+}
+
+/** A cheap fingerprint of what a transcript row shows: its items' kinds, text lengths and results. */
+fn block_sig(items: &[Item], b: &crate::ui::trace_view::Block) -> u64 {
+    use crate::ui::trace_view::Block;
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut one = |i: usize| match items.get(i) {
+        Some(Item::Tool { id, result, is_error, .. }) => (1u8, id.len(), result.as_ref().map(|r| r.len() + 1).unwrap_or(0), *is_error).hash(&mut h),
+        Some(Item::User { text }) | Some(Item::Assistant { text }) | Some(Item::Thinking { text }) | Some(Item::Notice { text }) => (2u8, i, text.len()).hash(&mut h),
+        Some(Item::Image { data, .. }) => (3u8, data.len()).hash(&mut h),
+        None => 0u8.hash(&mut h),
+    };
+    match b {
+        Block::One(i) => one(*i),
+        Block::Steps(v) => v.iter().for_each(|i| one(*i)),
+        Block::Pending(t) => t.hash(&mut h),
+    }
+    h.finish()
 }
