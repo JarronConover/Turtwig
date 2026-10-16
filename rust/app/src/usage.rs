@@ -1,21 +1,32 @@
-/*! What chats cost (each daemon's token counts at models.dev rates, or settings `usage.rates`) and how
-much of the Claude plan is left (Claude Code's OAuth usage, as its status line caches it). */
+/*! What chats cost and how much of each plan is left, for every provider in settings `usage.providers`
+(Claude Code on Anthropic, Codex on OpenAI, ...). Costs: each daemon's token counts at models.dev rates
+(or settings `usage.rates`). Plans: Claude Code's OAuth usage cache, and the rate limits Codex writes
+into its rollouts. */
 
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+
+pub struct Session {
+    pub host: String,
+    /** The real folder it ran in. */
+    pub dir: String,
+    pub cost: f64,
+    pub provider: String,
+}
 
 #[derive(Default)]
 pub struct Usage {
     /** Each host's last `Usage` reply. */
     pub raw: HashMap<String, Value>,
-    /** Model id -> {input, output, cache_read, cache_write, tiers} in dollars per million tokens. */
+    /** models.dev provider -> model id -> {input, output, cache_read, cache_write, tiers} in dollars per million tokens. */
     pub rates: Map<String, Value>,
     pub rates_updated: Option<String>,
-    /** Session id -> (host, real folder, cost, last activity). */
-    pub sessions: HashMap<String, (String, String, f64, String)>,
-    pub windows: [f64; 4],
+    pub sessions: HashMap<String, Session>,
+    /** Provider -> cost in the last 7, 30 and 90 days and ever. */
+    pub windows: HashMap<String, [f64; 4]>,
     pub unpriced: (u64, Vec<String>),
-    pub plan: Value,
+    /** Claude Code's limits and when its cache was written. */
+    pub claude_plan: Vec<Value>,
     pub plan_updated: Option<f64>,
     pub loading: bool,
 }
@@ -24,8 +35,32 @@ fn real(p: &str) -> String {
     std::fs::canonicalize(p).map(|x| x.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string())
 }
 
+fn now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.)
+}
+
+/** "Session" for windows under a day, "Daily", "Weekly", else the length. */
+fn window_name(minutes: f64) -> String {
+    match minutes as u64 {
+        0..=1439 => "Session".into(),
+        1440 => "Daily".into(),
+        10080 => "Weekly".into(),
+        m if m % 1440 == 0 => format!("{} days", m / 1440),
+        m => format!("{}h", m / 60),
+    }
+}
+
+fn limit(provider: &str, name: String, kind: &str, minutes: f64, used: f64, resets: Option<f64>) -> Value {
+    // A window that has reset since the numbers were written starts over.
+    let used = if resets.is_some_and(|t| t < now()) { 0. } else { used };
+    json!({
+        "provider": provider, "name": name, "kind": kind, "window_minutes": minutes,
+        "used": used, "left": (100. - used).max(0.), "resets_at": resets, "resets_in": resets.map(|t| duration_text(t - now())),
+    })
+}
+
 impl Usage {
-    fn rate(&self, overrides: &Map<String, Value>, model: &str) -> Option<Value> {
+    fn rate(&self, overrides: &Map<String, Value>, provider: &str, model: &str) -> Option<Value> {
         let base = model.split('[').next().unwrap_or(model);
         let pick = |m: &Map<String, Value>| {
             m.get(base).cloned().or_else(|| {
@@ -34,24 +69,24 @@ impl Usage {
                 keys.first().and_then(|k| m.get(*k)).cloned()
             })
         };
-        pick(overrides).or_else(|| pick(&self.rates))
+        let own = self.rates.get(provider).and_then(Value::as_object);
+        pick(overrides).or_else(|| own.and_then(pick)).or_else(|| self.rates.values().filter_map(Value::as_object).find_map(pick))
     }
 
-    /** Dollars for one row: [model, day, size_class, input, output, write_5m, write_1h, read]. */
-    fn row_cost(&self, overrides: &Map<String, Value>, row: &[Value]) -> Option<f64> {
+    /** Dollars for one row: [model, day, size, input, output, write_5m, write_1h, read], where size is the
+    smallest prompt size in its bucket (0, 1 and 2 from older daemons: up to 100k, 200k, more). */
+    fn row_cost(&self, overrides: &Map<String, Value>, provider: &str, row: &[Value]) -> Option<f64> {
         let model = row.first()?.as_str()?;
-        let mut c = self.rate(overrides, model)?;
-        let size = row.get(2)?.as_u64().unwrap_or(0);
+        let mut c = self.rate(overrides, provider, model)?;
+        let size = match row.get(2)?.as_u64().unwrap_or(0) {
+            1 => 100_001,
+            2 => 200_001,
+            n => n,
+        };
         // Long prompts can cost more (`tiers`: a context size and its rates).
         if let Some(tiers) = c.get("tiers").and_then(Value::as_array).cloned() {
             for t in tiers {
-                let limit = t.pointer("/tier/size").and_then(Value::as_u64).unwrap_or(u64::MAX);
-                let over = match size {
-                    0 => false,
-                    1 => limit <= 100_000,
-                    _ => limit <= 200_000,
-                };
-                if over {
+                if size > t.pointer("/tier/size").and_then(Value::as_u64).unwrap_or(u64::MAX) {
                     c = t;
                 }
             }
@@ -67,25 +102,27 @@ impl Usage {
     /** Re-prices everything after new usage or rates. */
     pub fn recompute(&mut self, overrides: &Map<String, Value>) {
         let today = chrono_today();
-        let mut windows = [0.; 4];
-        let mut sessions = HashMap::new();
+        let mut windows: HashMap<String, [f64; 4]> = HashMap::new();
+        let mut sessions: HashMap<String, Session> = HashMap::new();
         let (mut unpriced, mut unpriced_models): (u64, Vec<String>) = (0, vec![]);
         for (host, v) in &self.raw {
             for s in v["sessions"].as_array().into_iter().flatten() {
                 let id = s["id"].as_str().unwrap_or("").to_string();
+                let provider = s["provider"].as_str().unwrap_or("anthropic").to_string();
                 let dir = s["dir"].as_str().map(|d| if host == "mac" { real(d) } else { d.to_string() }).unwrap_or_default();
                 let mut cost = 0.;
                 for row in s["tokens"].as_array().into_iter().flatten().filter_map(Value::as_array) {
-                    match self.row_cost(overrides, row) {
+                    match self.row_cost(overrides, &provider, row) {
                         Some(c) => {
                             cost += c;
+                            let w = windows.entry(provider.clone()).or_default();
                             let age = row.get(1).and_then(Value::as_str).and_then(days_since(&today)).unwrap_or(i64::MAX);
                             for (k, days) in [7, 30, 90].iter().enumerate() {
                                 if age < *days {
-                                    windows[k] += c;
+                                    w[k] += c;
                                 }
                             }
-                            windows[3] += c;
+                            w[3] += c;
                         }
                         None => {
                             unpriced += (3..8).map(|i| row.get(i).and_then(Value::as_u64).unwrap_or(0)).sum::<u64>();
@@ -96,9 +133,7 @@ impl Usage {
                         }
                     }
                 }
-                let last = s["last"].as_str().unwrap_or("").to_string();
-                let e = sessions.entry(id).or_insert((host.clone(), dir, 0., last));
-                e.2 += cost;
+                sessions.entry(id).or_insert(Session { host: host.clone(), dir, cost: 0., provider }).cost += cost;
             }
         }
         self.windows = windows;
@@ -106,83 +141,146 @@ impl Usage {
         self.unpriced = (unpriced, unpriced_models);
     }
 
-    /** `.usage` in the context: totals for the chat, its worktree and the worktree's tabs, then every
-    conversation by window, and the plan's limits. */
-    pub fn context(&self, chat: Option<&str>, worktree: Option<(&str, &str)>, tabs: &[(String, String)], meter: &MeterOptions) -> Value {
+    /** `.usage` in the context: totals for the chat, its worktree and the worktree's tabs, every
+    conversation by window (in all and per provider), and each provider's plan. */
+    pub fn context(&self, chat: Option<&str>, worktree: Option<(&str, &str)>, tabs: &[(String, String)], providers: &Map<String, Value>, meter: &MeterOptions) -> Value {
         let money = |x: f64| format!("${}", thousands(x));
-        let chat_cost = chat.and_then(|c| self.sessions.get(c)).map(|s| s.2).unwrap_or(0.);
+        let chat_cost = chat.and_then(|c| self.sessions.get(c)).map(|s| s.cost).unwrap_or(0.);
         let wt_cost: f64 = worktree
             .map(|(host, path)| {
                 let p = if host == "mac" { real(path) } else { path.to_string() };
-                self.sessions.values().filter(|s| s.0 == host && s.1 == p).map(|s| s.2).sum()
+                self.sessions.values().filter(|s| s.host == host && s.dir == p).map(|s| s.cost).sum()
             })
             .unwrap_or(0.);
+        let mut all = [0.; 4];
+        for w in self.windows.values() {
+            for (a, b) in all.iter_mut().zip(w) {
+                *a += b;
+            }
+        }
+        let plans = self.plans(providers);
+        let by_provider: Vec<Value> = providers
+            .iter()
+            .filter(|(id, _)| self.windows.contains_key(*id))
+            .map(|(id, p)| {
+                let w = self.windows[id];
+                json!({
+                    "id": id, "name": p["name"].as_str().unwrap_or(id), "icon": p["icon"], "color": p["color"],
+                    "last_7": w[0], "last_7_text": money(w[0]), "last_30": w[1], "last_30_text": money(w[1]),
+                    "last_90": w[2], "last_90_text": money(w[2]), "lifetime": w[3], "lifetime_text": money(w[3]),
+                })
+            })
+            .collect();
         json!({
             "loading": self.loading,
             "chat": chat_cost, "chat_text": money(chat_cost),
+            "chat_provider": chat.and_then(|c| self.sessions.get(c)).map(|s| s.provider.clone()),
             "worktree": wt_cost, "worktree_text": money(wt_cost),
             "tabs": tabs.iter().map(|(id, name)| {
-                let c = self.sessions.get(id).map(|s| s.2).unwrap_or(0.);
+                let c = self.sessions.get(id).map(|s| s.cost).unwrap_or(0.);
                 json!({"id": id, "name": name, "cost": c, "cost_text": money(c)})
             }).collect::<Vec<_>>(),
-            "last_7": self.windows[0], "last_7_text": money(self.windows[0]),
-            "last_30": self.windows[1], "last_30_text": money(self.windows[1]),
-            "last_90": self.windows[2], "last_90_text": money(self.windows[2]),
-            "lifetime": self.windows[3], "lifetime_text": money(self.windows[3]),
+            "last_7": all[0], "last_7_text": money(all[0]),
+            "last_30": all[1], "last_30_text": money(all[1]),
+            "last_90": all[2], "last_90_text": money(all[2]),
+            "lifetime": all[3], "lifetime_text": money(all[3]),
+            "providers": by_provider,
             "unpriced_tokens": self.unpriced.0, "unpriced_models": self.unpriced.1,
             "rates_updated": self.rates_updated,
-            "plan": self.plan_with_meters(meter),
+            "plan": self.plan_with_meters(&plans, meter),
+            "plans": plans,
         })
     }
 
-    /** `.plan` plus the gauge: `meter` for the chosen mode, `meters` for every mode (the picker's previews). */
-    fn plan_with_meters(&self, o: &MeterOptions) -> Value {
-        let mut plan = self.plan.clone();
-        let limits: Vec<Value> = plan["limits"].as_array().into_iter().flatten().map(|l| o.decorate(l.clone())).collect();
-        plan["limits"] = json!(limits);
-        let shown = |mode: &str| meter(&limits, mode).unwrap_or(Value::Null);
-        if let Some(p) = plan.as_object_mut() {
-            p.insert("meter_mode".into(), json!(o.mode));
-            p.insert("meter".into(), shown(&o.mode));
-            p.insert("meters".into(), json!({ "smart": shown("smart"), "session": shown("session"), "weekly": shown("weekly") }));
+    /** Each provider's plan: `{provider, name, icon, color, limits, updated, updated_text}`, for those
+    with a `plan` source (`claude_oauth` or `codex_rollouts`) and numbers to show. */
+    fn plans(&self, providers: &Map<String, Value>) -> Vec<Value> {
+        let mut out = vec![];
+        for (id, p) in providers {
+            let (limits, updated) = match p["plan"].as_str() {
+                Some("claude_oauth") => (self.claude_plan.iter().map(|l| { let mut l = l.clone(); l["provider"] = json!(id); l }).collect(), self.plan_updated),
+                Some("codex_rollouts") => self.codex_plan(id),
+                _ => continue,
+            };
+            if limits.is_empty() {
+                continue;
+            }
+            let name = p["name"].as_str().unwrap_or(id);
+            let limits: Vec<Value> = limits.into_iter().map(|mut l| { l["provider_name"] = json!(name); l }).collect();
+            out.push(json!({
+                "provider": id, "name": name, "icon": p["icon"], "color": p["color"], "limits": limits,
+                "updated": updated, "updated_text": updated.map(|t| format!("{} ago", duration_text(now() - t))),
+            }));
         }
-        plan
+        out
     }
 
-    /** The plan's limits from Claude Code's OAuth usage cache: [{name, used, left, resets_at, resets_in, severity}]. */
-    pub fn load_plan(&mut self) {
-        let path = crate::script::expand("~/.claude/oauth-usage-cache.json");
+    /** The newest rate limits any host's Codex rollouts hold: its primary and secondary windows. */
+    fn codex_plan(&self, provider: &str) -> (Vec<Value>, Option<f64>) {
+        let newest = self
+            .raw
+            .values()
+            .flat_map(|v| v["plans"].as_array().cloned().unwrap_or_default())
+            .filter(|p| p["provider"] == "openai")
+            .max_by(|a, b| a["at"].as_str().unwrap_or("").cmp(b["at"].as_str().unwrap_or("")));
+        let Some(p) = newest else { return (vec![], None) };
+        let limits = ["primary", "secondary"]
+            .iter()
+            .filter_map(|k| {
+                let w = p["rate_limits"].get(*k).filter(|w| w.is_object())?;
+                let minutes = w["window_minutes"].as_f64().unwrap_or(0.);
+                Some(limit(provider, window_name(minutes), k, minutes, w["used_percent"].as_f64().unwrap_or(0.), w["resets_at"].as_f64()))
+            })
+            .collect();
+        (limits, p["at"].as_str().and_then(parse_rfc3339))
+    }
+
+    /** `.plan`: every provider's limits in one list, plus the gauge: `meter` for the chosen mode and
+    `meters` for every mode (the picker's previews), over the providers in `usage.meter_providers`. */
+    fn plan_with_meters(&self, plans: &[Value], o: &MeterOptions) -> Value {
+        let limits: Vec<Value> = plans.iter().flat_map(|p| p["limits"].as_array().cloned().unwrap_or_default()).map(|l| o.decorate(l)).collect();
+        let counted: Vec<Value> = limits.iter().filter(|l| o.providers.as_ref().is_none_or(|ps| ps.iter().any(|p| l["provider"] == p.as_str()))).cloned().collect();
+        let shown = |mode: &str| meter(&counted, mode).unwrap_or(Value::Null);
+        let updated = plans.iter().filter_map(|p| p["updated"].as_f64()).reduce(f64::max);
+        json!({
+            "limits": limits,
+            "updated": updated, "updated_text": updated.map(|t| format!("{} ago", duration_text(now() - t))),
+            "meter_mode": o.mode, "meter": shown(&o.mode),
+            "meters": { "smart": shown("smart"), "session": shown("session"), "weekly": shown("weekly") },
+        })
+    }
+
+    /** Claude Code's limits from its OAuth usage cache. */
+    pub fn load_plan(&mut self, path: &str) {
+        let path = crate::script::expand(path);
         let Ok(text) = std::fs::read_to_string(&path) else { return };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
-        let limits: Vec<Value> = v["limits"]
+        self.claude_plan = v["limits"]
             .as_array()
             .into_iter()
             .flatten()
             .map(|l| {
-                let used = l["percent"].as_f64().unwrap_or(0.);
-                let name = match l["kind"].as_str().unwrap_or("") {
-                    "session" => "Session".to_string(),
-                    "weekly_all" => "Weekly".to_string(),
+                let kind = l["kind"].as_str().unwrap_or("");
+                let minutes = if kind == "session" { 300. } else if kind.starts_with("weekly") { 10080. } else { 0. };
+                let name = match kind {
                     "weekly_scoped" => format!("Weekly · {}", l.pointer("/scope/model/display_name").and_then(Value::as_str).unwrap_or("model")),
+                    _ if minutes > 0. => window_name(minutes),
                     other => other.replace('_', " "),
                 };
-                let resets = l["resets_at"].as_str().and_then(parse_rfc3339);
-                json!({
-                    "name": name, "kind": l["kind"], "used": used, "left": (100. - used).max(0.), "severity": l["severity"],
-                    "resets_at": l["resets_at"], "resets_in": resets.map(|t| duration_text(t - now)),
-                })
+                let mut out = limit("", name, kind, minutes, l["percent"].as_f64().unwrap_or(0.), l["resets_at"].as_str().and_then(parse_rfc3339));
+                out["severity"] = l["severity"].clone();
+                out
             })
             .collect();
-        let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64());
-        self.plan_updated = mtime;
-        self.plan = json!({"limits": limits, "updated": mtime, "updated_text": mtime.map(|t| format!("{} ago", duration_text(now - t)))});
+        self.plan_updated = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64());
     }
 }
 
 /** Settings `usage.meter` (or state `usage_meter`) and `usage.meter_levels`. */
 pub struct MeterOptions {
     pub mode: String,
+    /** Only these providers' limits drive the gauge (None: all). */
+    pub providers: Option<Vec<String>>,
     pub warning_below: f64,
     pub danger_below: f64,
 }
@@ -198,17 +296,16 @@ impl MeterOptions {
 }
 
 /** The limit a meter mode reports: smart is the one closest to running out, session the shortest
-window, weekly the longest (the all-models week before a per-model one). */
+window, weekly the longest; ties go to the one with less left. */
 pub fn meter(limits: &[Value], mode: &str) -> Option<Value> {
-    let left = |l: &&Value| l["left"].as_f64().unwrap_or(100.);
-    let least = |it: Vec<&Value>| it.into_iter().min_by(|a, b| left(a).total_cmp(&left(b))).cloned();
-    let kind = |k: &str| limits.iter().find(|l| l["kind"] == k).cloned();
-    let weekly = || kind("weekly_all").or_else(|| least(limits.iter().filter(|l| l["kind"].as_str().is_some_and(|k| k.starts_with("weekly"))).collect()));
-    match mode {
-        "session" => kind("session").or_else(weekly),
-        "weekly" => weekly().or_else(|| kind("session")),
-        _ => least(limits.iter().collect()),
-    }
+    let left = |l: &Value| l["left"].as_f64().unwrap_or(100.);
+    let window = |l: &Value| l["window_minutes"].as_f64().unwrap_or(0.);
+    let by = |a: &&Value, b: &&Value| match mode {
+        "session" => window(a).total_cmp(&window(b)).then(left(a).total_cmp(&left(b))),
+        "weekly" => window(b).total_cmp(&window(a)).then(left(a).total_cmp(&left(b))),
+        _ => left(a).total_cmp(&left(b)).then(window(a).total_cmp(&window(b))),
+    };
+    limits.iter().min_by(by).cloned()
 }
 
 /** Percent left, rounded to the 5% steps the gauge icons come in. */
@@ -301,17 +398,19 @@ mod tests {
     fn meter_modes_pick_their_window() {
         use serde_json::json;
         let limits = vec![
-            json!({"kind": "session", "left": 89.}),
-            json!({"kind": "weekly_all", "left": 12.}),
-            json!({"kind": "weekly_scoped", "left": 100.}),
+            json!({"kind": "session", "window_minutes": 300., "left": 89.}),
+            json!({"kind": "weekly_all", "window_minutes": 10080., "left": 12.}),
+            json!({"kind": "weekly_scoped", "window_minutes": 10080., "left": 100.}),
         ];
         let kind = |mode: &str| super::meter(&limits, mode).unwrap()["kind"].clone();
         assert_eq!(kind("smart"), "weekly_all");
         assert_eq!(kind("session"), "session");
         assert_eq!(kind("weekly"), "weekly_all");
         assert_eq!(super::meter(&limits[..1], "weekly").unwrap()["kind"], "session");
+        assert_eq!(super::window_name(300.), "Session");
+        assert_eq!(super::window_name(10080.), "Weekly");
         assert!(super::meter(&[], "smart").is_none());
-        let o = super::MeterOptions { mode: "smart".into(), warning_below: 50., danger_below: 20. };
+        let o = super::MeterOptions { mode: "smart".into(), providers: None, warning_below: 50., danger_below: 20. };
         let m = o.decorate(limits[1].clone());
         assert_eq!((m["level"].as_str(), m["icon"].as_str()), (Some("danger"), Some("abx-gauge-10")));
         assert!(super::gauge_svg("abx-gauge-10.svg").unwrap().contains("<svg"));
@@ -321,9 +420,15 @@ mod tests {
     #[test]
     fn prices_rows_and_formats_money() {
         let mut u = super::Usage::default();
-        u.rates.insert("claude-opus-5-5".into(), serde_json::json!({"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5}));
-        let row: Vec<serde_json::Value> = serde_json::json!(["claude-opus-5-5[1m]", "2026-10-16", 0, 1_000_000, 1_000_000, 0, 1_000_000, 1_000_000]).as_array().unwrap().clone();
-        assert_eq!(u.row_cost(&Default::default(), &row), Some(4. + 20. + 8. + 0.2));
+        u.rates.insert("anthropic".into(), serde_json::json!({"claude-opus-5-5": {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5}}));
+        u.rates.insert("openai".into(), serde_json::json!({"gpt-6-sol": {"input": 2, "output": 10, "cache_read": 0.2, "tiers": [{"input": 4, "output": 15, "cache_read": 0.4, "tier": {"size": 272000}}]}}));
+        let row = |v: serde_json::Value| v.as_array().unwrap().clone();
+        let claude = row(serde_json::json!(["claude-opus-5-5[1m]", "2026-10-16", 0, 1_000_000, 1_000_000, 0, 1_000_000, 1_000_000]));
+        assert_eq!(u.row_cost(&Default::default(), "anthropic", &claude), Some(4. + 20. + 8. + 0.2));
+        let small = row(serde_json::json!(["gpt-6-sol", "2026-10-16", 200_001, 1_000_000, 0, 0, 0, 0]));
+        let long = row(serde_json::json!(["gpt-6-sol", "2026-10-16", 272_001, 1_000_000, 0, 0, 0, 0]));
+        assert_eq!(u.row_cost(&Default::default(), "openai", &small), Some(2.));
+        assert_eq!(u.row_cost(&Default::default(), "openai", &long), Some(4.));
         assert_eq!(super::thousands(4454.333), "4,454.33");
         assert_eq!(super::thousands(1.6), "1.60");
         assert_eq!(super::parse_rfc3339("1970-01-02T00:00:01.5+00:00"), Some(86401.));

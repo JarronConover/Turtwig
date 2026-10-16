@@ -673,7 +673,7 @@
           "children": [
             { "type": "IconButton", "id": "history-button", "props": { "icon": "clock", "size": 26, "tooltip": "History: past and closed chats on every machine", "do": [{ "do": "state.toggle", "key": "history_open" }, "history.load"] } },
             {
-              "if": ".state.history_open",
+              "if": ".state.history_open and (.app.dragging | not)",
               "type": "box",
               "layer": "top",
               "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
@@ -935,7 +935,7 @@
           "children": [
             { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
             {
-              "if": ".state.chat_history_open",
+              "if": ".state.chat_history_open and (.app.dragging | not)",
               "type": "box",
               "layer": "top",
               "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
@@ -1271,7 +1271,7 @@
           "children": [{ "type": "text", "props": { "text": "{{ .usage.worktree_text }}" } }]
         },
         {
-          "if": ".state.usage_cost_open",
+          "if": ".state.usage_cost_open and (.app.dragging | not)",
           "type": "box", "layer": "top",
           "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
           "on": { "click": { "do": "state.set", "key": "usage_cost_open", "value": false } }
@@ -1295,9 +1295,20 @@
             { "type": "UsageRow", "props": { "label": "Last 30 days", "value": "{{ .usage.last_30_text }}", "strong": true } },
             { "type": "UsageRow", "props": { "label": "Last 90 days", "value": "{{ .usage.last_90_text }}", "strong": true } },
             { "type": "UsageRow", "props": { "label": "Lifetime", "value": "{{ .usage.lifetime_text }}", "strong": true } },
+            { "if": "(.usage.providers | length) > 1", "type": "divider", "style": { "margin": [4, 0] } },
+            { "if": "(.usage.providers | length) > 1", "type": "text", "props": { "text": "By provider, last 30 days" }, "style": { "font_size": 12, "color": "@text_faint" } },
+            {
+              "if": "(.usage.providers | length) > 1", "for": ".usage.providers", "as": "p", "key": ".p.id",
+              "type": "row", "style": { "height": 24, "gap": 8, "align": "center" },
+              "children": [
+                { "type": "icon", "props": { "name": "{{ .p.icon // \"circle\" }}", "size": 13, "color": "{{ .p.color // \"@text_muted\" }}" } },
+                { "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "grow": 1, "min_width": 0, "truncate": true, "color": "@text_muted" } },
+                { "type": "text", "props": { "text": "{{ .p.last_30_text }}" }, "style": { "font_family": "@font_mono" } }
+              ]
+            },
             { "if": ".usage.unpriced_tokens > 0", "type": "text", "props": { "text": "{{ .usage.unpriced_tokens }} tokens unpriced ({{ .usage.unpriced_models | join(\", \") }})" }, "style": { "font_size": 11.5, "color": "@text_faint", "padding": [4, 0, 0, 0] } },
             { "type": "text", "props": { "text": "Rates: models.dev{{ if .usage.rates_updated then \", updated \" + .usage.rates_updated else \"\" end }}{{ if .usage.loading then \" · counting…\" else \"\" end }}" }, "style": { "font_size": 11.5, "color": "@text_faint" } },
-            { "type": "text", "props": { "text": "API-equivalent cost of every Claude Code conversation on both machines, not a bill: plan usage is valued at the same rates." }, "style": { "font_size": 11.5, "color": "@text_faint" } }
+            { "type": "text", "props": { "text": "API-equivalent cost of every agent conversation ({{ [.usage.providers[].name] | join(\", \") }}) on both machines, not a bill: plan usage is valued at the same rates." }, "style": { "font_size": 11.5, "color": "@text_faint" } }
           ]
         }
       ]
@@ -1314,7 +1325,7 @@
     },
 
     "PlanButton": {
-      "about": "How much of the Claude plan is left (session, weekly, per-model weekly) from Claude Code's usage endpoint. `.usage.plan.limits`; the gauge shows `.usage.plan.meter` (mode: state usage_meter, else settings usage.meter).",
+      "about": "How much of each provider's plan is left (`.usage.plans`: Claude Code's usage endpoint, Codex's own rate limits). The gauge shows `.usage.plan.meter` (mode: state usage_meter, else settings usage.meter; providers: usage.meter_providers).",
       "type": "box",
       "style": { "position": "relative" },
       "children": [
@@ -1323,12 +1334,12 @@
           "props": {
             "icon_size": 18, "icon_color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.usage.plan.meter.level] // \"@text_muted\" }}",
             "icon": "{{ .usage.plan.meter.icon // \"circle-gauge\" }}", "size": 26,
-            "tooltip": "{{ if .usage.plan.meter then .usage.plan.meter.name + \": \" + ((.usage.plan.meter.left | floor) | tostring) + \"% left\" else \"Claude plan usage\" end }}",
+            "tooltip": "{{ if .usage.plan.meter then .usage.plan.meter.provider_name + \" \" + .usage.plan.meter.name + \": \" + ((.usage.plan.meter.left | floor) | tostring) + \"% left\" else \"Plan usage\" end }}",
             "do": [{ "do": "state.toggle", "key": "usage_plan_open" }, { "do": "state.set", "key": "usage_cost_open", "value": false }]
           }
         },
         {
-          "if": ".state.usage_plan_open",
+          "if": ".state.usage_plan_open and (.app.dragging | not)",
           "type": "box", "layer": "top",
           "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
           "on": { "click": { "do": "state.set", "key": "usage_plan_open", "value": false } }
@@ -1340,36 +1351,43 @@
           "style": { "position": "absolute", "top": 32, "right": -6, "width": 320, "padding": [12, 14], "gap": 10, "radius": 12, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg", "font_size": 13 },
           "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
           "children": [
+            { "if": "(.usage.plans | length) == 0", "type": "text", "props": { "text": "No plan usage yet: Refresh asks Claude Code; Codex reports its limits as its chats run." }, "style": { "color": "@text_faint" } },
             {
-              "type": "row", "style": { "gap": 8, "align": "center" },
-              "children": [
-                { "type": "icon", "props": { "name": "asterisk", "size": 15, "color": "@claude" } },
-                { "type": "text", "props": { "text": "Claude Code" }, "style": { "font_size": 14, "font_weight": "semibold" } }
-              ]
-            },
-            { "if": "(.usage.plan.limits // []) | length == 0", "type": "text", "props": { "text": "No plan usage yet: Refresh fetches it from Claude Code." }, "style": { "color": "@text_faint" } },
-            {
-              "for": ".usage.plan.limits // []", "as": "l", "key": ".l.name",
-              "type": "column", "style": { "gap": 5 },
+              "for": ".usage.plans", "as": "pl", "key": ".pl.provider",
+              "type": "column", "style": { "gap": 10 },
               "children": [
                 {
                   "type": "row", "style": { "gap": 8, "align": "center" },
                   "children": [
-                    { "type": "text", "props": { "text": "{{ .l.name }}" }, "style": { "grow": 1 } },
-                    { "type": "text", "props": { "text": "{{ .l.left | floor }}% left" }, "style": { "color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.l.level] // \"@text_muted\" }}" } },
-                    { "if": ".l.resets_in", "type": "text", "props": { "text": "Resets in {{ .l.resets_in }}" }, "style": { "color": "@text_faint", "font_size": 12 } }
+                    { "type": "icon", "props": { "name": "{{ .pl.icon // \"circle-gauge\" }}", "size": 15, "color": "{{ .pl.color // \"@text_muted\" }}" } },
+                    { "type": "text", "props": { "text": "{{ .pl.name }}" }, "style": { "font_size": 14, "font_weight": "semibold", "grow": 1 } },
+                    { "if": "(.usage.plans | length) > 1", "type": "text", "props": { "text": "{{ .pl.updated_text // \"\" }}" }, "style": { "font_size": 11.5, "color": "@text_faint" } }
                   ]
                 },
                 {
-                  "type": "box", "style": { "height": 6, "radius": 3, "background": "@hover" },
-                  "children": [{ "type": "box", "style": { "height": 6, "radius": 3, "width": "{{ (.l.left | floor | tostring) + \"%\" }}", "background": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.l.level] // \"@text_muted\" }}" } }]
-                }
+                  "for": ".pl.limits", "as": "l", "key": ".l.name",
+                    "type": "column", "style": { "gap": 5 },
+                    "children": [
+                      {
+                        "type": "row", "style": { "gap": 8, "align": "center" },
+                        "children": [
+                          { "type": "text", "props": { "text": "{{ .l.name }}" }, "style": { "grow": 1 } },
+                          { "type": "text", "props": { "text": "{{ .l.left | floor }}% left" }, "style": { "color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.l.level] // \"@text_muted\" }}" } },
+                          { "if": ".l.resets_in", "type": "text", "props": { "text": "Resets in {{ .l.resets_in }}" }, "style": { "color": "@text_faint", "font_size": 12 } }
+                        ]
+                      },
+                      {
+                        "type": "box", "style": { "height": 6, "radius": 3, "background": "@hover" },
+                        "children": [{ "type": "box", "style": { "height": 6, "radius": 3, "width": "{{ (.l.left | floor | tostring) + \"%\" }}", "background": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.l.level] // \"@text_muted\" }}" } }]
+                      }
+                    ]
+                  }
               ]
             },
             { "type": "divider" },
             { "type": "text", "props": { "text": "Toolbar meter" }, "style": { "font_size": 12, "color": "@text_faint" } },
             {
-              "id": "usage-meter-options", "type": "column", "style": { "gap": 2, "margin": [-4, -6, 0, -6] },
+              "id": "usage-meter-options", "type": "column", "style": { "gap": 2, "margin": [-4, -6, 0, -6], "min_width": 0 },
               "children": [
                 { "type": "MeterOption", "props": { "mode": "smart", "text": "Smart", "about": "Whichever window is closest to running out." } },
                 { "type": "MeterOption", "props": { "mode": "session", "text": "Prefer session", "about": "Always the shortest window, such as the 5-hour cycle." } },
@@ -1476,7 +1494,7 @@
           "children": [{ "type": "icon", "props": { "name": "{{ .usage.plan.meters[.props.mode].icon // \"circle-gauge\" }}", "size": 18, "color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.usage.plan.meters[.props.mode].level] // \"@text_muted\" }}" } }]
         },
         {
-          "type": "column", "style": { "grow": 1, "gap": 1 },
+          "type": "column", "style": { "grow": 1, "shrink": 1, "min_width": 0, "gap": 1 },
           "children": [
             { "type": "text", "props": { "text": "{{ .props.text }}" } },
             { "type": "text", "props": { "text": "{{ .props.about }}" }, "style": { "font_size": 12, "color": "@text_faint" } }
@@ -1850,12 +1868,21 @@
   // Cost and plan usage (the $ pill and the gauge in the toolbar). rates: per model id (or prefix),
   // dollars per million tokens {input, output, cache_read, cache_write, cache_write_1h}, over models.dev's.
   "usage": {
-    "refresh_secs": 120, "rates_max_age_hours": 24, "rates_url": "https://models.dev/api.json", "rates_providers": ["anthropic"],
-    "rates": {}, "plan_max_age_secs": 300, "plan_command": null,
+    "refresh_secs": 120, "rates_max_age_hours": 24, "rates_url": "https://models.dev/api.json",
+    "rates": {},
+    // The agents' providers: name, icon and color in the popovers; rates: the models.dev tables that price
+    // their models; plan: where the plan's limits come from. claude_oauth reads plan_file and refreshes it
+    // with plan_command (default: Claude Code's usage endpoint) when older than plan_max_age_secs;
+    // codex_rollouts takes the rate limits Codex writes into its sessions on either machine.
+    "providers": {
+      "anthropic": { "name": "Claude Code", "icon": "asterisk", "color": "@claude", "rates": ["anthropic"], "plan": "claude_oauth", "plan_file": "~/.claude/oauth-usage-cache.json", "plan_command": null, "plan_max_age_secs": 300 },
+      "openai": { "name": "Codex", "icon": "aperture", "color": "@text", "rates": ["openai"], "plan": "codex_rollouts" }
+    },
     // What the toolbar gauge reports: smart (the window closest to running out), session (the
     // shortest window) or weekly (the longest). The popover's picker saves its choice in state
     // usage_meter, which wins over this. The gauge turns warning/danger below these percents left.
-    "meter": "smart", "meter_levels": { "warning": 50, "danger": 20 }
+    // meter_providers: only these providers' limits drive the gauge (null: every provider's).
+    "meter": "smart", "meter_providers": null, "meter_levels": { "warning": 50, "danger": 20 }
   },
 
   // The macOS menu bar: `app` items join the a.box menu; each of `menus` is a menu of its own.

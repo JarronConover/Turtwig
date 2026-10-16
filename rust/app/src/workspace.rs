@@ -1219,7 +1219,7 @@ impl Workspace {
         let chats_here: Vec<Value> = self.current_worktree().map(|w| self.chats_of(w).into_iter().map(|c| self.chat_json(c)).collect()).unwrap_or_default();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
         let tabs: Vec<(String, String)> = self.current_worktree().map(|w| self.chats_of(w).into_iter().filter(|c| self.chat_open(c)).map(|c| (c.id.clone(), c.name.clone())).collect()).unwrap_or_default();
-        let usage = self.usage.context(self.current_chat().map(|c| c.id.as_str()), self.current_worktree().map(|w| (w.host.as_str(), w.path.as_str())), &tabs, &self.meter_options());
+        let usage = self.usage.context(self.current_chat().map(|c| c.id.as_str()), self.current_worktree().map(|w| (w.host.as_str(), w.path.as_str())), &tabs, &self.usage_providers(), &self.meter_options());
         to_val(&json!({
             "projects": projects,
             "sections": sections,
@@ -1743,42 +1743,60 @@ impl Workspace {
     /** The gauge's mode: state `usage_meter` (the popover's picker) over settings `usage.meter`. */
     fn meter_options(&self) -> crate::usage::MeterOptions {
         let mode = self.state.get("usage_meter").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| self.settings.text("usage.meter", "smart"));
+        let providers = self.settings.get("usage.meter_providers").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect());
         crate::usage::MeterOptions {
             mode,
+            providers,
             warning_below: self.settings.num("usage.meter_levels.warning", 50.),
             danger_below: self.settings.num("usage.meter_levels.danger", 20.),
         }
     }
 
+    /** Settings `usage.providers`: each provider's name, icon, models.dev rate tables and plan source. */
+    fn usage_providers(&self) -> Map<String, Value> {
+        self.settings.get("usage.providers").and_then(Value::as_object).map(|m| m.iter().filter(|(_, v)| v.is_object()).map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
+    }
+
     pub(crate) fn refresh_usage(&mut self, force: bool, cx: &mut Context<Self>) {
         let rates_path = settings::dir().join("usage-rates.json");
+        let usage_providers = self.usage_providers();
+        // models.dev tables to fetch: each provider's `rates` (its own id when unset).
+        let mut providers: Vec<String> = vec![];
+        for (id, p) in &usage_providers {
+            let tables: Vec<String> = p["rates"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_else(|| vec![id.clone()]);
+            for t in tables {
+                if !providers.contains(&t) {
+                    providers.push(t);
+                }
+            }
+        }
+        let cached = std::fs::read_to_string(&rates_path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        let cached_has_all = cached.as_ref().is_some_and(|v| providers.iter().all(|p| v["providers"].get(p).is_some()));
         if self.usage.rates.is_empty() {
-            if let Some(v) = std::fs::read_to_string(&rates_path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
-                self.usage.rates = v["models"].as_object().cloned().unwrap_or_default();
+            if let Some(v) = cached.as_ref().filter(|_| cached_has_all) {
+                self.usage.rates = v["providers"].as_object().cloned().unwrap_or_default();
                 self.usage.rates_updated = v["fetched"].as_str().map(str::to_string);
             }
         }
         let max_age = self.settings.num("usage.rates_max_age_hours", 24.) * 3600.;
-        let stale = std::fs::metadata(&rates_path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map_or(true, |e| e.as_secs_f64() > max_age);
+        let stale = !cached_has_all || std::fs::metadata(&rates_path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map_or(true, |e| e.as_secs_f64() > max_age);
         let url = self.settings.get("usage.rates_url").and_then(Value::as_str).unwrap_or("https://models.dev/api.json").to_string();
-        let providers: Vec<String> = self.settings.get("usage.rates_providers").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_else(|| vec!["anthropic".into()]);
         if stale || force {
             cx.spawn(async move |this, cx| {
                 let out = cx.background_spawn(async move { std::process::Command::new("/usr/bin/curl").args(["-sSL", "-m", "30", &url]).output() }).await;
                 let Some(v) = out.ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()) else { return };
                 let mut models = Map::new();
                 for p in &providers {
-                    for (id, m) in v[p.as_str()]["models"].as_object().into_iter().flatten() {
-                        if let Some(c) = m.get("cost") {
-                            models.insert(id.clone(), c.clone());
-                        }
+                    let table: Map<String, Value> = v[p.as_str()]["models"].as_object().into_iter().flatten().filter_map(|(id, m)| m.get("cost").map(|c| (id.clone(), c.clone()))).collect();
+                    if !table.is_empty() {
+                        models.insert(p.clone(), Value::Object(table));
                     }
                 }
                 if models.is_empty() {
                     return;
                 }
                 let fetched = std::process::Command::new("date").arg("+%Y-%m-%d").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-                let _ = std::fs::write(settings::dir().join("usage-rates.json"), serde_json::to_string(&json!({"fetched": fetched, "models": models})).unwrap_or_default());
+                let _ = std::fs::write(settings::dir().join("usage-rates.json"), serde_json::to_string(&json!({"fetched": fetched, "providers": models})).unwrap_or_default());
                 this.update(cx, |ws, cx| {
                     ws.usage.rates = models;
                     ws.usage.rates_updated = fetched;
@@ -1791,16 +1809,24 @@ impl Workspace {
             })
             .detach();
         }
-        // The plan's limits: Claude Code's status line keeps ~/.claude/oauth-usage-cache.json fresh; when it's
-        // older than `usage.plan_max_age_secs` (or on Refresh), ask the endpoint the same way.
-        self.usage.load_plan();
-        let plan_age = self.usage.plan_updated.map(|t| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|n| n.as_secs_f64() - t).unwrap_or(0.)).unwrap_or(f64::MAX);
-        if force || plan_age > self.settings.num("usage.plan_max_age_secs", 300.) {
-            let script = self.settings.get("usage.plan_command").and_then(Value::as_str).unwrap_or(PLAN_COMMAND).to_string();
+        // Plans read from a file (Claude Code's status line keeps ~/.claude/oauth-usage-cache.json fresh): when
+        // it's older than the provider's `plan_max_age_secs` (or on Refresh), run its `plan_command`.
+        for p in usage_providers.values() {
+            if p["plan"].as_str() != Some("claude_oauth") {
+                continue;
+            }
+            let file = p["plan_file"].as_str().unwrap_or("~/.claude/oauth-usage-cache.json").to_string();
+            self.usage.load_plan(&file);
+            let plan_age = self.usage.plan_updated.map(|t| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|n| n.as_secs_f64() - t).unwrap_or(0.)).unwrap_or(f64::MAX);
+            let max_age = p["plan_max_age_secs"].as_f64().unwrap_or_else(|| self.settings.num("usage.plan_max_age_secs", 300.));
+            if !(force || plan_age > max_age) {
+                continue;
+            }
+            let script = p["plan_command"].as_str().or(self.settings.get("usage.plan_command").and_then(Value::as_str)).unwrap_or(PLAN_COMMAND).to_string();
             cx.spawn(async move |this, cx| {
                 let _ = cx.background_spawn(async move { std::process::Command::new("/bin/sh").arg("-c").arg(script).output() }).await;
                 this.update(cx, |ws, cx| {
-                    ws.usage.load_plan();
+                    ws.usage.load_plan(&file);
                     ws.ctx_rev += 1;
                     cx.notify();
                 })
@@ -2765,7 +2791,11 @@ impl Render for Workspace {
             self.focus_now = area;
             self.ctx_rev += 1;
         }
-        self.dragging = cx.has_active_drag();
+        let dragging = cx.has_active_drag();
+        if dragging != self.dragging {
+            self.dragging = dragging;
+            self.ctx_rev += 1;
+        }
         if self.dragging {
             self.drop_preview = false;
         } else if !self.drop_preview {
