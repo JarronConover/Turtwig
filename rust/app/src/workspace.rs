@@ -57,6 +57,10 @@ pub struct Workspace {
     queue_saved: String,
     /** Chats sent a message in the last few seconds whose hook hasn't said they're working yet. */
     just_sent: HashMap<String, std::time::Instant>,
+    /** Where you've been, browser-style: (worktree, chat) visits and the one showing now. */
+    nav: Vec<(String, Option<String>)>,
+    nav_at: usize,
+    nav_jumping: bool,
     /** This view, for click handlers built without a `cx` (message actions). */
     pub(crate) view_handle: Option<WeakEntity<Workspace>>,
     placeholders: HashMap<String, String>,
@@ -224,6 +228,9 @@ impl Workspace {
             queued: std::fs::read_to_string(settings::dir().join("queued.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             queue_saved: String::new(),
             just_sent: HashMap::new(),
+            nav: vec![],
+            nav_at: 0,
+            nav_jumping: false,
             sub_chats: vec![],
             view_handle: None,
             placeholders: HashMap::new(),
@@ -1097,6 +1104,7 @@ impl Workspace {
                 "history_loading": self.history_loading,
                 "connected": self.connected,
                 "removed_projects": removed,
+                "nav": {"back": self.can_navigate(-1), "forward": self.can_navigate(1)},
                 "dragging": self.dragging,
                 "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
                 "drag": self.drag_item.borrow().as_ref().map(|(k, v)| json!({"kind": k, "value": v, "into": into.as_ref().map(|x| &x.1), "into_key": into.as_ref().map(|x| &x.0)})),
@@ -1449,6 +1457,60 @@ impl Workspace {
         self.transcripts.entry(id.to_string()).or_default().echo(&text);
         let call = Call::ChatSend { chat_id: id.to_string(), text };
         self.route(&call).send(call);
+    }
+
+    /** Each new (worktree, chat) on screen is a visit; going back or forward moves along them. */
+    fn track_nav(&mut self) {
+        let Some(path) = self.selected.clone() else { return };
+        let here = (path, self.current_chat().map(|c| c.id.clone()));
+        if std::mem::take(&mut self.nav_jumping) {
+            if let Some(slot) = self.nav.get_mut(self.nav_at) {
+                *slot = here;
+            }
+            return;
+        }
+        if self.nav.get(self.nav_at) == Some(&here) {
+            return;
+        }
+        self.nav.truncate(self.nav_at + 1);
+        self.nav.push(here);
+        if self.nav.len() > 200 {
+            self.nav.remove(0);
+        }
+        self.nav_at = self.nav.len() - 1;
+        self.ctx_rev += 1;
+    }
+
+    /** Back (-1) or forward (1) to the nearest visit whose worktree is still here. */
+    pub(crate) fn navigate(&mut self, step: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let mut i = self.nav_at as i64;
+        loop {
+            i += step;
+            if i < 0 || i >= self.nav.len() as i64 {
+                return;
+            }
+            if self.worktree(&self.nav[i as usize].0).is_some() {
+                break;
+            }
+        }
+        let (path, chat) = self.nav[i as usize].clone();
+        self.nav_at = i as usize;
+        self.nav_jumping = true;
+        if let Some(c) = chat.filter(|c| self.chat(c).is_some_and(|c| self.chat_open(c))) {
+            self.active_chat.insert(path.clone(), c);
+        }
+        self.select(path, window, cx);
+    }
+
+    fn can_navigate(&self, step: i64) -> bool {
+        let mut i = self.nav_at as i64 + step;
+        while i >= 0 && i < self.nav.len() as i64 {
+            if self.worktree(&self.nav[i as usize].0).is_some() {
+                return true;
+            }
+            i += step;
+        }
+        false
     }
 
     /** A subagent tab is working while its parent still lists it as running. */
@@ -2197,6 +2259,7 @@ impl Render for Workspace {
         self.register_terminals(cx);
         let t = std::time::Instant::now();
         self.flush(window, cx);
+        self.track_nav();
         self.save_queue();
         self.refresh_sub_chats();
         self.perf.borrow_mut().spans.insert("flush", t.elapsed().as_secs_f32() * 1000.);
@@ -2269,6 +2332,9 @@ impl Render for Workspace {
                     cx.notify();
                 }
             }))
+            // The mouse's back and forward buttons (and trackpad swipes) move through where you've been.
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Back), cx.listener(|ws, _, window, cx| ws.navigate(-1, window, cx)))
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Forward), cx.listener(|ws, _, window, cx| ws.navigate(1, window, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|ws, _, _, _| {
                 if ws.drag.take().is_some() {
                     ws.save_state();

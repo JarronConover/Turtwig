@@ -44,6 +44,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("terminal.select / terminal.close", "{path?, id}: show or close a terminal tab (the last one can't be closed); `.selected.terminals` lists them"),
     ("shell.open", "{task, output, label?, path?}: a terminal tab following a background shell's output file"),
     ("subagent.open", "{chat, agent, label?}: open a subagent's conversation (read-only) as a tab next to its chat; `.selected.background` lists running ones"),
+    ("nav.back / nav.forward", "go back or forward through the worktrees and chats you've looked at, like a browser (`.app.nav.back` / `.forward` say whether you can)"),
     ("transcript.load_earlier", "{chat?}: load `chat.transcript_page` more of a long chat's older messages (scrolling to the top does this too)"),
     ("worktree.rename_branch", "{path, branch?}: rename the worktree's git branch (asks when branch is missing)"),
     ("worktree.new", "{repo, host: mac|box, branch?}: a worktree on that branch, checked out if it exists, else new from origin/main (asks when branch is missing)"),
@@ -593,6 +594,8 @@ impl Workspace {
                     }
                 }
             }
+            "nav.back" => self.navigate(-1, window, cx),
+            "nav.forward" => self.navigate(1, window, cx),
             "transcript.load_earlier" => {
                 if let Some(id) = chat() {
                     self.load_earlier(&id, cx);

@@ -622,6 +622,15 @@
       "children": [
         { "if": ".state.sidebar_open | not", "type": "IconButton", "id": "sidebar-toggle", "props": { "icon": "panel-left", "size": 24, "tooltip": "Show sidebar  ⌘\\", "do": { "do": "state.toggle", "key": "sidebar_open" } } },
         { "if": ".state.sidebar_open | not", "type": "DesignerButton", "id": "designer-button", "style": { "margin": [0, 8, 0, 0] } },
+        {
+          "id": "nav-buttons",
+          "type": "row",
+          "style": { "gap": 0, "align": "center", "margin": [0, 4, 0, -6] },
+          "children": [
+            { "type": "box", "style": { "opacity": "{{ if .app.nav.back then 1 else 0.35 end }}" }, "children": [{ "type": "IconButton", "id": "nav-back", "props": { "icon": "chevron-left", "size": 24, "tooltip": "Back  ⌘[", "do": "nav.back" } }] },
+            { "type": "box", "style": { "opacity": "{{ if .app.nav.forward then 1 else 0.35 end }}" }, "children": [{ "type": "IconButton", "id": "nav-forward", "props": { "icon": "chevron-right", "size": 24, "tooltip": "Forward  ⌘]", "do": "nav.forward" } }] }
+          ]
+        },
         { "type": "box", "style": { "width": 6, "height": 6, "radius": 3, "background": "{{ if .selected.chat.alive then \"@success\" else \"@text_faint\" end }}" } },
         {
           "if": ".selected.worktree",
@@ -1376,8 +1385,11 @@
     { "key": "ctrl-shift-t", "if": ".selected.worktree", "do": "terminal.new" },
     { "key": "cmd-shift-c", "if": ".selected.worktree", "do": { "do": "clipboard.copy", "text": "{{ .selected.worktree.path }}" } },
     { "key": "cmd-shift-n", "if": ".selected.worktree", "do": { "do": "worktree.new", "repo": "{{ .selected.worktree.repo }}", "host": "{{ .selected.worktree.host }}" } },
-    { "key": "cmd-]", "do": { "do": "select", "offset": 1 } },
-    { "key": "cmd-[", "do": { "do": "select", "offset": -1 } },
+    // Back and forward through where you've been (the mouse's side buttons and trackpad swipes do too).
+    { "key": "cmd-[", "do": "nav.back" },
+    { "key": "cmd-]", "do": "nav.forward" },
+    { "key": "cmd-alt-]", "do": { "do": "select", "offset": 1 } },
+    { "key": "cmd-alt-[", "do": { "do": "select", "offset": -1 } },
     { "key": "cmd-q", "do": "app.quit" },
     { "key": "escape", "if": ".app.confirm", "do": "confirm.cancel" },
     { "key": "cmd-w", "if": ".selected.chat", "do": { "do": "if", "cond": "{{ .selected.chat.state == \"working\" or .selected.chat.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .selected.chat.name }}”?", "text": "It's still working. Closing the tab stops its Claude process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .selected.chat.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .selected.chat.id }}" } } }
