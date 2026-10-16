@@ -405,10 +405,13 @@ impl Workspace {
                 let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize);
                 self.accept_completion(index, window, cx);
             }
+            // Stop ends the turn (Esc in Claude Code), on either machine; the chat keeps running. A chat
+            // super.engineering is running can only be stopped there.
             "chat.interrupt" => {
                 if let Some(id) = chat() {
-                    if self.host_of_chat(&id) == "mac" {
-                        self.call(Call::ChatStop { chat_id: id }, cx);
+                    if self.chat(&id).is_some_and(|c| c.status == "running_elsewhere") {
+                        use gpui_kit::component::WindowExt as _;
+                        window.push_notification("This chat is running in super.engineering: stop it there, or take it over first", cx);
                     } else {
                         self.call(Call::ChatKeys { chat_id: id, keys: vec!["Escape".into()] }, cx);
                     }
