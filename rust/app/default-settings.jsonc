@@ -181,7 +181,18 @@
                   "for": ".app.drag as $d | .projects | map(select((($d.kind == \"project\" and $d.value == .repo) | not)))", "as": "p", "key": ".p.name",
                   "id": "project-card",
                   "type": "column",
+                  "style": { "position": "relative" },
+                  "drop_key": "projcard:{{ .p.repo }}",
+                  "drop_zones": { "project": "edges" },
+                  "on": {
+                    "drop_item": {
+                      "accept": "project",
+                      "valid": ".dragged as $d | .p.repo as $t | [.projects[].repo] as $r | ($r | index($t)) as $ti | ($r | index($d)) as $di | $d != $t and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
+                      "do": { "do": "project.move", "target": "{{ .p.repo }}" }
+                    }
+                  },
                   "children": [
+                    { "type": "DropLine", "props": { "key": "projcard:{{ .p.repo }}" } },
                     {
                       "id": "project-row",
                       "type": "row",
@@ -194,7 +205,7 @@
                       "drag": { "kind": "project", "value": "{{ .p.repo }}", "label": "{{ .p.name }}" },
                       "tooltip": "{{ if .state[\"collapsed:proj:\" + .p.repo] then \"Show\" else \"Hide\" end }} {{ .p.name }}'s worktrees",
                       "drop_key": "proj:{{ .p.repo }}",
-                      "drop_zones": { "worktree": "inside", "project": "edges" },
+                      "drop_zones": { "worktree": "inside" },
                       "menu": [
                         { "label": "Rename Project", "icon": "pencil", "do": { "do": "prompt", "title": "Rename project", "value": "{{ .p.name }}", "then": { "do": "state.set", "key": "project_name:{{ .p.repo }}", "value": "{{ .input }}" } } },
                         { "label": "Project settings", "icon": "settings", "do": { "do": "project.settings", "repo": "{{ .p.repo }}" } },
@@ -214,11 +225,6 @@
                             "accept": "worktree",
                             "valid": ".dragged as $d | [.worktrees[] | select(.path == $d)][0] as $w | $w.repo == .p.repo and $w.section != null",
                             "do": { "do": "worktree.move", "section": null }
-                          },
-                          {
-                            "accept": "project",
-                            "valid": ".dragged as $d | .p.repo as $t | [.projects[].repo] as $r | ($r | index($t)) as $ti | ($r | index($d)) as $di | $d != $t and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
-                            "do": { "do": "project.move", "target": "{{ .p.repo }}" }
                           }
                         ]
                       },
@@ -248,7 +254,18 @@
                   "for": ".app.drag as $d | .sections | map(select((($d.kind == \"section\" and $d.value == .id) | not)))", "as": "s", "key": ".s.id",
                   "id": "section-card",
                   "type": "column",
+                  "style": { "position": "relative" },
+                  "drop_key": "seccard:{{ .s.id }}",
+                  "drop_zones": { "section": "edges" },
+                  "on": {
+                    "drop_item": {
+                      "accept": "section",
+                      "valid": ".dragged as $d | .s.id as $t | [.sections[].id] as $r | ($r | index($t)) as $ti | ($r | index($d)) as $di | $d != $t and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
+                      "do": { "do": "section.move", "target": "{{ .s.id }}" }
+                    }
+                  },
                   "children": [
+                    { "type": "DropLine", "props": { "key": "seccard:{{ .s.id }}" } },
                     {
                       "id": "section-label",
                       "type": "SectionLabel",
@@ -264,7 +281,7 @@
                       },
                       "drag": { "kind": "section", "value": "{{ .s.id }}", "label": "{{ .s.name }}" },
                       "drop_key": "sec:{{ .s.id }}",
-                      "drop_zones": { "worktree": "inside", "section": "edges" },
+                      "drop_zones": { "worktree": "inside" },
                       "on": {
                         "click": { "do": "state.toggle", "key": "collapsed:{{ .s.id }}", "default": "{{ .s.collapsed }}" },
                         "drop_item": [
@@ -272,11 +289,6 @@
                             "accept": "worktree",
                             "valid": ".s.items[0].path != .dragged",
                             "do": { "do": "worktree.move", "section": "{{ .s.id }}", "before": "{{ .s.items[0].path // \"\" }}" }
-                          },
-                          {
-                            "accept": "section",
-                            "valid": ".dragged as $d | .s.id as $t | [.sections[].id] as $r | ($r | index($t)) as $ti | ($r | index($d)) as $di | $d != $t and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
-                            "do": { "do": "section.move", "target": "{{ .s.id }}" }
                           }
                         ]
                       },
