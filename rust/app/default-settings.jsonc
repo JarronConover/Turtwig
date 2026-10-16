@@ -1151,7 +1151,13 @@
                 "text": "Move chat to {{ if .selected.chat.host == \"box\" then \"Mac\" else \"the cloud\" end }}",
                 "icon": "{{ if .selected.chat.host == \"box\" then \"laptop\" else \"cloud\" end }}",
                 "tooltip": "{{ if .selected.chat.host == \"box\" then \"Continue this chat on the Mac, with the worktree's latest work\" else \"Continue this chat on the box: it gets the same branch with your uncommitted and unpushed work, and keeps running when the laptop sleeps\" end }}",
-                "do": { "do": "chat.move", "to": "{{ if .selected.chat.host == \"box\" then \"mac\" else \"box\" end }}" }
+                "do": {
+                  "do": "confirm",
+                  "title": "Move “{{ .selected.chat.name }}” to {{ if .selected.chat.host == \"box\" then \"the Mac\" else \"the cloud\" end }}?",
+                  "text": "Its Claude process stops here{{ if .selected.chat.status == \"running_elsewhere\" then \", including in super.engineering,\" else \"\" end }} and the conversation continues there in a minute, on the same branch with this worktree's uncommitted and unpushed work.",
+                  "confirm": "Move it",
+                  "then": { "do": "chat.move", "chat": "{{ .selected.chat.id }}", "to": "{{ if .selected.chat.host == \"box\" then \"mac\" else \"box\" end }}" }
+                }
               }
             },
             { "type": "IconButton", "props": { "icon": "{{ if .state.terminal_open then \"panel-bottom-close\" else \"panel-bottom-open\" end }}", "tooltip": "Terminal  ⌘J", "do": { "do": "state.toggle", "key": "terminal_open" } } }
