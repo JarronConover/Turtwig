@@ -442,7 +442,7 @@
             },
             {
               "type": "column",
-              "style": { "grow": 1, "min_height": 0, "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden" },
+              "style": { "grow": 1, "min_height": 0, "background": "@card", "border": 1, "border_color": "@line", "radius": 13, "overflow": "hidden", "position": "relative" },
               "children": [
                 {
                   "type": "transcript",
@@ -479,7 +479,8 @@
                       ]
                     }
                   ]
-                }
+                },
+                { "type": "DropOverlay", "props": { "chat": "designer", "name": "the designer" } }
               ]
             }
           ]
@@ -625,6 +626,23 @@
         { "if": ".props.status == \"pending\"", "type": "icon", "props": { "name": "loader", "size": 12, "color": "@warning" }, "tooltip": "Checks running" },
         { "if": ".props.status == \"dirty\"", "type": "icon", "props": { "name": "arrow-up", "size": 12, "color": "@age" }, "tooltip": "Unpushed work" },
         { "if": ".props.status == \"behind\"", "type": "icon", "props": { "name": "arrow-down", "size": 12, "color": "@age" }, "tooltip": "Behind its base" }
+      ]
+    },
+
+    "DropOverlay": {
+      "about": "While files are dragged over the window: one drop target covering a whole chat (its messages and its message box), naming where they'll go. Put it last in a position: relative container. props: chat (id, or designer), name.",
+      "if": ".app.dragging and (.app.drag | not) and .props.chat != null and .props.chat != \"\"",
+      "type": "column",
+      "motion": false,
+      "style": {
+        "position": "absolute", "top": 8, "left": 8, "right": 8, "bottom": 8, "align": "center", "justify": "center", "gap": 8,
+        "radius": 12, "border": 2, "border_color": "@accent", "background": "#488efc1f", "font_size": 14, "color": "@text",
+        "opacity": 0, "drag_over": { "opacity": 1 }
+      },
+      "on": { "drop": { "do": "chat.attach", "chat": "{{ .props.chat }}" } },
+      "children": [
+        { "type": "icon", "props": { "name": "paperclip", "size": 22, "color": "@accent" } },
+        { "type": "text", "props": { "text": "Drop to attach to {{ .props.name }}" } }
       ]
     },
 
@@ -810,7 +828,7 @@
         { "type": "ChatTabs" },
         {
           "type": "column",
-          "style": { "grow": 1, "min_height": 0 },
+          "style": { "grow": 1, "min_height": 0, "position": "relative" },
           "children": [
             {
               "id": "transcript",
@@ -905,7 +923,8 @@
                   ]
                 }
               ]
-            }
+            },
+            { "type": "DropOverlay", "props": { "chat": "{{ .selected.chat.id }}", "name": "“{{ .selected.chat.name }}”" } }
           ]
         }
       ]
@@ -1708,7 +1727,9 @@
     // ---- Transcript text and look ----
     // Lines Claude Code writes that aren't conversation: meta and wrappers show as notices when true;
     // compaction / agent_messages: "step" | "message" | "hidden"; task_notifications: "notice" | "message" | "hidden".
-    "show": { "meta": false, "sidechain": false, "wrappers": false, "compaction": "step", "agent_messages": "step", "task_notifications": "notice", "errors": true },
+    // pasted: text you pasted, which Claude Code wraps in <pasted_content> tags: "plain" (just the text),
+    // "quote" (as a quote) or "tags" (as written).
+    "show": { "meta": false, "sidechain": false, "wrappers": false, "compaction": "step", "agent_messages": "step", "task_notifications": "notice", "errors": true, "pasted": "plain" },
     // The "Thinking…"/"Working…" row while the agent works.
     "pending": { "show": true },
     // Tool step summaries are cut to this many characters.
@@ -1828,6 +1849,9 @@
     // (shift), which holds the transcript still. shift_holds_transcript: shift + scroll elsewhere in the
     // transcript doesn't scroll it either. scrollbar: hover | always | scrolling | never.
     // Shown over a chat while files are dragged onto it, naming the chat they'll attach to.
+    // Where dropped files land: "card" (one DropOverlay over the whole chat, messages and message box) or
+    // "parts" (the transcript and the message box each take drops, with drop_overlay / composer_drop).
+    "drop_target": "card",
     "drop_overlay": { "radius": 12, "border": 2, "border_color": "@accent", "background": "#488efc1f", "gap": 8, "font_size": 14, "color": "@text" },
     // The message box while files are dragged over it.
     "composer_drop": { "border_color": "@accent", "background": "#488efc26" },

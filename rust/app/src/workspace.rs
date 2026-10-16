@@ -2591,7 +2591,7 @@ impl Workspace {
             let chat = paste_chat.clone();
             paste_view.update(cx, |ws, cx| ws.attach(chat, files, window, cx)).is_ok()
         });
-        let drop_style = self.settings.chat.get("composer_drop").and_then(Value::as_object).cloned().unwrap_or_default();
+        let drop_style = if self.settings.text("chat.drop_target", "card") == "card" { Default::default() } else { self.settings.chat.get("composer_drop").and_then(Value::as_object).cloned().unwrap_or_default() };
         let drop_theme = self.settings.theme.clone();
         let chips = if props.get("attachments").and_then(Value::as_bool) == Some(false) { None } else { self.attachments_view(Some(chat.clone()), props, cx) };
         let key_view = cx.entity().downgrade();
@@ -2675,7 +2675,7 @@ impl Workspace {
 
     /** Drop target over a chat while files are dragged over the window, naming the chat they'll go to. */
     fn drop_overlay(&self, chat_id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.dragging {
+        if !self.dragging || self.settings.text("chat.drop_target", "card") == "card" {
             return None;
         }
         let theme = self.settings.theme.clone();

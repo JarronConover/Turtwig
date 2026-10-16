@@ -22,6 +22,8 @@ pub struct Options {
     pub agent_messages: String,
     /** Background-task notifications: "notice", "message", or "hidden". */
     pub task_notifications: String,
+    /** Text you pasted (Claude Code wraps it in <pasted_content> tags): "plain", "quote", or "tags". */
+    pub pasted: String,
     /** Claude Code's error lines as notices. */
     pub errors: bool,
     /** The "Thinking"/"Working" row while a chat works. */
@@ -41,6 +43,7 @@ impl Default for Options {
             compaction: "step".into(),
             agent_messages: "step".into(),
             task_notifications: "notice".into(),
+            pasted: "plain".into(),
             errors: true,
             pending: true,
             summary_chars: 140,
@@ -68,6 +71,7 @@ pub fn set_options(chat: &Value) {
         compaction: t("compaction", &d.compaction),
         agent_messages: t("agent_messages", &d.agent_messages),
         task_notifications: t("task_notifications", &d.task_notifications),
+        pasted: t("pasted", &d.pasted),
         errors: b("errors", d.errors),
         pending: chat["pending"].get("show").and_then(Value::as_bool).unwrap_or(d.pending),
         summary_chars: chat.get("summary_chars").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(d.summary_chars),
@@ -76,6 +80,35 @@ pub fn set_options(chat: &Value) {
         tool_names: chat.get("tool_names").cloned().unwrap_or(Value::Null),
     };
     OPTIONS.with(|c| *c.borrow_mut() = Rc::new(o));
+}
+
+/** Text with Claude Code's `<pasted_content id="..">..</pasted_content id="..">` markers taken out
+("plain"), its pasted parts quoted ("quote"), or left as is ("tags"). */
+fn unwrap_pasted(text: &str, mode: &str) -> String {
+    if mode == "tags" || !text.contains("<pasted_content") {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<pasted_content") {
+        let Some(open_end) = rest[start..].find('>').map(|i| start + i + 1) else { break };
+        out.push_str(&rest[..start]);
+        let inner_start = open_end;
+        let close = rest[inner_start..].find("</pasted_content").map(|i| inner_start + i);
+        let (inner, after) = match close {
+            Some(c) => (&rest[inner_start..c], rest[c..].find('>').map(|i| c + i + 1).unwrap_or(rest.len())),
+            None => (&rest[inner_start..], rest.len()),
+        };
+        let inner = inner.trim_matches('\n');
+        if mode == "quote" {
+            out.push_str(&inner.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n"));
+        } else {
+            out.push_str(inner);
+        }
+        rest = &rest[after..];
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 pub fn options() -> Rc<Options> {
@@ -276,6 +309,11 @@ impl Transcript {
             }
             rest = &rest[i + end.max(1)..];
         }
+    }
+
+    #[cfg(test)]
+    fn last_user(&self) -> Option<&str> {
+        self.items.iter().rev().find_map(|i| if let Item::User { text } = i { Some(text.as_str()) } else { None })
     }
 
     /** Shows a message you just sent before Claude Code writes it to the file (which takes a moment). */
@@ -516,8 +554,9 @@ impl Transcript {
             }
             return;
         }
-        self.settle_echo(t);
-        self.items.push(Item::User { text: t.to_string() });
+        let text = unwrap_pasted(t, &opts.pasted);
+        self.settle_echo(&text);
+        self.items.push(Item::User { text });
     }
 
     fn tool_result(&mut self, b: &Value) {
@@ -769,5 +808,14 @@ mod finished_call_tests {
             {"type": "tool_result", "tool_use_id": "exec-1", "content": "hi\n", "is_error": false}
         ]}})]);
         assert!(matches!(t.items.as_slice(), [Item::Tool { result: Some(r), .. }] if r == "hi\n"));
+    }
+
+    #[test]
+    fn pasted_content_markers_are_taken_out() {
+        let mut t = Transcript::default();
+        t.append(0, &[json!({"type": "user", "message": {"content": "<pasted_content id=\"2ce5\">\n> quoted\n\nmy words </pasted_content id=\"2ce5\">"}})]);
+        assert_eq!(t.last_user(), Some("> quoted\n\nmy words"));
+        assert_eq!(super::unwrap_pasted("see <pasted_content id=\"a\">x\ny</pasted_content id=\"a\"> ok", "quote"), "see > x\n> y ok");
+        assert_eq!(super::unwrap_pasted("<pasted_content id=\"a\">x</pasted_content id=\"a\">", "tags"), "<pasted_content id=\"a\">x</pasted_content id=\"a\">");
     }
 }
