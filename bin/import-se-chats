@@ -177,7 +177,7 @@ def main():
     if os.environ.get("CLAUDE_CODE_SESSION_ID"):
         args.skip.append(os.environ["CLAUDE_CODE_SESSION_ID"])
 
-    chat_mod.git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+    chat_mod.git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
     cutoff = time.time() - args.days * 86400
     plan, skipped = [], []
     for conv_id, updated, title, sessions in se_conversations():

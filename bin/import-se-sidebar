@@ -215,7 +215,7 @@ def box_path(it):
 
 def place_chats(worktrees, dry_run):
     """Register every chat that ran in a mirrored worktree on its box worktree (stopped)."""
-    chat_mod.git_state("pull", "-q", "--rebase", "origin", "state", check=False)
+    chat_mod.git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
     titles = {}
     for conv_id, _, title, sessions in chats.se_conversations():
         for sid in sessions:
