@@ -84,6 +84,7 @@ pub fn run() -> anyhow::Result<()> {
     }
     drop(conn);
 
+    std::thread::spawn(warm_line_starts);
     spawn_loop("events", shared.clone(), event_loop);
     spawn_loop("model", shared.clone(), model_loop);
     spawn_loop("transcripts", shared.clone(), transcript_loop);
@@ -171,27 +172,135 @@ fn read_lines(w: &mut Watch) -> Vec<Value> {
     }
     let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return vec![] };
     w.offset += end as u64 + 1;
-    let text = String::from_utf8_lossy(&buf[..end]);
-    let out: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap_or(Value::Null)).collect();
+    let out: Vec<Value> = buf[..end].split(|b| *b == b'\n').map(parse_entry).collect();
     w.next_line += out.len();
     out
 }
 
+/** Where each line of a transcript starts, per file, extended as the file grows: reading the newest lines
+or an older page seeks straight to them instead of reading the whole file (some run past 100MB). */
+static LINE_STARTS: Mutex<Option<HashMap<PathBuf, Vec<u64>>>> = Mutex::new(None);
+
+/** The file's complete lines as byte offsets: entry i starts at `starts[i]`; the last entry is the end. */
+fn line_starts(path: &PathBuf) -> Vec<u64> {
+    let known = LINE_STARTS.lock().unwrap().as_ref().and_then(|m| m.get(path).cloned());
+    let mut starts = known.unwrap_or_else(|| vec![0]);
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if len < *starts.last().unwrap_or(&0) {
+        starts = vec![0];
+    }
+    let from = *starts.last().unwrap_or(&0);
+    if len > from {
+        if let Ok(mut f) = std::fs::File::open(path) {
+            let mut buf = Vec::new();
+            if f.seek(SeekFrom::Start(from)).is_ok() && f.read_to_end(&mut buf).is_ok() {
+                starts.extend(buf.iter().enumerate().filter(|(_, b)| **b == b'\n').map(|(i, _)| from + i as u64 + 1));
+            }
+        }
+        LINE_STARTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(path.clone(), starts.clone());
+    }
+    starts
+}
+
+/** Indexes the newest chats' transcripts in the background, so opening one doesn't wait for a first scan. */
+fn warm_line_starts() {
+    let dir = util::agent_home().join("state").join("registry").join("chats");
+    let mut chats: Vec<(std::time::SystemTime, Value)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let t = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((t, serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok()?))
+        })
+        .collect();
+    chats.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, c) in chats.into_iter().take(60) {
+        if let (Some(id), Some(dir)) = (c.get("id").and_then(Value::as_str), c.get("dir").and_then(Value::as_str)) {
+            line_starts(&util::transcript_path(dir, id));
+        }
+    }
+}
+
+/** Entries `from..to` (line numbers), parsed. */
+fn read_range(path: &PathBuf, starts: &[u64], from: usize, to: usize) -> Vec<Value> {
+    let lines = starts.len().saturating_sub(1);
+    let (from, to) = (from.min(lines), to.min(lines));
+    if from >= to {
+        return vec![];
+    }
+    let Ok(mut f) = std::fs::File::open(path) else { return vec![] };
+    let mut buf = vec![0u8; (starts[to] - starts[from]) as usize];
+    if f.seek(SeekFrom::Start(starts[from])).is_err() || f.read_exact(&mut buf).is_err() {
+        return vec![];
+    }
+    buf.pop();
+    buf.split(|b| *b == b'\n').map(parse_entry).collect()
+}
+
 /** The last `n` entries of a transcript and the line they start at; leaves `w` at the end of the file. */
 fn read_tail(w: &mut Watch, n: usize) -> (usize, Vec<Value>) {
-    let Ok(buf) = std::fs::read(&w.path) else { return (0, vec![]) };
-    let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return (0, vec![]) };
-    let body = &buf[..end];
-    let total = body.split(|b| *b == b'\n').count();
+    let starts = line_starts(&w.path);
+    let total = starts.len() - 1;
     let skip = total.saturating_sub(n);
-    let entries = body
-        .split(|b| *b == b'\n')
-        .skip(skip)
-        .map(|l| serde_json::from_slice(l).unwrap_or(Value::Null))
-        .collect();
-    w.offset = end as u64 + 1;
+    let entries = read_range(&w.path, &starts, skip, total);
+    w.offset = starts[total];
     w.next_line = total;
     (skip, entries)
+}
+
+/** Entries from line `from` on; leaves `w` at the end of the file. */
+fn read_from(w: &mut Watch, from: usize) -> Vec<Value> {
+    let starts = line_starts(&w.path);
+    let total = starts.len() - 1;
+    let entries = read_range(&w.path, &starts, from, total);
+    w.offset = starts[total];
+    w.next_line = total;
+    entries
+}
+
+/** A transcript line as the app needs it: without what it never shows (request blobs, image bytes in
+tool results, the `toolUseResult` copy), and long tool output cut to `TOOL_TEXT_MAX`, so a chat full of
+screenshots opens in a fraction of the bytes. */
+fn parse_entry(line: &[u8]) -> Value {
+    let Ok(mut v) = serde_json::from_slice::<Value>(line) else { return Value::Null };
+    match v.get("type").and_then(Value::as_str) {
+        Some("user" | "assistant" | "system") => {}
+        _ => return json!({ "type": v.get("type").cloned().unwrap_or(Value::Null) }),
+    }
+    if let Some(o) = v.as_object_mut() {
+        o.remove("toolUseResult");
+    }
+    if let Some(blocks) = v.pointer_mut("/message/content").and_then(Value::as_array_mut) {
+        for b in blocks.iter_mut().filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")) {
+            match b.get_mut("content") {
+                Some(Value::Array(parts)) => {
+                    parts.retain(|p| p.get("type").and_then(Value::as_str) != Some("image"));
+                    for p in parts.iter_mut() {
+                        if let Some(Value::String(t)) = p.get_mut("text") {
+                            cut(t);
+                        }
+                    }
+                }
+                Some(Value::String(t)) => cut(t),
+                _ => {}
+            }
+        }
+    }
+    v
+}
+
+const TOOL_TEXT_MAX: usize = 20_000;
+
+fn cut(t: &mut String) {
+    if t.len() > TOOL_TEXT_MAX {
+        let mut at = TOOL_TEXT_MAX;
+        while !t.is_char_boundary(at) {
+            at -= 1;
+        }
+        t.truncate(at);
+        t.push_str("\n… (cut here; the full output is in the transcript file)");
+    }
 }
 
 fn transcript_loop(shared: &Arc<Shared>) {
@@ -323,16 +432,22 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             conn.subscribed.store(true, Ordering::SeqCst);
             return Ok(json!({ "last_seq": last }));
         }
-        Call::TranscriptRead { chat_id, from, tail } => {
+        Call::TranscriptRead { chat_id, from, tail, before } => {
             let chat = registry_chat(&chat_id).ok_or("no such chat")?;
             let id = chat.get("id").and_then(|v| v.as_str()).unwrap_or(&chat_id).to_string();
             let dir = chat.get("dir").and_then(|v| v.as_str()).ok_or("chat has no folder")?;
             let path = util::transcript_path(dir, &id);
             let mut w = Watch { path: path.clone(), offset: 0, next_line: 0 };
+            // An older page: lines before `before`, leaving the watch alone.
+            if let Some(b) = before {
+                let n = tail.unwrap_or(600);
+                let starts = line_starts(&path);
+                let start = b.saturating_sub(n);
+                return Ok(json!({ "entries": read_range(&path, &starts, start, b), "from": start }));
+            }
             let (from, entries) = match tail.filter(|_| from == 0) {
-                // Long transcripts run to tens of megabytes; parse only the lines asked for.
                 Some(n) => read_tail(&mut w, n),
-                None => (from, read_lines(&mut w).into_iter().skip(from).collect()),
+                None => (from, read_from(&mut w, from)),
             };
             let next = w.next_line;
             conn.watches.lock().unwrap().insert(id, w);

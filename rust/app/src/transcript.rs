@@ -26,6 +26,10 @@ pub struct Transcript {
     compact_trigger: Option<String>,
     /** Bumped on every change so views can tell new content from a re-render. */
     pub revision: u64,
+    /** Tool results whose call is in lines not loaded yet (an older page attaches them). */
+    orphans: HashMap<String, (String, bool)>,
+    /** Messages just sent, shown right away until the file has them: (text, item index). */
+    echoes: Vec<(String, usize)>,
 }
 
 impl Transcript {
@@ -45,7 +49,7 @@ impl Transcript {
             if from < self.lines {
                 return;
             }
-            if self.lines == 0 && self.items.is_empty() {
+            if self.lines == 0 {
                 self.start = from;
             }
             self.lines = from;
@@ -54,6 +58,60 @@ impl Transcript {
             self.lines += 1;
             self.push_entry(e);
         }
+        self.revision += 1;
+    }
+
+    /** Shows a message you just sent before Claude Code writes it to the file (which takes a moment). */
+    pub fn echo(&mut self, text: &str) {
+        self.echoes.push((text.trim().to_string(), self.items.len()));
+        self.items.push(Item::User { text: text.trim().to_string() });
+        self.revision += 1;
+    }
+
+    /** Swaps the echo of `text` (or else the oldest echo) out for the real message about to be added. */
+    fn settle_echo(&mut self, text: &str) {
+        if self.echoes.is_empty() {
+            return;
+        }
+        let k = self.echoes.iter().position(|(t, _)| t == text).unwrap_or(0);
+        let (_, at) = self.echoes.remove(k);
+        if at < self.items.len() {
+            self.items.remove(at);
+            for i in self.tool_index.values_mut().chain(self.echoes.iter_mut().map(|e| &mut e.1)) {
+                if *i > at {
+                    *i -= 1;
+                }
+            }
+        }
+    }
+
+    /** Adds the older lines `from..self.start` in front. */
+    pub fn prepend(&mut self, from: usize, entries: &[Value]) {
+        let mut older = Transcript { lines: from, start: from, ..Default::default() };
+        for e in entries {
+            older.lines += 1;
+            older.push_entry(e);
+        }
+        for (id, (text, err)) in std::mem::take(&mut self.orphans) {
+            match older.tool_index.get(&id).and_then(|&i| older.items.get_mut(i)) {
+                Some(Item::Tool { result, is_error, .. }) => {
+                    *result = Some(text);
+                    *is_error = err;
+                }
+                _ => {
+                    older.orphans.insert(id, (text, err));
+                }
+            }
+        }
+        let shift = older.items.len();
+        for i in self.tool_index.values_mut().chain(self.echoes.iter_mut().map(|e| &mut e.1)) {
+            *i += shift;
+        }
+        self.tool_index.extend(older.tool_index);
+        older.items.append(&mut self.items);
+        self.items = older.items;
+        self.orphans = older.orphans;
+        self.start = from;
         self.revision += 1;
     }
 
@@ -155,7 +213,9 @@ impl Transcript {
         // A slash command shows as what was typed ("/loop /ship-feature X"), not its markup.
         if let Some(name) = between(t, "<command-name>", "</command-name>") {
             let args = between(t, "<command-args>", "</command-args>").unwrap_or("");
-            self.items.push(Item::User { text: format!("{name} {args}").trim().to_string() });
+            let text = format!("{name} {args}").trim().to_string();
+            self.settle_echo(&text);
+            self.items.push(Item::User { text });
             return;
         }
         // Another Claude session talking to this one (SendMessage, teammates): a collapsed step, not you.
@@ -182,6 +242,7 @@ impl Transcript {
         if t.is_empty() || t.starts_with("<command-") || t.starts_with("<local-command") || t.starts_with("<system-reminder") {
             return;
         }
+        self.settle_echo(t);
         self.items.push(Item::User { text: t.to_string() });
     }
 
@@ -192,10 +253,14 @@ impl Transcript {
             Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
             _ => String::new(),
         };
-        if let Some(&i) = self.tool_index.get(id) {
-            if let Some(Item::Tool { result, is_error, .. }) = self.items.get_mut(i) {
+        let err = b["is_error"].as_bool().unwrap_or(false);
+        match self.tool_index.get(id).and_then(|&i| self.items.get_mut(i)) {
+            Some(Item::Tool { result, is_error, .. }) => {
                 *result = Some(text);
-                *is_error = b["is_error"].as_bool().unwrap_or(false);
+                *is_error = err;
+            }
+            _ => {
+                self.orphans.insert(id.to_string(), (text, err));
             }
         }
     }
@@ -331,5 +396,29 @@ mod paging_tests {
         assert_eq!((t.start, t.lines), (1200, 1202));
         t.append(1202, &[line]);
         assert_eq!((t.start, t.lines), (1200, 1203));
+    }
+
+    #[test]
+    fn a_sent_message_shows_at_once_and_is_replaced_by_the_real_one() {
+        let mut t = Transcript::default();
+        t.append(0, &[json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}})]);
+        t.echo("fix it");
+        assert_eq!(t.items.len(), 2);
+        t.append(1, &[json!({"type": "user", "message": {"content": "fix it"}})]);
+        assert_eq!(t.items.len(), 2);
+        assert!(t.echoes.is_empty());
+    }
+
+    #[test]
+    fn an_older_page_goes_in_front_and_claims_its_results() {
+        let call = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}});
+        let result = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "a.txt"}]}});
+        let said = json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}});
+        let mut t = Transcript::default();
+        t.append(10, &[result, said]);
+        t.prepend(9, &[call]);
+        assert_eq!((t.start, t.lines), (9, 12));
+        assert!(matches!(&t.items[0], super::Item::Tool { result: Some(r), .. } if r == "a.txt"));
+        assert!(matches!(&t.items[1], super::Item::Assistant { text } if text == "done"));
     }
 }

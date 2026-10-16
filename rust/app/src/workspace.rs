@@ -52,6 +52,7 @@ pub struct Workspace {
     pub(crate) completion: Option<(String, String, Vec<crate::completions::Entry>, usize)>,
     /** Messages typed while a chat was working, sent one per turn as it finishes (`chat.queue`). */
     pub(crate) queued: HashMap<String, Vec<String>>,
+    queue_saved: String,
     /** This view, for click handlers built without a `cx` (message actions). */
     pub(crate) view_handle: Option<WeakEntity<Workspace>>,
     placeholders: HashMap<String, String>,
@@ -216,7 +217,8 @@ impl Workspace {
             input_submits: HashMap::new(),
             loading_earlier: Default::default(),
             completion: None,
-            queued: HashMap::new(),
+            queued: std::fs::read_to_string(settings::dir().join("queued.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+            queue_saved: String::new(),
             view_handle: None,
             placeholders: HashMap::new(),
             queue_sent: HashMap::new(),
@@ -1192,7 +1194,7 @@ impl Workspace {
                 // Only the newest `chat.transcript_tail` entries on first load: dispatcher transcripts run to 80MB.
                 let tail = self.settings.chat.get("transcript_tail").and_then(Value::as_u64).map(|n| n as usize).filter(|_| from == 0);
                 cx.spawn(async move |this, cx| {
-                    if let Ok(v) = remote.call(Call::TranscriptRead { chat_id: id.clone(), from, tail }).await {
+                    if let Ok(v) = remote.call(Call::TranscriptRead { chat_id: id.clone(), from, tail, before: None }).await {
                         let entries = v["entries"].as_array().cloned().unwrap_or_default();
                         let start = v["from"].as_u64().unwrap_or(from as u64) as usize;
                         this.update(cx, |ws, cx| {
@@ -1347,9 +1349,25 @@ impl Workspace {
         for id in ready {
             let Some(text) = self.queued.get_mut(&id).filter(|q| !q.is_empty()).map(|q| q.remove(0)) else { continue };
             self.queue_sent.insert(id.clone(), std::time::Instant::now());
-            let call = Call::ChatSend { chat_id: id.clone(), text };
-            self.route(&call).send(call);
+            self.send_chat(&id, text);
             self.ctx_rev += 1;
+        }
+    }
+
+    /** Sends a message to a chat, showing it in the transcript at once. */
+    pub(crate) fn send_chat(&mut self, id: &str, text: String) {
+        self.transcripts.entry(id.to_string()).or_default().echo(&text);
+        let call = Call::ChatSend { chat_id: id.to_string(), text };
+        self.route(&call).send(call);
+    }
+
+    /** Queued messages survive a restart: kept in `queued.json` in the settings folder. */
+    fn save_queue(&mut self) {
+        self.queued.retain(|_, q| !q.is_empty());
+        let text = serde_json::to_string_pretty(&self.queued).unwrap_or_default();
+        if text != self.queue_saved {
+            let _ = std::fs::write(settings::dir().join("queued.json"), &text);
+            self.queue_saved = text;
         }
     }
 
@@ -1383,8 +1401,7 @@ impl Workspace {
             self.queued.entry(id.to_string()).or_default().push(text);
             self.ctx_rev += 1;
         } else {
-            let call = Call::ChatSend { chat_id: id.to_string(), text };
-            self.route(&call).send(call);
+            self.send_chat(id, text);
         }
         self.jump_to_latest(id);
         state.update(cx, |s, cx| s.set_value("", window, cx));
@@ -1738,22 +1755,21 @@ impl Workspace {
             return;
         }
         let page = self.settings.chat.get("transcript_page").and_then(Value::as_u64).unwrap_or(600) as usize;
-        let tail = t.lines - t.start + page;
+        let before = t.start;
         let remote = self.route(&Call::TranscriptUnwatch { chat_id: chat_id.to_string() });
         let id = chat_id.to_string();
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let res = remote.call(Call::TranscriptRead { chat_id: id.clone(), from: 0, tail: Some(tail) }).await;
+            let res = remote.call(Call::TranscriptRead { chat_id: id.clone(), from: 0, tail: Some(page), before: Some(before) }).await;
             this.update(cx, |ws, cx| {
                 ws.loading_earlier.remove(&id);
                 if let Ok(v) = res {
                     let entries = v["entries"].as_array().cloned().unwrap_or_default();
                     let start = v["from"].as_u64().unwrap_or(0) as usize;
-                    let mut fresh = crate::transcript::Transcript::default();
-                    fresh.append(start, &entries);
-                    fresh.revision = ws.transcripts.get(&id).map(|t| t.revision + 1).unwrap_or(1);
-                    ws.transcripts.insert(id.clone(), fresh);
-                    ws.reanchor_list(&id);
+                    if let Some(t) = ws.transcripts.get_mut(&id).filter(|t| t.start == before) {
+                        t.prepend(start, &entries);
+                        ws.reanchor_list(&id);
+                    }
                 }
                 cx.notify();
             })
@@ -2076,6 +2092,7 @@ impl Render for Workspace {
         self.register_terminals(cx);
         let t = std::time::Instant::now();
         self.flush(window, cx);
+        self.save_queue();
         self.perf.borrow_mut().spans.insert("flush", t.elapsed().as_secs_f32() * 1000.);
         self.render_generation += 1;
         self.clickables.clear();

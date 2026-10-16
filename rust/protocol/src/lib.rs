@@ -26,6 +26,9 @@ pub enum Call {
         from: usize,
         #[serde(default)]
         tail: Option<usize>,
+        /** With `tail`: the `tail` lines before this line instead (an older page); the watch is left alone. */
+        #[serde(default)]
+        before: Option<usize>,
     },
     TranscriptUnwatch { chat_id: String },
     ChatNew {

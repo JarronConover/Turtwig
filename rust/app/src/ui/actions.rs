@@ -368,10 +368,7 @@ impl Workspace {
                                     window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
                                 }
                             }
-                            "queue.send_now" => {
-                                let call = Call::ChatSend { chat_id: id.clone(), text };
-                                self.route(&call).send(call);
-                            }
+                            "queue.send_now" => self.send_chat(&id, text),
                             _ => {}
                         }
                     }

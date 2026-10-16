@@ -7,7 +7,22 @@ use std::time::{Duration, Instant};
 
 use crate::util;
 
-const GIT_TTL: Duration = Duration::from_secs(20);
+const GIT_TTL: Duration = Duration::from_secs(90);
+/** How many `git status` runs at once: in a big repo each takes seconds of disk and CPU, and forty at
+once (one per worktree) slowed the whole Mac down. */
+const GIT_AT_ONCE: usize = 2;
+static GIT_SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+fn with_git_slot<T>(f: impl FnOnce() -> T) -> T {
+    let (lock, cv) = &GIT_SLOTS;
+    let mut busy = cv.wait_while(lock.lock().unwrap(), |n| *n >= GIT_AT_ONCE).unwrap();
+    *busy += 1;
+    drop(busy);
+    let out = f();
+    *lock.lock().unwrap() -= 1;
+    cv.notify_one();
+    out
+}
 const MR_TTL: Duration = Duration::from_secs(90);
 
 /** Repo key and GitLab project for each checkout folder name. */
@@ -45,7 +60,7 @@ impl Caches {
                 let me = self.clone();
                 let path = path.to_string();
                 move || {
-                    let info = git_info(&path);
+                    let info = with_git_slot(|| git_info(&path));
                     me.git.lock().unwrap().insert(path, (Instant::now(), info));
                 }
             });
