@@ -87,7 +87,8 @@ def chats():
             continue
         session = f"chat-{c['id'][:8]}"
         c["alive"] = c.get("host") == host and session in alive
-        t = PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", c.get("dir") or "") / f"{c['id']}.jsonl"
+        # A Codex chat's rollout, else its Claude Code session file.
+        t = Path(c["transcript"]) if c.get("transcript") else PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", c.get("dir") or "") / f"{c['id']}.jsonl"
         c["last_ts"] = t.stat().st_mtime if t.exists() else None
         c["last_activity"] = iso(c["last_ts"]) if c["last_ts"] else None
         c["working"] = bool(c["alive"] and c["last_ts"] and now() - c["last_ts"] < 20)

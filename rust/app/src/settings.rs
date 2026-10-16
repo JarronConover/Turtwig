@@ -229,3 +229,16 @@ impl Settings {
         self.get(path).and_then(Value::as_f64).unwrap_or(default)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_defaults_define_each_agent_the_daemon_launches() {
+        let v: serde_json::Value = serde_json_lenient::from_str(super::DEFAULTS).expect("defaults parse");
+        let agents = &v["daemon"]["agents"];
+        assert_eq!(agents["claude"]["session"], "assigned");
+        assert_eq!(agents["codex"]["transcripts"], "codex");
+        assert_eq!(agents["codex"]["prompt_char"], "›");
+        assert!(agents["codex"]["resume"].as_array().is_some_and(|a| a.iter().any(|x| x == "{session}")));
+    }
+}

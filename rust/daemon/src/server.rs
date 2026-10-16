@@ -9,12 +9,26 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::{config, db, mac, model, term, util};
+use crate::{agents, config, db, mac, model, term, util};
 
 struct Watch {
     path: PathBuf,
     offset: u64,
     next_line: usize,
+    parse: fn(&[u8]) -> Value,
+    /** A registry chat whose transcript isn't known yet (a new Codex chat): looked up again until it is. */
+    resolve: Option<String>,
+}
+
+impl Watch {
+    fn new(path: PathBuf, parse: fn(&[u8]) -> Value) -> Self {
+        Watch { path, offset: 0, next_line: 0, parse, resolve: None }
+    }
+}
+
+/** How lines of the agent's transcripts become entries. */
+fn parser(agent: &str) -> fn(&[u8]) -> Value {
+    if agents::format(agent) == "codex" { crate::codex::entry } else { parse_entry }
 }
 
 struct Conn {
@@ -173,7 +187,7 @@ fn read_lines(w: &mut Watch) -> Vec<Value> {
     }
     let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return vec![] };
     w.offset += end as u64 + 1;
-    let out: Vec<Value> = buf[..end].split(|b| *b == b'\n').map(parse_entry).collect();
+    let out: Vec<Value> = buf[..end].split(|b| *b == b'\n').map(w.parse).collect();
     w.next_line += out.len();
     out
 }
@@ -217,14 +231,14 @@ fn warm_line_starts() {
         .collect();
     chats.sort_by(|a, b| b.0.cmp(&a.0));
     for (_, c) in chats.into_iter().take(config::count("warm_index_chats", 60)) {
-        if let (Some(id), Some(dir)) = (c.get("id").and_then(Value::as_str), c.get("dir").and_then(Value::as_str)) {
-            line_starts(&util::transcript_path(dir, id));
+        if let Some(path) = agents::transcript_path(&c) {
+            line_starts(&path);
         }
     }
 }
 
 /** Entries `from..to` (line numbers), parsed. */
-fn read_range(path: &PathBuf, starts: &[u64], from: usize, to: usize) -> Vec<Value> {
+fn read_range(path: &PathBuf, starts: &[u64], from: usize, to: usize, parse: fn(&[u8]) -> Value) -> Vec<Value> {
     let lines = starts.len().saturating_sub(1);
     let (from, to) = (from.min(lines), to.min(lines));
     if from >= to {
@@ -236,7 +250,7 @@ fn read_range(path: &PathBuf, starts: &[u64], from: usize, to: usize) -> Vec<Val
         return vec![];
     }
     buf.pop();
-    buf.split(|b| *b == b'\n').map(parse_entry).collect()
+    buf.split(|b| *b == b'\n').map(parse).collect()
 }
 
 /** The last `n` entries of a transcript and the line they start at; leaves `w` at the end of the file. */
@@ -244,7 +258,7 @@ fn read_tail(w: &mut Watch, n: usize) -> (usize, Vec<Value>) {
     let starts = line_starts(&w.path);
     let total = starts.len() - 1;
     let skip = total.saturating_sub(n);
-    let entries = read_range(&w.path, &starts, skip, total);
+    let entries = read_range(&w.path, &starts, skip, total, w.parse);
     w.offset = starts[total];
     w.next_line = total;
     (skip, entries)
@@ -254,7 +268,7 @@ fn read_tail(w: &mut Watch, n: usize) -> (usize, Vec<Value>) {
 fn read_from(w: &mut Watch, from: usize) -> Vec<Value> {
     let starts = line_starts(&w.path);
     let total = starts.len() - 1;
-    let entries = read_range(&w.path, &starts, from, total);
+    let entries = read_range(&w.path, &starts, from, total, w.parse);
     w.offset = starts[total];
     w.next_line = total;
     entries
@@ -299,7 +313,7 @@ fn parse_entry(line: &[u8]) -> Value {
 }
 
 /** Long tool output cut to `tool_text_max` characters (0: never), with `tool_text_cut_note` after. */
-fn cut(t: &mut String) {
+pub(crate) fn cut(t: &mut String) {
     let max = config::count("tool_text_max", 20_000);
     if max > 0 && t.len() > max {
         let mut at = max;
@@ -316,6 +330,12 @@ fn transcript_loop(shared: &Arc<Shared>) {
     for c in shared.conns.lock().unwrap().iter() {
         let mut watches = c.watches.lock().unwrap();
         for (chat_id, w) in watches.iter_mut() {
+            if let Some(id) = w.resolve.clone() {
+                match registry_chat(&id).as_ref().and_then(agents::transcript_path) {
+                    Some(p) => (w.path, w.resolve) = (p, None),
+                    None => continue,
+                }
+            }
             let from = w.next_line;
             let entries = read_lines(w);
             if !entries.is_empty() {
@@ -469,22 +489,35 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             };
             let chat = registry_chat(&lookup).ok_or("no such chat")?;
             let reg_id = chat.get("id").and_then(|v| v.as_str()).unwrap_or(&lookup).to_string();
-            let dir = chat.get("dir").and_then(|v| v.as_str()).ok_or("chat has no folder")?;
-            let mut path = util::transcript_path(dir, &reg_id);
+            let kind = agents::of(&chat);
+            let codex = agents::format(&kind) == "codex";
+            if !codex && chat.get("dir").and_then(Value::as_str).is_none() {
+                return Err("chat has no folder".into());
+            }
+            let found = agents::transcript_path(&chat);
+            let mut path = found.clone().unwrap_or_default();
             let id = match &agent {
+                // A Codex subagent is a session of its own (AGENT: its thread id).
+                Some(a) if codex => {
+                    path = crate::codex::find_rollout(&agents::sessions_dir(&kind), a).ok_or("no transcript for that subagent yet")?;
+                    chat_id.clone()
+                }
                 Some(a) => {
                     path = subagent_path(&path, a).ok_or("no transcript for that subagent yet")?;
                     chat_id.clone()
                 }
-                None => reg_id,
+                None => reg_id.clone(),
             };
-            let mut w = Watch { path: path.clone(), offset: 0, next_line: 0 };
+            let mut w = Watch::new(path.clone(), parser(&kind));
+            if found.is_none() && agent.is_none() {
+                w.resolve = Some(reg_id);
+            }
             // An older page: lines before `before`, leaving the watch alone.
             if let Some(b) = before {
                 let n = tail.unwrap_or(config::count("transcript_page", 600));
                 let starts = line_starts(&path);
                 let start = b.saturating_sub(n);
-                return Ok(json!({ "entries": read_range(&path, &starts, start, b), "from": start }));
+                return Ok(json!({ "entries": read_range(&path, &starts, start, b, w.parse), "from": start }));
             }
             let (from, entries) = match tail.filter(|_| from == 0) {
                 Some(n) => read_tail(&mut w, n),
@@ -498,10 +531,10 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             conn.watches.lock().unwrap().retain(|k, _| !k.starts_with(&chat_id));
             return Ok(json!({}));
         }
-        Call::ChatNew { name, kind, branch, base, dir, repo, prompt, model } => {
+        Call::ChatNew { name, kind, branch, base, dir, repo, prompt, model, agent } => {
             let mut args: Vec<String> = vec!["new".into(), name, "--kind".into(), kind];
             for (flag, v) in [("--branch", branch), ("--base", base), ("--dir", dir), ("--repo", repo),
-                              ("--prompt", prompt), ("--model", model)] {
+                              ("--prompt", prompt), ("--model", model), ("--agent", agent)] {
                 if let Some(v) = v.filter(|v| !v.is_empty()) {
                     args.push(flag.into());
                     args.push(v);
@@ -523,6 +556,8 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             // the Enter submits it with no wait (typing it in took a half-second pause and a Python start).
             let target = format!("={}:", util::chat_session(&chat_id));
             let ok = |args: &[&str]| util::run("tmux", args, &[], None, Duration::from_secs(10)).ok;
+            let chat = registry_chat(&chat_id);
+            let kind = chat.as_ref().map(agents::of).unwrap_or_else(|| "claude".into());
             if !ok(&["has-session", "-t", &target]) {
                 return chat_tool(&["send", &chat_id, &text], 60);
             }
@@ -533,7 +568,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             // Claude Code can drop an Enter that lands while it's still taking the paste in: press it, then
             // again (a few times at most) while the prompt line still holds the text.
             std::thread::sleep(config::ms("send_paste_wait_ms", 150));
-            let prompt = config::text("prompt_char", "❯");
+            let prompt = agents::text(&kind, "prompt_char", "❯");
             for _ in 0..config::count("send_enter_tries", 4).max(1) {
                 if !ok(&["send-keys", "-t", &target, "C-m"]) {
                     return Err("couldn't submit the message".into());
@@ -542,11 +577,14 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                 if prompt.is_empty() {
                     break;
                 }
-                let pane = util::run("tmux", &["capture-pane", "-p", "-t", &target], &[], None, Duration::from_secs(5)).stdout;
-                let waiting = pane.lines().rev().find(|l| l.trim_start().starts_with(prompt.as_str())).map(|l| l.trim_start().trim_start_matches(prompt.as_str()).trim().to_string());
-                if waiting.as_deref().is_none_or(str::is_empty) {
+                let pane = util::run("tmux", &["capture-pane", "-p", "-e", "-t", &target], &[], None, Duration::from_secs(5)).stdout;
+                if model::typed_input(&pane, &prompt).is_none_or(|t| t.is_empty()) {
                     break;
                 }
+            }
+            // A new Codex chat's session (and rollout) starts with its first message: record it now.
+            if chat.as_ref().is_some_and(|c| agents::format(&kind) == "codex" && c.get("session_id").is_none()) {
+                let _ = chat_tool(&["_session", &chat_id, "--background"], 10);
             }
             Ok(json!({}))
         }
@@ -557,7 +595,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let o = util::run("tmux", &args, &[], None, Duration::from_secs(10));
             // Esc ends the turn, and no hook says so: the chat is idle from here.
             if o.ok && keys == ["Escape"] && config::flag("escape_marks_idle", true) {
-                let sid = registry_chat(&chat_id).and_then(|c| c.get("id").and_then(Value::as_str).map(str::to_string)).unwrap_or(chat_id.clone());
+                let sid = registry_chat(&chat_id).as_ref().and_then(agents::session_key).unwrap_or(chat_id.clone());
                 shared.states.lock().unwrap().insert(sid, ("idle".into(), None));
             }
             if o.ok { Ok(json!({})) } else { Err(o.message()) }
@@ -678,7 +716,7 @@ fn history(limit: usize) -> Value {
             continue;
         }
         let alive = alive.contains(&util::chat_session(&id));
-        let last = dir.as_deref().and_then(|d| util::mtime(&util::transcript_path(d, &id)));
+        let last = agents::transcript_path(&c).and_then(|p| util::mtime(&p));
         chats.push(json!({
             "id": id, "name": s("name").unwrap_or_default(), "dir": dir, "host": host, "last_activity": last,
             "closed": s("status").as_deref() != Some("running") || !alive,

@@ -421,6 +421,8 @@ impl Transcript {
                                 self.items.push(Item::Thinking { text });
                             }
                         }
+                        // Agents that log a finished call with its result (Codex) put both in one entry.
+                        Some("tool_result") => self.tool_result(b),
                         Some("tool_use") => {
                             let id = b["id"].as_str().unwrap_or("").to_string();
                             let name = b["name"].as_str().unwrap_or("tool").to_string();
@@ -753,3 +755,19 @@ mod options_tests {
     }
 }
 
+
+#[cfg(test)]
+mod finished_call_tests {
+    use super::{Item, Transcript};
+    use serde_json::json;
+
+    #[test]
+    fn a_call_logged_with_its_result_shows_finished() {
+        let mut t = Transcript::default();
+        t.append(0, &[json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "exec-1", "name": "Bash", "input": {"command": "echo hi"}},
+            {"type": "tool_result", "tool_use_id": "exec-1", "content": "hi\n", "is_error": false}
+        ]}})]);
+        assert!(matches!(t.items.as_slice(), [Item::Tool { result: Some(r), .. }] if r == "hi\n"));
+    }
+}

@@ -205,7 +205,8 @@ Examples:
 | `.projects[]` | `{name, repo, hue, letter, items: [worktree]}`: repos with their worktrees outside any section |
 | `.sections[]` | `{id, name, collapsed, items: [worktree]}` |
 | `.worktrees[]` | every worktree: `{id, path, branch, title, emoji, label, project, repo, hue, letter, is_primary, uncommitted, unpushed, behind, mr: {number, url, state, checks} \| null, age, age_text, status, section: {id, name} \| null, selected, chats: [chat]}`. `status` is one of working, waiting, merged, failing, pending, dirty, behind, idle. |
-| `.chats[]` | every chat: `{id, name, kind, host, status, dir, branch, rc_url, alive, state, waiting_on, last_activity, age_text, active, tmux}`. `state` is idle, working, waiting, or stopped; `host` is box or mac; `activity` is a short line on what a working agent is doing now ("Reading settings.jsonc", "Thinking", "Writing"), empty otherwise (filled for chats whose transcript is open). |
+| `.chats[]` | every chat: `{id, name, kind, agent, host, status, dir, branch, rc_url, alive, state, waiting_on, last_activity, age_text, active, tmux}`. `state` is idle, working, waiting, or stopped; `host` is box or mac; `agent` is the CLI it runs (a key of `.agents`); `activity` is a short line on what a working agent is doing now ("Reading settings.jsonc", "Thinking", "Writing"), empty otherwise (filled for chats whose transcript is open). |
+| `.agents` | settings `daemon.agents`: each agent CLI a chat can run (`{name, icon, color, ...}` by key, e.g. `.agents[.c.agent].icon`) |
 | `.designer` | `{working, activity, has_messages}` for the designer chat |
 | `.selected.worktree` | the selected worktree (or null) |
 | `.selected.chat` | its active chat (or null) |

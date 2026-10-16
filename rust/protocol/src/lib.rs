@@ -40,6 +40,9 @@ pub enum Call {
         repo: Option<String>,
         prompt: Option<String>,
         model: Option<String>,
+        /** Which agent CLI runs it (a key of the daemon's `agents`); None: the default (claude). */
+        #[serde(default)]
+        agent: Option<String>,
     },
     ChatStart { chat_id: String },
     /** A new chat in the same folder that starts with a copy of this one's conversation; replies like ChatNew. */
@@ -212,6 +215,13 @@ pub struct Chat {
     /** Claude Code's prompt suggestion (the dim text in its empty input box) while idle. */
     #[serde(default)]
     pub suggestion: Option<String>,
+    /** The agent CLI it runs: a key of the daemon's `agents` (claude, codex). */
+    #[serde(default = "default_agent")]
+    pub agent: String,
+}
+
+fn default_agent() -> String {
+    "claude".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

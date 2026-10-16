@@ -1249,6 +1249,7 @@ impl Workspace {
             "state": self.state,
             "theme": self.settings.theme,
             "hosts": self.settings.hosts,
+            "agents": self.settings.get("daemon.agents").cloned().unwrap_or(Value::Null),
             "history": self.history,
             "app": {
                 "confirm": self.confirm.as_ref().map(|c| { let mut c = c.clone(); if let Value::Object(o) = &mut c { o.remove("then"); } c }),

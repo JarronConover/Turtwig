@@ -894,7 +894,7 @@
     },
 
     "ChatTabs": {
-      "about": "Tabs for the selected worktree's open chats (a chat is open while its Claude process runs; closing a tab stops it), a placeholder while a new chat starts, + for a new chat, and the worktree's closed chats under the clock. Drag tabs to reorder them.",
+      "about": "Tabs for the selected worktree's open chats (a chat is open while its agent's process runs; closing a tab stops it), a placeholder while a new chat starts, + for a new chat, and the worktree's closed chats under the clock. Drag tabs to reorder them.",
       "type": "row",
       "style": { "height": 32, "shrink": 0, "padding": [0, 0, 0, 6], "align": "stretch" },
       "children": [
@@ -918,20 +918,21 @@
               "drag": { "kind": "chat", "value": "{{ .c.id }}", "label": "{{ .c.name }}" },
               "drop_key": "tab:{{ .c.id }}",
               "drop_zones": "edges_x",
-              "tooltip": "{{ .hosts[.c.host].label // .c.host }} · {{ .c.state }}",
+              "tooltip": "{{ .agents[.c.agent].name // .c.agent }} · {{ .hosts[.c.host].label // .c.host }} · {{ .c.state }}",
               "menu": [
                 { "label": "Move {{ if .selected.move.scope == \"section\" then \"section\" elif .selected.move.scope == \"worktree\" then \"worktree\" else \"chat\" end }} to {{ if .c.host == \"box\" then \"the Mac\" else \"the cloud\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
                 { "if": ".selected.move.scope != \"chat\"", "label": "Move only this chat to {{ if .c.host == \"box\" then \"the Mac\" else \"the cloud\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "scope": "chat", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
                 { "if": ".c.alive | not", "label": "Start", "do": { "do": "chat.start", "chat": "{{ .c.id }}" } },
                 { "label": "Fork chat", "do": { "do": "chat.fork", "chat": "{{ .c.id }}" } },
                 { "separator": true },
-                { "label": "Close tab", "do": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its Claude process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
+                { "label": "Close tab", "do": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its {{ .agents[.c.agent].name // \"agent\" }} process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
                 { "label": "Archive", "do": { "do": "chat.archive", "chat": "{{ .c.id }}" } }
               ],
               "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 140 },
               "children": [
                 { "type": "DropLineX", "props": { "key": "tab:{{ .c.id }}" } },
                 { "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 12 } },
+                { "type": "AgentIcon", "props": { "agent": "{{ .c.agent }}", "size": 12 } },
                 { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "max_width": 240, "truncate": true } },
                 { "if": ".c.state == \"working\"", "type": "spinner", "props": { "size": "xsmall" } },
                 { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" } },
@@ -940,7 +941,7 @@
                   "type": "box",
                   "style": { "width": 18, "height": 18, "radius": 4, "align": "center", "justify": "center", "opacity": "{{ if .c.active then 0.9 else 0.45 end }}", "hover": { "background": "@hover", "opacity": 1 } },
                   "tooltip": "Close tab (stops the chat)",
-                  "on": { "click": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its Claude process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
+                  "on": { "click": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its {{ .agents[.c.agent].name // \"agent\" }} process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
                   "children": [{ "type": "icon", "props": { "name": "x", "size": 11, "color": "@text_muted" } }]
                 },
                 { "if": ".c.active", "type": "box", "style": { "position": "absolute", "left": 0, "right": 0, "bottom": 0, "height": 2, "background": "@accent" } }
@@ -961,8 +962,12 @@
           "id": "chat-tab-new",
           "type": "row",
           "style": { "padding": [0, 10], "gap": 4, "align": "center", "shrink": 0, "color": "@text_muted", "cursor": "pointer", "hover": { "color": "@text" } },
-          "tooltip": "New chat here  ⌘N",
+          "tooltip": "New chat here  ⌘N (right-click: pick the agent)",
           "on": { "click": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
+          "menu": [
+            { "label": "New Claude chat", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}", "agent": "claude" } },
+            { "label": "New Codex chat", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}", "agent": "codex" } }
+          ],
           "children": [{ "type": "icon", "props": { "name": "plus", "size": 13 } }]
         },
         { "type": "spacer" },
@@ -1001,6 +1006,7 @@
                   "on": { "click": [{ "do": "chat.open", "chat": "{{ .c.id }}" }, { "do": "state.set", "key": "chat_history_open", "value": false }] },
                   "children": [
                     { "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 12 } },
+                    { "type": "AgentIcon", "props": { "agent": "{{ .c.agent }}", "size": 12 } },
                     { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "grow": 1, "truncate": true } },
                     { "type": "text", "props": { "text": "{{ .c.age_text }}" }, "style": { "font_size": 12, "color": "@text_faint", "shrink": 0 } }
                   ]
@@ -1035,6 +1041,7 @@
             { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 11, "color": "@warning" } },
             { "if": ".c.state != \"working\" and .c.state != \"waiting\"", "type": "box", "style": { "width": 6, "height": 6, "radius": 3, "margin": [0, 2], "background": "{{ if .c.open then \"@accent\" else \"@line\" end }}" } },
             { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "grow": 1, "truncate": true } },
+            { "type": "AgentIcon", "props": { "agent": "{{ .c.agent }}", "size": 11 } },
             { "if": ".c.host != .props.w.host", "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 11 } },
             { "type": "text", "props": { "text": "{{ .c.age_text }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "shrink": 0 } }
           ]
@@ -1115,6 +1122,15 @@
           ]
         }
       ]
+    },
+
+    "AgentIcon": {
+      "about": "Which agent CLI a chat runs: `agents[props.agent].icon` when that agent sets `tab_icon`, with its name as the tooltip. props: agent, size (12).",
+      "if": ".agents[.props.agent].tab_icon == true",
+      "type": "box",
+      "style": { "shrink": 0, "align": "center", "justify": "center" },
+      "tooltip": "{{ .agents[.props.agent].name // .props.agent }}",
+      "children": [{ "type": "icon", "props": { "name": "{{ .agents[.props.agent].icon // \"bot\" }}", "size": "{{ .props.size // 12 }}", "color": "{{ .agents[.props.agent].color // \"@text_muted\" }}" } }]
     },
 
     "HostIcon": {
@@ -1632,13 +1648,14 @@
     { "key": "cmd-alt-[", "do": { "do": "select", "offset": -1 } },
     { "key": "cmd-q", "do": "app.quit" },
     { "key": "escape", "if": ".app.confirm", "do": "confirm.cancel" },
-    { "key": "cmd-w", "if": ".selected.chat", "do": { "do": "if", "cond": "{{ .selected.chat.state == \"working\" or .selected.chat.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .selected.chat.name }}”?", "text": "It's still working. Closing the tab stops its Claude process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .selected.chat.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .selected.chat.id }}" } } }
+    { "key": "cmd-w", "if": ".selected.chat", "do": { "do": "if", "cond": "{{ .selected.chat.state == \"working\" or .selected.chat.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .selected.chat.name }}”?", "text": "It's still working. Closing the tab stops its {{ .agents[.selected.chat.agent].name // \"agent\" }} process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .selected.chat.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .selected.chat.id }}" } } }
   ],
 
   "commands": [
     { "label": "Redesign the app (open the designer)", "do": { "do": "state.set", "key": "designer_open", "value": true } },
     { "label": "Undo the last design change", "do": "settings.undo" },
     { "label": "New chat here", "if": ".selected.worktree", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
+    { "label": "New Codex chat here", "if": ".selected.worktree", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}", "agent": "codex" } },
     { "label": "New orchestrator chat in redo", "do": { "do": "chat.new", "repo": "redo", "kind": "orchestrator" } },
     { "label": "New feature chat in redo…", "do": { "do": "prompt", "title": "Branch name", "then": { "do": "chat.new", "repo": "redo", "kind": "feature", "branch": "{{ .input }}" } } },
     { "label": "New section…", "do": "section.new" },
@@ -1974,7 +1991,7 @@
     "warm_index_chats": 60,              // newest chats line-indexed at startup
     "transcript_page": 600, "history_limit": 200,
     "send_paste_wait_ms": 150, "send_enter_tries": 4, "send_enter_wait_ms": 350,
-    "prompt_char": "❯",                  // Claude's input prompt ("" skips Enter retries)
+    "prompt_char": "❯",                  // Claude's input prompt ("" skips Enter retries); other agents set theirs in `agents`
     "escape_marks_idle": true,           // stop (Esc) marks the chat idle
     "connect_tries": 50, "connect_wait_ms": 200,
     "git_ttl_secs": 90, "git_at_once": 2, "mr_ttl_secs": 90,
@@ -1999,6 +2016,36 @@
     "terminal_mouse": false,             // tmux mouse mode on terminal shells (wheel scrolls tmux history)
     "terminal_history_limit": null,
     "chat_tmux_cols": 220, "chat_tmux_rows": 60, "rc_url_wait_secs": 45, "chat_send_pause_secs": 0.5, "supervise_secs": 30,
-    "sync_transcript_max_mb": 95, "sync_bundle_warn_mb": 50, "sync_lock_wait_secs": 600
+    "sync_transcript_max_mb": 95, "sync_bundle_warn_mb": 50, "sync_lock_wait_secs": 600,
+    // The agent a new chat runs when chat.new names none.
+    "default_agent": "claude",
+    // A new Codex chat's session id: bin/chat watches for its rollout this long after launch or a send.
+    "session_wait_secs": 180, "session_poll_secs": 1,
+    "codex_state_tail_kb": 512,          // how much of a rollout's end is read for its newest turn event
+    // The agent CLIs a chat can run (bin/chat launches them; the app shows name, icon, color; tab_icon puts
+    // the icon on its tabs). Templates are argv: {bin} {id} (chat) {session} (the agent's) {from} (a fork's
+    // source session) {name} {model} {prompt} {dir} {realdir}; a nested list drops when one of its values is
+    // empty. session: "assigned" (the chat id) or "discovered" (found under sessions_dir after launch).
+    // transcripts: "claude" | "codex". turn_events: rollout events that set working/idle. Claude's
+    // prompt_char and waiting_pattern are the top-level keys above.
+    "agents": {
+      "claude": {
+        "name": "Claude", "icon": "asterisk", "color": "@claude", "tab_icon": false,
+        "bin": "claude", "session": "assigned", "transcripts": "claude", "trust": "claude", "remote_control": true, "stop_elsewhere": true,
+        "new": ["{bin}", "--session-id", "{id}", "--remote-control", "{name}", ["--model", "{model}"], ["{prompt}"]],
+        "resume": ["{bin}", "--resume", "{session}", "--remote-control", "{name}", ["--model", "{model}"]],
+        "fork": ["{bin}", "--resume", "{from}", "--fork-session", "--session-id", "{id}", "--remote-control", "{name}", ["--model", "{model}"]]
+      },
+      "codex": {
+        "name": "Codex", "icon": "aperture", "color": "@text", "tab_icon": true,
+        "bin": "codex", "session": "discovered", "sessions_dir": "~/.codex/sessions", "transcripts": "codex",
+        "new": ["{bin}", "-c", "check_for_update_on_startup=false", "-c", "projects={\"{realdir}\"={trust_level=\"trusted\"}}", ["--model", "{model}"], ["{prompt}"]],
+        "resume": ["{bin}", "resume", "{session}", "-c", "check_for_update_on_startup=false", "-c", "projects={\"{realdir}\"={trust_level=\"trusted\"}}", ["--model", "{model}"]],
+        "fork": ["{bin}", "fork", "{from}", "-c", "check_for_update_on_startup=false", "-c", "projects={\"{realdir}\"={trust_level=\"trusted\"}}", ["--model", "{model}"]],
+        "prompt_char": "›",
+        "waiting_pattern": "(?i)Would you like to|Trust this folder|Hooks need review|enter to (confirm|continue|select)|esc to (cancel|skip|quit)|Allow .* to run",
+        "turn_events": { "task_started": "working", "task_complete": "idle", "turn_aborted": "idle" }
+      }
+    }
   }
 }

@@ -47,9 +47,14 @@ Agents on the box and the Mac app drive everything through three layers,
 all over the same state:
 
 - `bin/chat`: `new NAME [--kind primary|feature|orchestrator] [--branch B
-  [--base B]] [--dir D] [--repo R] [--prompt TEXT]`, `list`, `start|stop|
-  archive|send ID`, `move ID --to mac|box`, `test-local [ID | --branch B]`.
-  An orchestrator without a branch gets its own worktree (`sc-<name>`).
+  [--base B]] [--dir D] [--repo R] [--prompt TEXT] [--agent claude|codex]`,
+  `list`, `start|stop|archive|send ID`, `move ID --to mac|box`,
+  `test-local [ID | --branch B]`. An orchestrator without a branch gets its
+  own worktree (`sc-<name>`). Agents are data (settings `daemon.agents`):
+  launch/resume/fork templates, where transcripts live, how state shows. A
+  Codex chat's session id is found from its rollout after the first message.
+  `bin/codex-hooks [--file F] [--dry-run]` adds agent-boxd's hook to Codex's
+  hooks.json (Codex asks once to trust it), like `bin/claude-hooks`.
 - `shim/sc` (box only): super.engineering's CLI for the factory skills.
   `sc section create|edit|assign|unassign|delete`, `sc worktree
   create|delete|status|rename-branch|set-target-branch|set-label`, `sc layout

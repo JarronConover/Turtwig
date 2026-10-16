@@ -212,19 +212,45 @@ fn strip_ansi(s: &str) -> String {
 
 const WAITING_PATTERN: &str = r"(?i)Enter to select|Esc to cancel|Do you want to proceed|❯ 1\. Yes";
 
-/** Whether the pane's last `waiting_pane_lines` lines show a prompt matching `waiting_pattern` (a regex). */
-fn pane_waiting(pane: &str) -> bool {
-    static WAITING: Mutex<Option<(String, Regex)>> = Mutex::new(None);
-    let pattern = crate::config::text("waiting_pattern", WAITING_PATTERN);
+/** Whether the pane's last `waiting_pane_lines` lines show a prompt matching the agent's `waiting_pattern`. */
+fn pane_waiting(pane: &str, agent: &str) -> bool {
+    static WAITING: Mutex<Option<HashMap<String, Regex>>> = Mutex::new(None);
+    let pattern = crate::agents::text(agent, "waiting_pattern", WAITING_PATTERN);
     let mut cached = WAITING.lock().unwrap();
-    if cached.as_ref().is_none_or(|(p, _)| *p != pattern) {
-        let re = Regex::new(&pattern).or_else(|_| Regex::new(WAITING_PATTERN)).unwrap();
-        *cached = Some((pattern, re));
-    }
-    let re = &cached.as_ref().unwrap().1;
+    let re = cached.get_or_insert_with(HashMap::new).entry(pattern.clone())
+        .or_insert_with(|| Regex::new(&pattern).or_else(|_| Regex::new(WAITING_PATTERN)).unwrap());
     let text = strip_ansi(pane);
     let lines: Vec<&str> = text.lines().collect();
     re.is_match(&lines[lines.len().saturating_sub(crate::config::count("waiting_pane_lines", 25))..].join("\n"))
+}
+
+/** What's typed after the last line starting with `prompt` (the input box), without dim or grey text
+(a placeholder or suggestion). None: no such line. */
+pub(crate) fn typed_input(pane: &str, prompt: &str) -> Option<String> {
+    let line = pane.lines().rev().find(|l| strip_ansi(l).trim_start().starts_with(prompt))?;
+    // Map the plain text back onto the raw line: drop each SGR-faint run.
+    static SGR: OnceLock<Regex> = OnceLock::new();
+    let sgr = SGR.get_or_init(|| Regex::new(r"\x1b\[([0-9;]*)m").unwrap());
+    let raw = &line[line.find(prompt)? + prompt.len()..];
+    let (mut faint, mut out, mut pos) = (false, String::new(), 0);
+    for m in sgr.captures_iter(raw) {
+        let whole = m.get(0)?;
+        if !faint {
+            out.push_str(&strip_ansi(&raw[pos..whole.start()]));
+        }
+        pos = whole.end();
+        for p in m[1].split(';').map(|p| p.parse::<u32>().unwrap_or(0)) {
+            match p {
+                0 | 22 | 39 => faint = false,
+                2 | 90 => faint = true,
+                _ => {}
+            }
+        }
+    }
+    if !faint {
+        out.push_str(&strip_ansi(&raw[pos..]));
+    }
+    Some(out.trim().to_string())
 }
 
 /** The prompt suggestion in Claude Code's input box: the line after "❯\u{a0}" between two rules,
@@ -286,6 +312,16 @@ pub(crate) fn suggestion(pane: &str) -> Option<String> {
     (!text.is_empty() && !placeholder).then_some(text)
 }
 
+/** A chat's state from its transcript's newest turn event and its newest hook: a finished turn is idle
+whatever the hooks said last (Esc fires none), and a running one is working unless a hook says waiting. */
+fn combine(turn: Option<String>, hook: Option<(String, Option<Value>)>) -> Option<(String, Option<Value>)> {
+    match turn.as_deref() {
+        None => hook,
+        Some("working") => Some(hook.filter(|(st, _)| st == "waiting").unwrap_or(("working".into(), None))),
+        Some(st) => Some((st.to_string(), None)),
+    }
+}
+
 fn chats(states: &ChatStates) -> Vec<Chat> {
     let dir = util::agent_home().join("state").join("registry").join("chats");
     let here = crate::mac::host();
@@ -318,14 +354,21 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             .get_or_insert_with(|| crate::mac::sessions_running())
             .contains(&id) { "running_elsewhere".to_string() } else { status };
         let dir = s("dir");
-        let last = dir.as_deref().and_then(|d| util::mtime(&util::transcript_path(d, &id)));
-        let hook = states.get(&id).filter(|(st, _)| st != "stopped");
-        let pane = if is_alive && hook.is_none_or(|(st, _)| st == "idle") { capture(&tmux) } else { None };
+        let agent = crate::agents::of(&v);
+        let transcript = crate::agents::transcript_path(&v);
+        let last = transcript.as_deref().and_then(util::mtime);
+        let hook = crate::agents::session_key(&v).and_then(|k| states.get(&k)).filter(|(st, _)| st != "stopped").cloned();
+        // Agents whose transcripts mark each turn (Codex) say there whether they're working; hooks add waiting.
+        let turns = crate::agents::get(&agent, "turn_events").and_then(|t| t.as_object().cloned());
+        let turn = turns.as_ref().zip(transcript.as_deref()).and_then(|(t, p)| crate::codex::turn_state(p, t));
+        let hook = combine(turn, hook);
+        let pane = if is_alive && (turns.is_some() || hook.as_ref().is_none_or(|(st, _)| st == "idle")) { capture(&tmux) } else { None };
+        let pane_waits = pane.as_deref().is_some_and(|p| pane_waiting(p, &agent));
         let (state, waiting_on) = match hook {
             _ if !is_alive => ("stopped".to_string(), None),
-            Some((st, w)) => (st.clone(), w.clone()),
-            None if pane.as_deref().is_some_and(pane_waiting) => ("waiting".to_string(), None),
-            None => ("idle".to_string(), None),
+            Some((st, w)) if !(turns.is_some() && pane_waits && st != "waiting") => (st, w),
+            _ if pane_waits => ("waiting".to_string(), None),
+            _ => ("idle".to_string(), None),
         };
         let suggestion = if state == "idle" { pane.as_deref().and_then(suggestion) } else { None };
         out.push(Chat {
@@ -343,6 +386,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             last_activity: last,
             tmux,
             suggestion,
+            agent,
         });
     }
     out
@@ -452,7 +496,27 @@ pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model 
 
 #[cfg(test)]
 mod tests {
-    use super::suggestion;
+    use super::{combine, suggestion, typed_input};
+    use serde_json::json;
+
+    #[test]
+    fn a_turn_event_outranks_a_stale_hook() {
+        let hook = |s: &str| Some((s.to_string(), None));
+        assert_eq!(combine(Some("idle".into()), hook("working")), hook("idle"));
+        assert_eq!(combine(Some("working".into()), hook("idle")), hook("working"));
+        let asks = Some(("waiting".to_string(), Some(json!({"tool_name": "Bash"}))));
+        assert_eq!(combine(Some("working".into()), asks.clone()), asks);
+        assert_eq!(combine(None, hook("working")), hook("working"));
+        assert_eq!(combine(None, None), None);
+    }
+
+    #[test]
+    fn typed_input_skips_a_dim_placeholder() {
+        let codex = |input: &str| format!("› Run tests\n• done\n\x1b[1m›\x1b[0m {input}\n  GPT · 5h 100% left");
+        assert_eq!(typed_input(&codex("\x1b[2mAsk Codex to do anything\x1b[0m"), "›").as_deref(), Some(""));
+        assert_eq!(typed_input(&codex("hello typed"), "›").as_deref(), Some("hello typed"));
+        assert_eq!(typed_input("no prompt here", "›"), None);
+    }
 
     fn pane(input: &str) -> String {
         let rule = "─".repeat(20);

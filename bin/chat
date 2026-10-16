@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Launch and track Claude Code chats that run under Remote Control.
+"""Launch and track coding-agent chats (Claude Code under Remote Control, Codex).
 
-Every chat is one interactive `claude --remote-control` process in its own
+Every chat is one interactive agent CLI process (`agents` below) in its own
 tmux session, recorded in the registry on the agent-box `state` branch
 (registry/chats/<session id>.json). `supervise` keeps every running chat on
 this host alive, so chats survive crashes and workspace restarts.
@@ -43,6 +43,60 @@ def option(key, default):
     except (OSError, ValueError):
         return default
     return default if value is None else value
+
+# Each agent CLI a chat can run. The app's `daemon.agents` (config.json) overrides any key. A template is
+# argv with {placeholders}; a nested list is dropped when a placeholder in it is empty. `session`:
+# "assigned" (the chat id is the session id) or "discovered" (the CLI picks it; found in `sessions_dir`).
+AGENTS = {
+    "claude": {
+        "bin": "claude", "session": "assigned", "trust": "claude", "remote_control": True, "stop_elsewhere": True,
+        "new": ["{bin}", "--session-id", "{id}", "--remote-control", "{name}", ["--model", "{model}"], ["{prompt}"]],
+        "resume": ["{bin}", "--resume", "{session}", "--remote-control", "{name}", ["--model", "{model}"]],
+        "fork": ["{bin}", "--resume", "{from}", "--fork-session", "--session-id", "{id}", "--remote-control", "{name}",
+                 ["--model", "{model}"]],
+    },
+    "codex": {
+        "bin": "codex", "session": "discovered", "sessions_dir": "~/.codex/sessions",
+        "new": ["{bin}", "-c", "check_for_update_on_startup=false", "-c", 'projects={"{realdir}"={trust_level="trusted"}}',
+                ["--model", "{model}"], ["{prompt}"]],
+        "resume": ["{bin}", "resume", "{session}", "-c", "check_for_update_on_startup=false",
+                   "-c", 'projects={"{realdir}"={trust_level="trusted"}}', ["--model", "{model}"]],
+        "fork": ["{bin}", "fork", "{from}", "-c", "check_for_update_on_startup=false",
+                 "-c", 'projects={"{realdir}"={trust_level="trusted"}}', ["--model", "{model}"]],
+    },
+}
+
+
+def agents():
+    out = {k: dict(v) for k, v in AGENTS.items()}
+    for name, over in (option("agents", {}) or {}).items():
+        out.setdefault(name, {}).update({k: v for k, v in (over or {}).items() if v is not None})
+    return out
+
+
+def agent_def(chat):
+    return agents().get(chat.get("agent") or "claude", {})
+
+
+def session_of(chat):
+    """The agent's own id for the chat's conversation (Claude: the chat id), None until Codex has one."""
+    return chat["id"] if agent_def(chat).get("session") == "assigned" else chat.get("session_id")
+
+
+def fill(template, values):
+    """argv from an agent template: {key} replaced from values; a nested list goes when any of its keys is empty."""
+    out = []
+    for part in template:
+        if isinstance(part, list):
+            keys = [k for p in part for k in re.findall(r"\{(\w+)\}", p) if k in values]
+            if all(values[k] for k in keys):
+                out += fill(part, values)
+            continue
+        for k, v in values.items():
+            part = part.replace("{" + k + "}", str(v or ""))
+        out.append(part)
+    return out
+
 
 for key, value in (("GIT_AUTHOR_NAME", f"agent-box ({HOST})"), ("GIT_AUTHOR_EMAIL", "tj@getredo.com")):
     os.environ.setdefault(key, value)
@@ -133,7 +187,7 @@ def cmd__commit(args):
 def cmd__rc(args):
     """After `new` returns: wait for the Remote Control link and record it."""
     chat = load(args.chat)
-    if chat:
+    if chat and agent_def(chat).get("remote_control"):
         url = wait_for_rc_url(tmux_name(chat))
         if url:
             chat = load(args.chat) or chat
@@ -253,12 +307,12 @@ def wip_restore(directory, host, fresh=False):
         print(text, file=sys.stderr)
 
 
-def claude_bin():
-    # On the Mac, super.engineering's `claude` wrapper comes first on PATH; a.box runs Claude itself.
-    real = HOME / ".local" / "bin" / "claude"
+def agent_bin(name):
+    # On the Mac, super.engineering's `claude` wrapper comes first on PATH; a.box runs the CLI itself.
+    real = HOME / ".local" / "bin" / name
     if not ON_BOX and real.exists():
         return str(real)
-    return shutil.which("claude") or str(real)
+    return shutil.which(name) or str(real)
 
 
 def session_pids(chat_id):
@@ -314,7 +368,7 @@ def close_in_super_engineering(chat):
 def stop_elsewhere(chat):
     """Stop whatever else runs this session (super.engineering, usually) before a.box resumes it, so
     two processes never share one session. Exits if it won't stop."""
-    if not session_pids(chat["id"]):
+    if not agent_def(chat).get("stop_elsewhere") or not session_pids(chat["id"]):
         return
     close_in_super_engineering(chat)
     for sig in (None, signal.SIGTERM):
@@ -333,28 +387,30 @@ def stop_elsewhere(chat):
 
 
 def launch(chat, resume, restore_from=None, wait_rc=True, fork_from=None):
+    """fork_from: the source chat's session id."""
+    agent = agent_def(chat)
     directory = ensure_worktree(chat, restore_from)
-    trust_folder(directory)
+    if agent.get("trust") == "claude":
+        trust_folder(directory)
     name = tmux_name(chat)
     if tmux_alive(name):
         return
-    cmd = [claude_bin()]
-    if fork_from:
-        cmd += ["--resume", fork_from, "--fork-session", "--session-id", chat["id"]]
-    elif resume:
-        cmd += ["--resume", chat["id"]]
-    else:
-        cmd += ["--session-id", chat["id"]]
-    cmd += ["--remote-control", chat["name"]]
-    if chat.get("model"):
-        cmd += ["--model", chat["model"]]
-    if not resume and chat.get("prompt"):
-        cmd.append(chat["prompt"])
+    session = session_of(chat)
+    template = agent["fork"] if fork_from else agent["resume"] if resume and session else agent["new"]
+    if agent.get("session") == "discovered" and (fork_from or not (resume and session)):
+        # A new session: bin/chat finds the CLI's id for it once its first message makes the rollout.
+        chat.pop("session_id", None)
+        chat.pop("transcript", None)
+        chat["launched_at"] = time.time()
+    cmd = fill(template, {"bin": agent_bin(agent.get("bin") or chat.get("agent") or "claude"), "id": chat["id"],
+                          "session": session, "from": fork_from, "name": chat["name"], "model": chat.get("model"),
+                          "prompt": None if resume else chat.get("prompt"), "dir": str(directory),
+                          "realdir": os.path.realpath(str(directory))})
     cmd = [str(Path(__file__).parent / "agent-env")] + cmd
     run(["tmux", "new-session", "-d", "-s", name, "-x", str(option("chat_tmux_cols", 220)), "-y", str(option("chat_tmux_rows", 60)), "-c", str(directory),
          shlex.join(cmd)])
     chat["dir"] = str(directory)
-    if wait_rc:
+    if wait_rc and agent.get("remote_control"):
         chat["rc_url"] = wait_for_rc_url(name) or chat.get("rc_url")
 
 
@@ -371,7 +427,122 @@ def wait_for_rc_url(name, timeout=None):
 
 
 def transcript(chat):
-    return PROJECTS / project_slug(chat["dir"]) / f"{chat['id']}.jsonl"
+    """The chat's conversation file (None: a Codex chat with no session yet)."""
+    if agent_def(chat).get("session") == "discovered":
+        # `transcript` is this machine's path; after a move the rollout is found again by its session.
+        path = chat.get("transcript")
+        if not (path and os.path.exists(path)) and session_of(chat):
+            path = rollout_of(chat, session_of(chat)) or path
+        return Path(path) if path else None
+    return PROJECTS / project_slug(chat["dir"]) / f"{chat['id']}.jsonl" if chat.get("dir") else None
+
+
+def sessions_dir(chat):
+    return Path(os.path.expanduser(agent_def(chat).get("sessions_dir") or "~/.codex/sessions"))
+
+
+def rollout_meta(path):
+    """A rollout's session_meta payload (its first line)."""
+    try:
+        with open(path) as f:
+            first = json.loads(f.readline())
+    except (OSError, ValueError):
+        return {}
+    return first.get("payload") or {} if first.get("type") == "session_meta" else {}
+
+
+def rollouts(root, since=None):
+    """Rollout files under root (YYYY/MM/DD/rollout-*.jsonl), newest day first; since: days from then on."""
+    first = datetime.date.fromtimestamp(since) - datetime.timedelta(days=1) if since else None
+    for day in sorted(root.glob("[0-9]*/[0-9]*/[0-9]*"), reverse=True):
+        try:
+            if first and datetime.date(*map(int, day.parts[-3:])) < first:
+                break
+        except ValueError:
+            continue
+        yield from sorted(day.glob("rollout-*.jsonl"), reverse=True)
+
+
+def rollout_of(chat, session):
+    return next((str(p) for p in rollouts(sessions_dir(chat)) if p.name.endswith(f"-{session}.jsonl")), None)
+
+
+def stamp(text):
+    try:
+        return datetime.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return 0
+
+
+def find_session(chat):
+    """The rollout Codex started for this chat: the oldest one since its launch, in its folder, that's no
+    subagent's and no other chat's (a fork's: forked from its source). (session id, path) or None."""
+    since = chat.get("launched_at") or stamp(chat.get("created_at"))
+    want = os.path.realpath(chat["dir"]) if chat.get("dir") else None
+    claimed = {c.get("session_id") for c in all_chats() if c["id"] != chat["id"]}
+    source = (load(chat["forked_from"]) or {}).get("session_id") if chat.get("forked_from") else None
+    best = None
+    for path in rollouts(sessions_dir(chat), since):
+        if path.stat().st_mtime < since - 5:
+            continue
+        meta = rollout_meta(path)
+        if (not meta.get("id") or meta["id"] in claimed or meta.get("thread_source") == "subagent"
+                or isinstance(meta.get("source"), dict) or stamp(meta.get("timestamp")) < since - 5
+                or os.path.realpath(meta.get("cwd") or "") != want or meta.get("forked_from_id") != source):
+            continue
+        if not best or stamp(meta.get("timestamp")) < best[0]:
+            best = (stamp(meta.get("timestamp")), meta["id"], str(path))
+    return best[1:] if best else None
+
+
+def record_session(chat_id, wait=0):
+    """Find and save a Codex chat's session, polling up to `wait` seconds; True once it's known."""
+    deadline = time.time() + wait
+    while True:
+        chat = load(chat_id)
+        if not chat or chat.get("session_id") or agent_def(chat).get("session") != "discovered":
+            return bool(chat and chat.get("session_id"))
+        found = find_session(chat)
+        if found:
+            chat["session_id"], chat["transcript"] = found
+            save(chat, f"chat session: {chat['name']}")
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(option("session_poll_secs", 1))
+
+
+def cmd__session(args):
+    if args.background:
+        background("_session", args.chat)
+    else:
+        record_session(args.chat, option("session_wait_secs", 180))
+
+
+def agent_transcript_paths(chat):
+    """Every file holding the chat's conversation, for any agent: Claude Code's session file and its
+    subagents' folder; or Codex's rollout, the rollouts it was forked from (a fork's rollout holds only
+    what came after), and its subagents' rollouts (sessions of their own)."""
+    if agent_def(chat).get("session") != "discovered":
+        main = transcript(chat)
+        return [p for p in (main, main.with_suffix("") if main else None) if p and p.exists()]
+    path = transcript(chat)
+    if not path or not path.exists():
+        return []
+    out, meta = [path], rollout_meta(path)
+    parent = meta.get("forked_from_id")
+    while parent and len(out) < 50:
+        found = rollout_of(chat, parent)
+        if not found:
+            break
+        out.append(Path(found))
+        parent = rollout_meta(found).get("forked_from_id")
+    for p in rollouts(sessions_dir(chat), stamp(meta.get("timestamp")) or None):
+        source = rollout_meta(p).get("source") if p not in out else None
+        spawn = source.get("subagent", {}).get("thread_spawn", {}) if isinstance(source, dict) else {}
+        if spawn.get("parent_thread_id") == session_of(chat):
+            out.append(p)
+    return out
 
 
 def slug(text):
@@ -403,15 +574,27 @@ def cmd_new(args):
         "dir": str(directory) if directory else None,
         "model": args.model,
         "prompt": args.prompt,
+        "agent": args.agent or option("default_agent", "claude"),
         "host": HOST,
         "status": "running",
         "created_at": now(),
     }
+    if chat["agent"] not in agents():
+        sys.exit(f"unknown agent {chat['agent']!r} (known: {', '.join(agents())})")
     launch(chat, resume=False, wait_rc=False)
     chat.pop("prompt", None)
     save(chat, f"chat new: {args.name}")
-    background("_rc", chat_id)
+    after_launch(chat)
     print(f"{chat_id}  {args.name}  {chat['dir']}")
+
+
+def after_launch(chat):
+    """In the background: the Remote Control link, or a new Codex session's id."""
+    agent = agent_def(chat)
+    if agent.get("remote_control"):
+        background("_rc", chat["id"])
+    if agent.get("session") == "discovered" and not chat.get("session_id"):
+        background("_session", chat["id"])
 
 
 def cmd_fork(args):
@@ -420,14 +603,16 @@ def cmd_fork(args):
     if src["host"] != HOST:
         sys.exit(f"{src['name']} lives on {src['host']}; fork it there")
     chat_id = str(uuid.uuid4())
-    chat = {k: src.get(k) for k in ("kind", "parent", "feature", "repo", "branch", "base", "dir", "model")}
+    chat = {k: src.get(k) for k in ("kind", "parent", "feature", "repo", "branch", "base", "dir", "model", "agent")}
     chat.update({"id": chat_id, "name": args.name or f"{src['name']} (fork)", "host": HOST, "status": "running",
                  "created_at": now(), "forked_from": src["id"]})
     if chat["kind"] == "orchestrator":
         chat["kind"] = "feature"
-    launch(chat, resume=False, wait_rc=False, fork_from=src["id"])
+    if not session_of(src):
+        sys.exit(f"{src['name']} has no conversation to fork yet")
+    launch(chat, resume=False, wait_rc=False, fork_from=session_of(src))
     save(chat, f"chat fork: {chat['name']}")
-    background("_rc", chat_id)
+    after_launch(chat)
     print(f"{chat_id}  {chat['name']}  {chat['dir']}")
 
 
@@ -436,7 +621,7 @@ def cmd_list(args):
     if args.json:
         for c in chats:
             c["alive"] = c["host"] == HOST and tmux_alive(tmux_name(c))
-            t = transcript(c) if c.get("dir") else None
+            t = transcript(c)
             c["last_activity"] = (datetime.datetime.fromtimestamp(t.stat().st_mtime, datetime.timezone.utc)
                                   .strftime("%Y-%m-%dT%H:%M:%SZ") if t and t.exists() else None)
         print(json.dumps(chats, indent=2))
@@ -472,7 +657,7 @@ def cmd_start(args):
     launch(chat, resume=True, wait_rc=False)
     chat["status"] = "running"
     save(chat, f"chat start: {chat['name']}")
-    background("_rc", chat["id"])
+    after_launch(chat)
 
 
 def cmd_attach(args):
@@ -958,10 +1143,13 @@ def cmd_supervise(args):
             if chat["host"] != HOST or chat["status"] != "running":
                 continue
             if tmux_alive(tmux_name(chat)):
+                if session_of(chat) is None:
+                    record_session(chat["id"])
                 continue
             try:
                 fresh = chat.get("branch") and not worktree_dir(chat).exists()
-                launch(chat, resume=transcript(chat).exists(), restore_from=HOST if fresh else None)
+                t = transcript(chat)
+                launch(chat, resume=bool(t and t.exists()), restore_from=HOST if fresh else None)
                 save(chat, f"chat relaunch: {chat['name']}")
                 print(f"{now()} relaunched {chat['name']}", flush=True)
             except (subprocess.CalledProcessError, SystemExit) as err:
@@ -983,6 +1171,7 @@ def main():
     n.add_argument("--parent", help="orchestrator chat id")
     n.add_argument("--feature", help="feature slug for grouping")
     n.add_argument("--model")
+    n.add_argument("--agent", help="agent CLI: claude (default: option default_agent), codex, or one in `agents`")
     n.add_argument("--prompt", help="first message")
     n.set_defaults(fn=cmd_new)
 
@@ -1056,6 +1245,10 @@ def main():
     h = sub.add_parser("_rc")
     h.add_argument("chat")
     h.set_defaults(fn=cmd__rc)
+    h = sub.add_parser("_session", help="record a Codex chat's session id once its rollout exists")
+    h.add_argument("chat")
+    h.add_argument("--background", action="store_true")
+    h.set_defaults(fn=cmd__session)
 
     sv = sub.add_parser("supervise")
     sv.add_argument("--interval", type=int, default=None)

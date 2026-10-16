@@ -12,7 +12,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("state.toggle", "{key, default?}: flip a boolean state value (default: its value when unset)"),
     ("state.cycle", "{key, values: [..]}: move a state value to the next item in values"),
     ("select", "{worktree?: path, chat?: id, offset?: n}: select a worktree and/or one of its chats; offset moves n worktrees down (negative: up)"),
-    ("chat.new", "{dir?, repo?, name?, kind?, branch?, base?, prompt?}: start a chat at once; no dir = a fresh worktree in repo"),
+    ("chat.new", "{dir?, repo?, name?, kind?, branch?, base?, prompt?, agent?}: start a chat at once; no dir = a fresh worktree in repo; agent: a key of `daemon.agents` (default `daemon.default_agent`)"),
     ("chat.send", "{chat, text}: send a message"),
     ("chat.keys", "{chat, keys: [..]}: press keys in the chat's session (Enter, Escape, Up, 1, ...)"),
     ("chat.archive / chat.stop / chat.start", "{chat}"),
@@ -281,6 +281,7 @@ impl Workspace {
                     repo: s("repo"),
                     prompt: s("prompt"),
                     model: s("model"),
+                    agent: s("agent"),
                 };
                 self.start_chat(call, cx);
             }
