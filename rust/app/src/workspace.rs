@@ -102,6 +102,10 @@ pub struct Workspace {
     pub(crate) next_attachment: u64,
     pub(crate) dragging: bool,
     pub(crate) drop_hint: Option<crate::ui::render::DropHint>,
+    /** What's being dragged (kind, value), set when a drag starts; its row is left out until the drop. */
+    pub(crate) drag_item: std::rc::Rc<std::cell::RefCell<Option<(String, Value)>>>,
+    /** The drag preview's second line. */
+    pub(crate) drag_note: std::rc::Rc<std::cell::RefCell<String>>,
     pub(crate) drop_preview: bool,
     pub(crate) inspect_at: Option<std::time::Instant>,
     pub(crate) inspect_digest: u64,
@@ -256,6 +260,8 @@ impl Workspace {
             next_attachment: 0,
             dragging: false,
             drop_hint: None,
+            drag_item: Default::default(),
+            drag_note: Default::default(),
             drop_preview: false,
             inspect_at: None,
             inspect_digest: 0,
@@ -992,6 +998,7 @@ impl Workspace {
                        "items": shown.into_iter().map(|w| self.row_json(w, json!({"id": s.id, "name": s.name}), &gaps)).collect::<Vec<_>>()})
             })
             .collect();
+        let into = self.drop_into();
         let removed: Vec<Value> = self.model.projects.iter().filter(|p| self.project_removed(&p.repo)).map(|p| json!({"repo": p.repo, "name": self.project_look(&p.repo, &p.name, p.hue).0})).collect();
         let selected_w = self.current_worktree().map(|w| self.worktree_json(w, Value::Null));
         let selected_diff = self.selected.as_deref().map(|p| self.diff_summary(p)).unwrap_or(Value::Null);
@@ -1020,6 +1027,7 @@ impl Workspace {
                 "removed_projects": removed,
                 "dragging": self.dragging,
                 "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
+                "drag": self.drag_item.borrow().as_ref().map(|(k, v)| json!({"kind": k, "value": v, "into": into.as_ref().map(|x| &x.1), "into_key": into.as_ref().map(|x| &x.0)})),
                 "focused": self.focused,
                 "status": self.status,
                 "ssh_host": self.model.ssh_host,
@@ -1073,9 +1081,36 @@ impl Workspace {
         let Some(i) = shown.iter().position(|w| w.path == target) else { return vec![] };
         match h.zone.as_str() {
             "before" => vec![target.to_string()],
-            "after" => shown.get(i + 1).map(|w| vec![w.path.clone(), target.to_string()]).unwrap_or_default(),
+            "after" => shown[i + 1..].iter().find(|w| Some(w.path.as_str()) != h.value.as_str()).map(|w| vec![w.path.clone(), target.to_string()]).unwrap_or_default(),
             _ => vec![],
         }
+    }
+
+    /** The group a worktree is in: `sec:ID` or `proj:REPO`, and its name. */
+    fn group_of(&self, path: &str) -> Option<(String, String)> {
+        if let Some(s) = self.model.sections.iter().find(|s| s.items.iter().any(|w| w.path == path)) {
+            return Some((format!("sec:{}", s.id), s.name.clone()));
+        }
+        let w = self.model.projects.iter().flat_map(|p| p.items.iter()).find(|w| w.path == path)?;
+        let p = self.model.projects.iter().find(|p| p.repo == w.repo)?;
+        Some((format!("proj:{}", p.repo), self.project_look(&p.repo, &p.name, p.hue).0))
+    }
+
+    /** While a worktree is dragged over another section or project: that group (`sec:ID`/`proj:REPO`) and its name. */
+    pub(crate) fn drop_into(&self) -> Option<(String, String)> {
+        let h = self.drop_hint.as_ref().filter(|h| h.kind == "worktree")?;
+        let from = self.group_of(h.value.as_str()?)?.0;
+        let to = if let Some(p) = h.key.strip_prefix("wt:") {
+            self.group_of(p)?
+        } else if let Some(id) = h.key.strip_prefix("sec:") {
+            (h.key.clone(), self.model.sections.iter().find(|s| s.id == id)?.name.clone())
+        } else if let Some(repo) = h.key.strip_prefix("proj:") {
+            let p = self.model.projects.iter().find(|p| p.repo == repo)?;
+            (h.key.clone(), self.project_look(&p.repo, &p.name, p.hue).0)
+        } else {
+            return None;
+        };
+        (to.0 != from).then_some(to)
     }
 
     fn row_json(&self, w: &Worktree, section: Value, gaps: &[String]) -> Value {
@@ -1084,7 +1119,7 @@ impl Workspace {
             // gaps[0] opens the room; a target whose room opens on the row below (gaps[1]) hides its drop line.
             o.insert("drop_gap".into(), Value::Bool(gaps.first() == Some(&w.path)));
             o.insert("drop_room".into(), Value::Bool(gaps.contains(&w.path)));
-            o.insert("drag_source".into(), Value::Bool(self.drop_hint.as_ref().is_some_and(|h| h.value.as_str() == Some(&w.path))));
+            o.insert("drag_source".into(), Value::Bool(self.drag_item.borrow().as_ref().is_some_and(|(k, v)| k == "worktree" && v.as_str() == Some(&w.path))));
         }
         v
     }
@@ -2063,7 +2098,12 @@ impl Render for Workspace {
         if self.dragging {
             self.drop_preview = false;
         } else if !self.drop_preview {
+            self.drag_item.borrow_mut().take();
             self.drop_hint = None;
+        }
+        let into = self.drop_into().map(|(_, name)| format!("Move to {name}")).unwrap_or_default();
+        if *self.drag_note.borrow() != into {
+            *self.drag_note.borrow_mut() = into;
         }
         self.focused = window.is_window_active();
         let t = std::time::Instant::now();

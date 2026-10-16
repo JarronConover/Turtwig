@@ -366,8 +366,11 @@ impl Workspace {
             };
             let preview_style = self.settings.theme.get("drag_preview").and_then(Value::as_object).cloned().unwrap_or_default();
             let theme2 = theme.clone();
+            let (dragged, note) = (self.drag_item.clone(), self.drag_note.clone());
             el = el.on_drag(item, move |item, _, _, cx| {
-                cx.new(|_| DragPreview { label: item.label.clone(), style: preview_style.clone(), theme: theme2.clone() })
+                *dragged.borrow_mut() = Some((item.kind.clone(), item.value.clone()));
+                note.borrow_mut().clear();
+                cx.new(|_| DragPreview { label: item.label.clone(), note: note.clone(), style: preview_style.clone(), theme: theme2.clone() })
             });
         }
         // A press that drags, resizes, or clicks something isn't the start of a text selection; otherwise the
@@ -788,13 +791,19 @@ pub struct DropHint {
 /** The pill that follows the pointer while dragging. Look: theme `drag_preview`. */
 pub struct DragPreview {
     label: String,
+    /** A second line set while dragging: where a drop would move it ("Move to Email on Ask Redo"). */
+    note: std::rc::Rc<std::cell::RefCell<String>>,
     style: Map<String, Value>,
     theme: Map<String, Value>,
 }
 
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        style::apply(div(), &self.style, &self.theme).child(self.label.clone())
+        let note = self.note.borrow().clone();
+        let accent = style::color(&Value::String("@accent".into()), &self.theme);
+        style::apply(div(), &self.style, &self.theme)
+            .child(self.label.clone())
+            .when(!note.is_empty(), |d| d.child(div().text_size(px(11.5)).when_some(accent, |d, c| d.text_color(c)).child(note)))
     }
 }
 

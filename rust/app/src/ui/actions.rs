@@ -57,7 +57,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("js", "{code, ...args}: run JavaScript with `args`, `ctx` (the context), and `ab` (see Scripts)"),
     ("<a script action>", "any name a script registers with ab.action(name, fn) works as an action everywhere"),
     ("app.snapshot", "capture the window to snapshot.png in the settings folder (for agents to look at)"),
-    ("drop.preview", "{key, zone: before|inside|after, kind?}: show a drop target's indicator without dragging (for styling); cleared by the next drag"),
+    ("drop.preview", "{key, zone: before|inside|after, kind?, value?}: show a drop target's indicator without dragging (for styling), as if `value` were being dragged; cleared by the next drag"),
     ("diff.refresh", "reload the selected worktree's diff now"),
     ("diff.collapse_all / diff.expand_all", "collapse or expand every file in the diff"),
     ("designer.send", "{text}: ask the designer (a local agent that edits these settings live) for a change"),
@@ -687,6 +687,7 @@ impl Workspace {
             }
             "drop.preview" => {
                 self.drop_hint = s("key").map(|key| crate::ui::render::DropHint { key, zone: s("zone").unwrap_or("inside".into()), kind: s("kind").unwrap_or_default(), value: a.get("value").cloned().unwrap_or(Value::Null) });
+                *self.drag_item.borrow_mut() = self.drop_hint.as_ref().map(|h| (h.kind.clone(), h.value.clone())).filter(|(_, v)| !v.is_null());
                 self.drop_preview = true;
             }
             "diff.refresh" => {

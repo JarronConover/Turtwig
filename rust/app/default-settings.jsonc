@@ -160,7 +160,7 @@
                 },
                 {
                   "if": ".state[\"collapsed:projects\"] | not",
-                  "for": ".projects", "as": "p", "key": ".p.name",
+                  "for": ".app.drag as $d | .projects | map(select((($d.kind == \"project\" and $d.value == .repo) | not)))", "as": "p", "key": ".p.name",
                   "type": "column",
                   "children": [
                     {
@@ -168,8 +168,8 @@
                       "type": "row",
                       "style": {
                         "position": "relative", "height": 37, "padding": [0, 8], "gap": 8, "align": "center", "radius": 8, "border": 1,
-                        "border_color": "{{ if .app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\" then \"@accent\" else \"transparent\" end }}",
-                        "background": "{{ if .app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\" then \"#488efc1a\" else \"transparent\" end }}",
+                        "border_color": "{{ if (.app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"proj:\" + .p.repo) then \"@accent\" else \"transparent\" end }}",
+                        "background": "{{ if (.app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"proj:\" + .p.repo) then \"#488efc1a\" else \"transparent\" end }}",
                         "cursor": "pointer"
                       },
                       "drag": { "kind": "project", "value": "{{ .p.repo }}", "label": "{{ .p.name }}" },
@@ -215,7 +215,7 @@
                     },
                     {
                       "if": ".state[\"collapsed:proj:\" + .p.repo] | not",
-                      "for": ".p.items", "as": "w", "key": ".w.path",
+                      "for": ".app.drag as $d | .p.items | map(select((($d.kind == \"worktree\" and $d.value == .path) | not)))", "as": "w", "key": ".w.path",
                       "type": "column",
                       "children": [
                         { "id": "wt-row", "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": false } },
@@ -225,7 +225,7 @@
                   ]
                 },
                 {
-                  "for": ".sections", "as": "s", "key": ".s.id",
+                  "for": ".app.drag as $d | .sections | map(select((($d.kind == \"section\" and $d.value == .id) | not)))", "as": "s", "key": ".s.id",
                   "type": "column",
                   "children": [
                     {
@@ -237,8 +237,8 @@
                       },
                       "style": {
                         "position": "relative", "cursor": "pointer", "radius": 6,
-                        "background": "{{ if .app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\" then \"#488efc1a\" else \"transparent\" end }}",
-                        "color": "{{ if .app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\" then \"@accent\" else \"@text_muted\" end }}"
+                        "background": "{{ if (.app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"sec:\" + .s.id) then \"#488efc1a\" else \"transparent\" end }}",
+                        "color": "{{ if (.app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"sec:\" + .s.id) then \"@accent\" else \"@text_muted\" end }}"
                       },
                       "drag": { "kind": "section", "value": "{{ .s.id }}", "label": "{{ .s.name }}" },
                       "drop_key": "sec:{{ .s.id }}",
@@ -269,7 +269,7 @@
                     },
                     {
                       "if": "(\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end | not",
-                      "for": ".s.items",
+                      "for": ".app.drag as $d | .s.items | map(select((($d.kind == \"worktree\" and $d.value == .path) | not)))",
                       "as": "w", "key": ".w.path",
                       "type": "column",
                       "children": [
@@ -418,7 +418,6 @@
       "style": {
         "height": "{{ if .props.w.drop_gap then 66 else 33 end }}",
         "padding": "{{ (if .props.w.drop_gap then 33 else 0 end) as $top | (if .props.child then [0, 12, 0, 30] elif .props.in_section then [0, 12, 0, 8] else [0, 12, 0, 27] end) | .[0] = $top }}",
-        "opacity": "{{ if .props.w.drag_source then 0.45 else 1 end }}",
         "gap": 8, "align": "center", "radius": 8, "border": 1, "cursor": "pointer",
         "border_color": "{{ if .props.w.selected then \"@selection_border\" else \"transparent\" end }}",
         "background": "{{ if .props.w.selected then \"@selection\" else \"transparent\" end }}",
@@ -485,6 +484,23 @@
       ],
       "children": [
         { "if": ".props.w.drop_room | not", "type": "DropLine", "props": { "key": "wt:{{ .props.w.path }}" } },
+        {
+          "if": ".props.w.drop_gap",
+          "id": "wt-drop-slot",
+          "type": "row",
+          "motion": false,
+          "style": {
+            "position": "absolute", "top": 3, "left": 4, "right": 4, "height": 27, "radius": 7, "border": 1, "padding": [0, 10],
+            "align": "center", "gap": 6, "font_size": 12.5,
+            "border_color": "{{ if .app.drag.into then \"@accent\" else \"@line\" end }}",
+            "background": "{{ if .app.drag.into then \"#488efc1a\" else \"#ffffff08\" end }}",
+            "color": "@accent"
+          },
+          "children": [
+            { "if": ".app.drag.into", "type": "icon", "props": { "name": "folder-input", "size": 12, "color": "@accent" } },
+            { "if": ".app.drag.into", "type": "text", "props": { "text": "Move to {{ .app.drag.into }}" }, "style": { "truncate": true, "min_width": 0 } }
+          ]
+        },
         { "if": ".props.child", "type": "icon", "props": { "name": "corner-down-right", "size": 12, "color": "@text_faint" }, "style": { "margin": [0, -2, 0, -14] } },
         { "if": ".props.w.chats | any(.kind == \"orchestrator\")", "type": "icon", "props": { "name": "workflow", "size": 14, "color": "@accent" }, "tooltip": "Orchestrator" },
         { "if": ".props.in_section and (.props.w.chats | any(.kind == \"orchestrator\") | not)", "type": "Badge", "props": { "letter": "{{ .props.w.letter }}", "hue": "{{ .props.w.hue }}", "size": 16 } },
@@ -776,7 +792,7 @@
           "style": { "direction": "row", "align": "stretch", "basis": "auto", "shrink": 1, "min_width": 0 },
           "children": [
             {
-              "for": ".selected.chats | map(select(.open))", "as": "c", "key": ".c.id", "id": "chat-tab",
+              "for": ".app.drag as $d | .selected.chats | map(select(.open and (($d.kind == \"chat\" and $d.value == .id) | not)))", "as": "c", "key": ".c.id", "id": "chat-tab",
               "type": "row",
               "style": {
                 "position": "relative", "gap": 6, "padding": [0, 4, 0, 10], "align": "center", "font_size": 13, "cursor": "pointer", "shrink": 0,
