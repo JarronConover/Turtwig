@@ -10,6 +10,7 @@ this host alive, so chats survive crashes and workspace restarts.
 import argparse
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -33,9 +34,12 @@ PROJECTS = HOME / ".claude" / "projects"
 
 
 def option(key, default):
-    """The app's `daemon` settings, as this machine's daemon last saved them (~/.agent-box/config.json)."""
+    """The app's `daemon` settings, as this machine's daemon last saved them (~/.agent-box/config.json);
+    AGENT_BOX_OPTIONS (a JSON object) overrides them for one run."""
     try:
-        value = json.loads((AGENT_HOME / "config.json").read_text()).get(key)
+        value = json.loads(os.environ.get("AGENT_BOX_OPTIONS") or "{}").get(key)
+        if value is None:
+            value = json.loads((AGENT_HOME / "config.json").read_text()).get(key)
     except (OSError, ValueError):
         return default
     return default if value is None else value
@@ -235,6 +239,11 @@ def ensure_worktree(chat, restore_from=None):
 
 
 def wip_restore(directory, host, fresh=False):
+    # A worktree this machine handed off keeps the work it had then; stash that (recoverable, never
+    # dropped) so the other machine's newer work can land.
+    if not fresh and run(["git", "-C", str(directory), "status", "--porcelain"], check=False, capture_output=True).stdout.strip():
+        run(["git", "-C", str(directory), "stash", "push", "-q", "-u", "-m", f"a.box: before restoring the {host}'s work"], check=False)
+        print(f"stashed {directory}'s local changes (git stash list) before restoring the {host}'s work", file=sys.stderr)
     args = [str(Path(__file__).parent / "wip-restore")] + (["--fresh"] if fresh else []) + [str(directory), host]
     out = run(args, check=False, capture_output=True)
     text = (out.stdout + out.stderr).strip()
@@ -470,15 +479,34 @@ def cmd_attach(args):
     os.execvp("tmux", ["tmux", "attach", "-t", tmux_name(find(args.chat))])
 
 
+def input_line(name):
+    """The text in Claude's input box (None when the prompt isn't showing)."""
+    prompt = option("prompt_char", "❯")
+    pane = run(["tmux", "capture-pane", "-pt", name], check=False, capture_output=True).stdout or ""
+    lines = [l for l in pane.splitlines() if l.strip().startswith(prompt)]
+    return lines[-1].strip()[len(prompt):].strip() if lines else None
+
+
 def cmd_send(args):
-    """Type a message into a chat and submit it (a separate Enter, or the TUI
-    treats the burst as a paste and doesn't submit)."""
+    """Type a message into a chat and submit it (a separate Enter, or the TUI treats the burst as a
+    paste and doesn't submit). --wait first waits for an empty prompt (a chat that just started or
+    resumed drops what's typed while it loads), and Enter is retried while the text still sits there."""
     name = tmux_name(find(args.chat))
     if not tmux_alive(name):
         sys.exit("chat isn't running here")
+    if args.wait:
+        deadline = time.time() + args.wait
+        while time.time() < deadline and input_line(name) != "":
+            time.sleep(1)
     run(["tmux", "send-keys", "-t", name, "-l", args.text])
     time.sleep(option("chat_send_pause_secs", 0.5))
     run(["tmux", "send-keys", "-t", name, "C-m"])
+    for _ in range(option("send_enter_tries", 4) if args.wait else 0):
+        time.sleep(option("send_enter_wait_ms", 350) / 1000)
+        line = input_line(name)
+        if not line or not args.text.startswith(line[:20]):
+            return
+        run(["tmux", "send-keys", "-t", name, "C-m"])
 
 
 
@@ -571,40 +599,287 @@ def adopt_worktree_branch(chat):
     save(chat, f"chat branch: {chat['name']} on {branch}", wait=True)
 
 
+SC_STORE = {"box": "sc.json", "mac": "sc-mac.json"}
+SHIM = {"mac": Path(__file__).resolve().parent.parent / "shim" / "sc", "box": "$HOME/agent-box/shim/sc"}
+
+
+def sc_on(host, *args, cwd=None):
+    """Run the sc shim on a machine (in cwd, for the commands that act on the caller's worktree)."""
+    if host == HOST:
+        out = run(["python3", str(SHIM[host]), *args, "--json"], cwd=cwd or str(HOME), capture_output=True, check=False)
+    else:
+        remote = (f"cd {shlex.quote(cwd)} && " if cwd else "") + f"python3 {SHIM[host]} " + shlex.join([*args, "--json"])
+        out = run(["ssh", "-n", BOX_SSH, remote], capture_output=True, check=False)
+    if out.returncode != 0:
+        raise SystemExit(f"sc {' '.join(args)} on the {host}: {(out.stderr or out.stdout).strip()}")
+    try:
+        return json.loads(out.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+
+
+def sc_store(host):
+    try:
+        data = json.loads((STATE_DIR / SC_STORE[host]).read_text())
+    except (OSError, ValueError):
+        data = {}
+    data.setdefault("sections", [])
+    data.setdefault("worktrees", {})
+    return data
+
+
+def on_host(host, *args):
+    """Run this script's command on a machine; returns its stdout."""
+    if host == HOST:
+        return run([sys.executable, __file__, *args], capture_output=True).stdout
+    return on_box(*args)
+
+
+def cmd__paths(args):
+    """{path: [real path or null when missing, branch (null for a main checkout), repo]} for folders here."""
+    out = {}
+    for p in args.paths:
+        if not os.path.isdir(p):
+            out[p] = [None, None, None]
+            continue
+        branch = run(["git", "-C", p, "branch", "--show-current"], check=False, capture_output=True).stdout.strip() or None
+        common = run(["git", "-C", p, "rev-parse", "--path-format=absolute", "--git-common-dir"], check=False, capture_output=True).stdout.strip()
+        repo = repo_of(Path(common).parent) if common else None
+        if repo and os.path.realpath(str(PRIMARY[repo])) == os.path.realpath(p):
+            branch = None  # a chat in the main checkout uses the other machine's main checkout, no WIP
+        out[p] = [os.path.realpath(p), branch, repo]
+    print(json.dumps(out))
+
+
+def cmd__prepare_wt(args):
+    """Make (or reuse) the worktree for a branch here with frm's latest WIP; prints its folder."""
+    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    if args.branch:
+        directory = ensure_worktree({"branch": args.branch, "repo": args.repo}, restore_from=args.frm)
+    else:
+        directory = PRIMARY[args.repo]
+    print(json.dumps({"dir": str(directory)}))
+
+
+def cmd__snapshot_dir(args):
+    queue = AGENT_HOME / "queue"
+    queue.mkdir(parents=True, exist_ok=True)
+    (queue / f"snap-{hashlib.sha1(args.dir.encode()).hexdigest()[:10]}").write_text(args.dir + "\n")
+    run([str(Path(__file__).parent / "sync-worker")], check=False)
+
+
+def move_group(chat, scope):
+    """What moves with this chat: (its section or None, [(source folder, branch, repo, [chats])]).
+    scope "section": every worktree in the chat's section and every chat in them; "worktree": the chat's
+    worktree and all its chats; "chat": the chat alone."""
+    src = chat["host"]
+    chats = [c for c in all_chats() if c["host"] == src and c["status"] != "archived" and c.get("dir")]
+    store = sc_store(src)
+    known = sorted({c["dir"] for c in chats} | set(store["worktrees"]))
+    info = json.loads(on_host(src, "_paths", *known) or "{}") if known else {}
+    real = {p: v[0] for p, v in info.items()}
+    here = real.get(chat.get("dir"))
+    if scope == "chat" or not here:
+        i = info.get(chat.get("dir")) or [None, chat.get("branch"), chat.get("repo")]
+        return None, [(chat.get("dir"), chat.get("branch") or i[1], chat.get("repo") or i[2] or "redo", [chat])]
+    sid = store["worktrees"].get(here, {}).get("section") if scope == "section" else None
+    section = next((s for s in store["sections"] if s["section_id"] == sid), None)
+    folders = [here]
+    if section:
+        members = [p for p, m in store["worktrees"].items() if m.get("section") == sid]
+        members.sort(key=lambda p: store["worktrees"][p].get("order") if store["worktrees"][p].get("order") is not None else 1e9)
+        folders = [real[p] for p in members if real.get(p)] or [here]
+    groups = []
+    for folder in dict.fromkeys(folders):
+        mine = [c for c in chats if real.get(c["dir"]) == folder]
+        path = next((p for p, r in real.items() if r == folder), folder)
+        _, branch, repo = info.get(path, [None, None, None])
+        branch = branch or next((c.get("branch") for c in mine if c.get("branch")), None)
+        repo = repo or next((c.get("repo") for c in mine if c.get("repo")), None) or "redo"
+        groups.append((folder, branch, repo, mine))
+    return section, groups
+
+
+def move_worktree(folder, branch, repo, chats, src, dst):
+    """Move one worktree's chats (or, with none, its WIP) from src to dst; returns its folder on dst."""
+    status = {c["id"]: c["status"] for c in chats}
+    if dst == "box":
+        for c in chats:
+            adopt_worktree_branch(c)
+            stop_elsewhere(c)
+            release_here(c)
+        if not chats and branch:
+            cmd__snapshot_dir(argparse.Namespace(dir=folder))
+        new = json.loads(on_box("_prepare_wt", repo, branch or "", src))["dir"]
+        for c in chats:
+            copy_transcript(src, c["dir"], dst, new, c["id"])
+            on_box("_take", c["id"], new)
+            if status[c["id"]] == "stopped":
+                on_box("stop", c["id"])
+    else:
+        for c in chats:
+            on_box("_release", c["id"])
+        if not chats and branch:
+            on_box("_snapshot_dir", folder)
+        git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+        new = str(ensure_worktree({"branch": branch, "repo": repo}, restore_from=src) if branch else PRIMARY[repo])
+        for c in chats:
+            c = find(c["id"])
+            copy_transcript(src, folder, dst, new, c["id"])
+            take_over(c, Path(new))
+            if status[c["id"]] == "stopped":
+                set_status(find(c["id"]), "stopped")
+    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    return new
+
+
+def put_back(chats, src):
+    """After a failed move: the chats run where they were."""
+    for c in chats:
+        try:
+            if src == "box":
+                on_box("start", c["id"])
+            else:
+                git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+                cmd_start(argparse.Namespace(chat=c["id"]))
+        except (SystemExit, subprocess.CalledProcessError) as err:
+            print(f"couldn't restart {c['name']} on the {src}: {err}", file=sys.stderr)
+
+
+def home_of(host):
+    if host == HOST:
+        return str(HOME)
+    return run(["ssh", "-n", BOX_SSH, "echo $HOME"], capture_output=True).stdout.strip().splitlines()[-1]
+
+
+REWRITE = r"""
+import json, os, sys
+roots, pairs = json.loads(sys.stdin.read())
+for root in roots:
+    for d, _, names in os.walk(os.path.expanduser(root)):
+        for n in names:
+            p = os.path.join(d, n)
+            try:
+                if os.path.getsize(p) > 5_000_000:
+                    continue
+                text = open(p, encoding="utf-8").read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            new = text
+            for a, b in pairs:
+                new = new.replace(a, b)
+            if new != text:
+                open(p, "w", encoding="utf-8").write(new)
+"""
+
+
+def sync_files(src, dst, moved):
+    """Copy the `move_sync_paths` folders (the factory skills' ledgers) to dst, newer files winning, and
+    point the copies at dst's folders: each moved worktree's new path, then dst's home for src's."""
+    roots = [r for r in option("move_sync_paths", ["~/.local/state/redo/", "~/.factory/", "~/.config/redo/"]) if r]
+    if not roots:
+        return
+    homes = {src: home_of(src), dst: home_of(dst)}
+    for root in roots:
+        rel = root.removeprefix("~/").rstrip("/") + "/"
+        local = f"{HOME}/{rel}"
+        remote = f"{BOX_SSH}:{rel}"
+        frm, to = (local, remote) if dst == "box" else (remote, local)
+        if not (HOME / rel).exists() and dst == "box":
+            continue
+        if dst == "box":
+            run(["ssh", "-n", BOX_SSH, f"mkdir -p {shlex.quote(rel)}"], check=False, capture_output=True)
+        else:
+            (HOME / rel).mkdir(parents=True, exist_ok=True)
+        run(["rsync", "-a", "--update", frm, to], check=False, capture_output=True)
+    pairs = sorted(moved.items(), key=lambda kv: -len(kv[0])) + [(homes[src] + "/", homes[dst] + "/")]
+    payload = json.dumps([roots, [list(p) for p in pairs if p[0] != p[1]]])
+    if dst == HOST:
+        run([sys.executable, "-c", REWRITE], input=payload, check=False)
+    else:
+        run(["ssh", BOX_SSH, "python3 -c " + shlex.quote(REWRITE)], input=payload, check=False, capture_output=True)
+
+
+def move_section(section, src, dst, moved, labels):
+    """The section on dst: found by name or made, holding the moved worktrees in their order, with their
+    labels. On src it's removed (its worktrees stay, under their projects) unless move_keep_section."""
+    existing = next((s for s in sc_store(dst)["sections"] if s["name"] == section["name"]), None)
+    target = existing or sc_on(dst, "section", "create", section["name"], "--manual").get("response", {})
+    sid = target.get("section_id")
+    for i, new in enumerate(moved.values()):
+        if sid:
+            sc_on(dst, "worktree", "move", new, "--section", sid, "--index", str(i))
+        old = next((o for o, n in moved.items() if n == new), None)
+        if labels.get(old):
+            sc_on(dst, "worktree", "set-label", new, labels[old])
+    if not option("move_keep_section", False):
+        sc_on(src, "section", "delete", section["section_id"])
+
+
+def is_orchestrator(chat):
+    """kind in move_note_kinds, or a name or folder matching move_note_match (chats brought in from
+    super.engineering are all kind "feature")."""
+    pattern = option("move_note_match", r"(?i)ship.feature|orchestrat")
+    return chat.get("kind") in option("move_note_kinds", ["orchestrator"]) or bool(
+        pattern and re.search(pattern, f"{chat.get('name', '')} {chat.get('dir', '')}"))
+
+
+def note_moved(chats, src, dst, section, moved):
+    """Tell the moved orchestrators (move_note_kinds) what changed, so they pick up where they were."""
+    text = option("move_note", "")
+    if not text:
+        return
+    paths = "; ".join(f"{a} -> {b}" for a, b in moved.items() if a != b) or "unchanged"
+    names = {"mac": "Mac", "box": "box"}
+    text = text.replace("{from}", names.get(src, src)).replace("{to}", names.get(dst, dst)).replace("{section}", section["name"] if section else "").replace("{paths}", paths)
+    for c in chats:
+        if is_orchestrator(c) and c["status"] == "running":
+            try:
+                on_host(dst, "send", c["id"], text, "--wait", str(option("move_note_wait_secs", 90)))
+            except (SystemExit, subprocess.CalledProcessError) as err:
+                print(f"couldn't tell {c['name']} about the move: {err}", file=sys.stderr)
+
+
 def cmd_move(args):
     if HOST != "mac":
         sys.exit("run moves from the Mac (it can reach the box; the box can't reach it)")
     git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
     chat = find(args.chat)
-    if chat["host"] == args.to:
-        sys.exit(f"{chat['name']} is already on {args.to}")
-    try:
-        if args.to == "mac":
-            box_dir = json.loads(on_box("_release", chat["id"]))["dir"]
-            git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
-            chat = find(chat["id"])
-            local = prepare_here(chat, "box")
-            copy_transcript("box", box_dir, "mac", local, chat["id"])
-            take_over(chat, local)
-            print(f"moved {chat['name']} to the Mac: {local}")
-        else:
-            adopt_worktree_branch(chat)
-            stop_elsewhere(chat)
-            release_here(chat)
-            box_dir = json.loads(on_box("_prepare", chat["id"], "mac"))["dir"]
-            copy_transcript("mac", chat["dir"], "box", box_dir, chat["id"])
-            on_box("_take", chat["id"], box_dir)
-            # The box wrote the chat's new home to the state branch; take it here too, so the Mac stops listing it.
-            git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
-            print(f"moved {chat['name']} to the box: {box_dir}")
-    except (SystemExit, subprocess.CalledProcessError) as err:
-        # Put the chat back where it was, running, so a failed move loses nothing.
-        if args.to == "mac":
-            on_box("start", chat["id"])
-        else:
-            git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
-            cmd_start(argparse.Namespace(chat=chat["id"]))
-        sys.exit(f"move failed, chat left on {chat['host']}: {err}")
+    src, dst = chat["host"], args.to
+    if src == dst:
+        sys.exit(f"{chat['name']} is already on {dst}")
+    scope = args.scope or option("move_together", "section")
+    section, groups = move_group(chat, scope)
+    if args.dry_run:
+        print(json.dumps({"section": section and section["name"], "from": src, "to": dst, "worktrees": [
+            {"folder": f, "branch": b, "repo": r, "chats": [c["name"] for c in cs]} for f, b, r, cs in groups]}, indent=2))
+        return
+    labels = {f: sc_store(src)["worktrees"].get(f, {}).get("label") for f, *_ in groups}
+    moved, done = {}, []
+    for folder, branch, repo, chats in groups:
+        try:
+            moved[folder] = move_worktree(folder, branch, repo, chats, src, dst)
+            done.append((folder, branch, repo, chats))
+        except (SystemExit, subprocess.CalledProcessError) as err:
+            put_back(chats, src)
+            # Everything that already moved goes back, so a section never ends up split across machines.
+            for f, b, r, cs in reversed(done):
+                try:
+                    move_worktree(moved[f], b, r, [find(c["id"]) for c in cs], dst, src)
+                except (SystemExit, subprocess.CalledProcessError) as back:
+                    print(f"couldn't move {f} back to the {src}: {back}", file=sys.stderr)
+            sys.exit(f"move failed, left on the {src}: {err}")
+    every = [c for *_, cs in groups for c in cs]
+    if section or any(is_orchestrator(c) for c in every):
+        sync_files(src, dst, moved)
+    if section:
+        move_section(section, src, dst, moved, labels)
+    note_moved(every, src, dst, section, moved)
+    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    what = f"section {section['name']}" if section else chat["name"]
+    print(f"moved {what} to the {dst}: {len(every)} chat(s), {len(groups)} worktree(s)")
+    for a, b in moved.items():
+        print(f"  {a} -> {b}")
 
 
 def cmd__release(args):
@@ -729,11 +1004,14 @@ def main():
     se = sub.add_parser("send", help="type a message into a running chat")
     se.add_argument("chat")
     se.add_argument("text")
+    se.add_argument("--wait", type=float, default=0, help="first wait up to this many seconds for an empty prompt")
     se.set_defaults(fn=cmd_send)
 
-    mv = sub.add_parser("move", help="move a chat between the box and the Mac (run on the Mac)")
+    mv = sub.add_parser("move", help="move a chat, with its worktree or whole section, between the box and the Mac (run on the Mac)")
     mv.add_argument("chat")
     mv.add_argument("--to", required=True, choices=["box", "mac"])
+    mv.add_argument("--scope", choices=["section", "worktree", "chat"], help="what moves with it (default: option move_together)")
+    mv.add_argument("--dry-run", action="store_true", help="print what would move")
     mv.set_defaults(fn=cmd_move)
 
     tl = sub.add_parser("test-local", help="check the chat's branch out on the Mac with its WIP")
@@ -756,6 +1034,17 @@ def main():
     h.add_argument("chat")
     h.add_argument("frm")
     h.set_defaults(fn=cmd__prepare)
+    h = sub.add_parser("_paths")
+    h.add_argument("paths", nargs="*")
+    h.set_defaults(fn=cmd__paths)
+    h = sub.add_parser("_prepare_wt")
+    h.add_argument("repo")
+    h.add_argument("branch")
+    h.add_argument("frm")
+    h.set_defaults(fn=cmd__prepare_wt)
+    h = sub.add_parser("_snapshot_dir")
+    h.add_argument("dir")
+    h.set_defaults(fn=cmd__snapshot_dir)
     h = sub.add_parser("_take")
     h.add_argument("chat")
     h.add_argument("dir")

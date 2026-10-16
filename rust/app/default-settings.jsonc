@@ -881,7 +881,8 @@
               "drop_zones": "edges_x",
               "tooltip": "{{ .hosts[.c.host].label // .c.host }} · {{ .c.state }}",
               "menu": [
-                { "label": "Move to {{ if .c.host == \"box\" then \"the Mac\" else \"the cloud\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
+                { "label": "Move {{ if .selected.move.scope == \"section\" then \"section\" elif .selected.move.scope == \"worktree\" then \"worktree\" else \"chat\" end }} to {{ if .c.host == \"box\" then \"the Mac\" else \"the cloud\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
+                { "if": ".selected.move.scope != \"chat\"", "label": "Move only this chat to {{ if .c.host == \"box\" then \"the Mac\" else \"the cloud\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "scope": "chat", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
                 { "if": ".c.alive | not", "label": "Start", "do": { "do": "chat.start", "chat": "{{ .c.id }}" } },
                 { "label": "Fork chat", "do": { "do": "chat.fork", "chat": "{{ .c.id }}" } },
                 { "separator": true },
@@ -1178,14 +1179,14 @@
               "id": "move-chat",
               "type": "Pill",
               "props": {
-                "text": "Move chat to {{ if .selected.chat.host == \"box\" then \"Mac\" else \"the cloud\" end }}",
+                "text": "Move {{ if .selected.move.scope == \"section\" then \"section\" else \"chat\" end }} to {{ if .selected.chat.host == \"box\" then \"Mac\" else \"the cloud\" end }}",
                 "icon": "{{ if .selected.chat.host == \"box\" then \"laptop\" else \"cloud\" end }}",
-                "tooltip": "{{ if .selected.chat.host == \"box\" then \"Continue this chat on the Mac, with the worktree's latest work\" else \"Continue this chat on the box: it gets the same branch with your uncommitted and unpushed work, and keeps running when the laptop sleeps\" end }}",
+                "tooltip": "{{ (if .selected.chat.host == \"box\" then \"Continue on the Mac\" else \"Continue on the box, which keeps running when the laptop sleeps\" end) + (if .selected.move.scope == \"section\" then \": the whole \" + .selected.move.section + \" section moves (\" + (.selected.move.worktrees | tostring) + \" worktrees, \" + (.selected.move.chats | tostring) + \" chats) with each worktree's uncommitted and unpushed work\" elif .selected.move.chats > 1 then \": this worktree's \" + (.selected.move.chats | tostring) + \" chats move with its uncommitted and unpushed work\" else \": same branch, with the worktree's uncommitted and unpushed work\" end) }}",
                 "do": {
                   "do": "confirm",
-                  "title": "Move “{{ .selected.chat.name }}” to {{ if .selected.chat.host == \"box\" then \"the Mac\" else \"the cloud\" end }}?",
-                  "text": "Its Claude process stops here{{ if .selected.chat.status == \"running_elsewhere\" then \", including in super.engineering,\" else \"\" end }} and the conversation continues there in a minute, on the same branch with this worktree's uncommitted and unpushed work.",
-                  "confirm": "Move it",
+                  "title": "Move {{ if .selected.move.scope == \"section\" then \"the section “\" + .selected.move.section + \"”\" else \"“\" + .selected.chat.name + \"”\" end }} to {{ if .selected.chat.host == \"box\" then \"the Mac\" else \"the cloud\" end }}?",
+                  "text": "{{ if .selected.move.scope == \"section\" then \"All \" + (.selected.move.worktrees | tostring) + \" worktrees and \" + (.selected.move.chats | tostring) + \" chats in it move together: \" else \"\" end }}their Claude processes stop here{{ if .selected.chat.status == \"running_elsewhere\" then \", including in super.engineering,\" else \"\" end }} and continue there in a minute or so, on the same branches with the uncommitted and unpushed work.{{ if .selected.move.scope == \"section\" then \" The factory ledgers go along, and the orchestrator is told the new paths.\" else \"\" end }}",
+                  "confirm": "Move",
                   "then": { "do": "chat.move", "chat": "{{ .selected.chat.id }}", "to": "{{ if .selected.chat.host == \"box\" then \"mac\" else \"box\" end }}" }
                 }
               }
@@ -1614,8 +1615,10 @@
     { "label": "Open merge request", "if": ".selected.worktree.mr", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } },
     { "label": "Commit and push", "if": ".selected.chat", "do": { "do": "chat.send", "text": "Commit and push your changes." } },
     { "label": "Test this branch on the Mac", "if": ".selected.worktree.branch and (.selected.worktree.is_primary | not)", "do": { "do": "worktree.test_local", "branch": "{{ .selected.worktree.branch }}" } },
-    { "label": "Move chat to the Mac", "if": ".selected.chat.host == \"box\"", "do": { "do": "chat.move", "to": "mac" } },
-    { "label": "Move chat to the cloud (the box)", "if": ".selected.chat.host == \"mac\"", "do": { "do": "chat.move", "to": "box" } },
+    { "label": "Move {{ .selected.move.scope }} to the Mac", "if": ".selected.chat.host == \"box\"", "do": { "do": "chat.move", "to": "mac" } },
+    { "label": "Move {{ .selected.move.scope }} to the cloud (the box)", "if": ".selected.chat.host == \"mac\"", "do": { "do": "chat.move", "to": "box" } },
+    { "label": "Move only this chat to the Mac", "if": ".selected.chat.host == \"box\" and .selected.move.scope != \"chat\"", "do": { "do": "chat.move", "to": "mac", "scope": "chat" } },
+    { "label": "Move only this chat to the cloud (the box)", "if": ".selected.chat.host == \"mac\" and .selected.move.scope != \"chat\"", "do": { "do": "chat.move", "to": "box", "scope": "chat" } },
     { "label": "Stop chat", "if": ".selected.chat.alive", "do": "chat.stop" },
     { "label": "Start chat", "if": ".selected.chat and (.selected.chat.alive | not)", "do": "chat.start" },
     { "label": "Archive chat", "if": ".selected.chat", "do": "chat.archive" },
@@ -1943,6 +1946,17 @@
     "waiting_pane_lines": 25,
     "suggestion_prompt": "❯\u00a0", "suggestion_rule": "──", "suggestion_placeholder_prefix": "Try \"",
     "diff_max_bytes": 3000000, "diff_max_untracked": 200, "diff_include_untracked": true, "diff_default_base": "origin/main",
+    // Moving a chat between the Mac and the box takes along: "section" (every worktree in its sidebar
+    // section and all their chats, so a section lives in one place), "worktree" (its worktree's chats)
+    // or "chat" (just it). A section move rebuilds the section on the other machine and removes it here
+    // unless move_keep_section; it also copies move_sync_paths (the factory skills' ledgers, newer files
+    // winning, paths rewritten for the other machine), as does moving an orchestrator: a chat whose kind is
+    // in move_note_kinds or whose name or folder matches move_note_match. Moved orchestrators then get
+    // move_note ({from}, {to}, {section}, {paths}).
+    "move_together": "section", "move_keep_section": false,
+    "move_sync_paths": ["~/.local/state/redo/", "~/.factory/", "~/.config/redo/"],
+    "move_note_kinds": ["orchestrator"], "move_note_match": "(?i)ship.feature|orchestrat",
+    "move_note": "a.box moved this chat from the {from} to the {to}, with its section {section}. Worktree paths changed: {paths}. Your ledger files were copied over and point at the new paths. Pick up where you left off, and re-arm any loop or wakeup you had scheduled.",
     "terminal_mouse": false,             // tmux mouse mode on terminal shells (wheel scrolls tmux history)
     "terminal_history_limit": null,
     "chat_tmux_cols": 220, "chat_tmux_rows": 60, "rc_url_wait_secs": 45, "chat_send_pause_secs": 0.5, "supervise_secs": 30,

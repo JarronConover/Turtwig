@@ -1226,7 +1226,7 @@ impl Workspace {
             "worktrees": worktrees,
             "chats": self.model.chats.iter().chain(self.sub_chats.iter().map(|(_, c)| c)).map(|c| self.chat_json(c)).collect::<Vec<_>>(),
             "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here, "diff": selected_diff,
-                         "terminals": terminals, "background": background},
+                         "terminals": terminals, "background": background, "move": self.move_plan()},
             "state": self.state,
             "theme": self.settings.theme,
             "hosts": self.settings.hosts,
@@ -1749,6 +1749,23 @@ impl Workspace {
             providers,
             warning_below: self.settings.num("usage.meter_levels.warning", 50.),
             danger_below: self.settings.num("usage.meter_levels.danger", 20.),
+        }
+    }
+
+    /** What moving the selected chat takes along (settings `daemon.move_together`): `{scope, section,
+    worktrees, chats}`, where scope is what actually applies (a chat outside any section moves its worktree). */
+    fn move_plan(&self) -> Value {
+        let Some(w) = self.current_worktree() else { return Value::Null };
+        let wanted = self.settings.text("daemon.move_together", "section");
+        let live = |w: &Worktree| self.chats_of(w).into_iter().filter(|c| !c.id.starts_with("sub:") && c.status != "archived").count();
+        let section = (wanted == "section").then(|| self.model.sections.iter().find(|s| s.items.iter().any(|x| x.path == w.path && x.host == w.host))).flatten();
+        match (wanted.as_str(), section) {
+            ("chat", _) => json!({"scope": "chat", "section": null, "worktrees": 1, "chats": 1}),
+            (_, Some(s)) => {
+                let items: Vec<&Worktree> = s.items.iter().filter(|x| x.host == w.host).collect();
+                json!({"scope": "section", "section": s.name, "worktrees": items.len(), "chats": items.iter().map(|x| live(x)).sum::<usize>()})
+            }
+            _ => json!({"scope": "worktree", "section": null, "worktrees": 1, "chats": live(w)}),
         }
     }
 

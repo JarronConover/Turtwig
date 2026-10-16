@@ -31,7 +31,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("confirm.accept / confirm.cancel", "answer the open confirm dialog"),
     ("chat.attach", "{chat, paths: [..]}: attach files to a chat (preview chips above its composer; uploaded to the box for box chats; sent with the next message). An `on.drop` action gets the dropped files as `paths`."),
     ("composer.send", "{chat}: send what's in a chat's composer"),
-    ("chat.move", "{chat, to: mac|box}: move a chat between machines"),
+    ("chat.move", "{chat, to: mac|box, scope?: section|worktree|chat}: move a chat between machines, with what daemon.move_together (or scope) takes along: `.selected.move` says what that is"),
     ("section.new", "{assign?: path}: ask for a name, create the section (and move that worktree into it)"),
     ("section.rename", "{id, name?}: rename (asks when name is missing)"),
     ("section.delete", "{id}"),
@@ -486,7 +486,11 @@ impl Workspace {
             "chat.move" => {
                 if let Some(id) = chat() {
                     let to = s("to").unwrap_or("mac".into());
-                    self.run_local(vec!["chat".into(), "move".into(), id, "--to".into(), to], window, cx);
+                    let mut args = vec!["chat".into(), "move".into(), id, "--to".into(), to];
+                    if let Some(scope) = s("scope") {
+                        args.extend(["--scope".into(), scope]);
+                    }
+                    self.run_local(args, window, cx);
                 }
             }
             "section.new" => self.new_section(s("assign"), window, cx),
