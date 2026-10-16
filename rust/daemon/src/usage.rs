@@ -23,7 +23,6 @@ type Tokens = [u64; 5];
 #[derive(Default)]
 struct FileUsage {
     offset: u64,
-    seen: HashSet<String>,
     /** (model, day, size class) -> tokens */
     totals: HashMap<(String, String, u64), Tokens>,
     dir: Option<String>,
@@ -32,9 +31,13 @@ struct FileUsage {
     model: Option<String>,
     total: u64,
     limits: Option<(String, Value)>,
+    /** Codex: the root session a subagent's rollout belongs to. */
+    session: Option<String>,
 }
 
 static FILES: Mutex<Option<HashMap<PathBuf, FileUsage>>> = Mutex::new(None);
+/** Claude message ids already counted, across files: a forked session's transcript repeats its parent's. */
+static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 /** The new complete lines of a file since the last read. */
 fn new_lines(path: &Path, f: &mut FileUsage) -> Option<Vec<u8>> {
@@ -67,7 +70,9 @@ fn add(f: &mut FileUsage, model: String, ts: &str, prompt: u64, t: Tokens) {
 }
 
 /** A Codex rollout: `turn_context` / `thread_settings_applied` name the model, and each `token_count`
-event whose running total moved adds its last call's tokens (input includes the cached part). */
+event whose running total moved adds its last call's tokens (input includes the cached part). A fork or
+subagent rollout starts by replaying its parent's history, token counts included, before any model is
+set: those only set the running total, so they aren't counted twice. */
 fn read_codex(path: &Path, f: &mut FileUsage) {
     let Some(buf) = new_lines(path, f) else { return };
     for line in buf.split(|b| *b == b'\n') {
@@ -79,7 +84,10 @@ fn read_codex(path: &Path, f: &mut FileUsage) {
         let p = &e["payload"];
         let ts = e.get("timestamp").and_then(Value::as_str).unwrap_or("");
         match (e["type"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or("")) {
-            ("session_meta", _) => f.dir = p["cwd"].as_str().map(str::to_string),
+            ("session_meta", _) => {
+                f.dir = p["cwd"].as_str().map(str::to_string);
+                f.session = p["session_id"].as_str().map(str::to_string);
+            }
             ("turn_context", _) => f.model = p["model"].as_str().map(str::to_string).or(f.model.take()),
             (_, "thread_settings_applied") => f.model = p.pointer("/thread_settings/model").and_then(Value::as_str).map(str::to_string).or(f.model.take()),
             (_, "token_count") => {
@@ -91,6 +99,9 @@ fn read_codex(path: &Path, f: &mut FileUsage) {
                     continue;
                 }
                 f.total = total;
+                if f.model.is_none() {
+                    continue;
+                }
                 let u = &p["info"]["last_token_usage"];
                 let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                 let (input, cached, write) = (n("input_tokens"), n("cached_input_tokens"), n("cache_write_input_tokens"));
@@ -103,7 +114,7 @@ fn read_codex(path: &Path, f: &mut FileUsage) {
     }
 }
 
-fn read_new(path: &Path, f: &mut FileUsage) {
+fn read_new(path: &Path, f: &mut FileUsage, seen: &mut HashSet<String>) {
     let Some(buf) = new_lines(path, f) else { return };
     for line in buf.split(|b| *b == b'\n') {
         if f.dir.is_none() {
@@ -123,7 +134,7 @@ fn read_new(path: &Path, f: &mut FileUsage) {
         }
         let m = &e["message"];
         let id = m.get("id").and_then(Value::as_str).or(e.get("requestId").and_then(Value::as_str)).unwrap_or("").to_string();
-        if !id.is_empty() && !f.seen.insert(id) {
+        if !id.is_empty() && !seen.insert(id) {
             continue;
         }
         let u = &m["usage"];
@@ -201,17 +212,26 @@ pub fn scan() -> Value {
         if f.limits.as_ref().is_some_and(|(at, _)| codex_limits.as_ref().is_none_or(|(best, _)| at > best)) {
             codex_limits = f.limits.clone();
         }
-        let s = sessions.entry(id).or_default();
+        let own = f.session.as_ref().is_none_or(|root| *root == id);
+        let s = sessions.entry(f.session.clone().unwrap_or(id)).or_default();
         s.3 = "codex";
-        s.0 = f.dir.clone();
-        s.1 = f.last.clone();
+        if own || s.0.is_none() {
+            s.0 = f.dir.clone();
+        }
+        if f.last > s.1 {
+            s.1 = f.last.clone();
+        }
         for ((model, day, size), t) in &f.totals {
             s.2.push(json!([model, day, size, t[0], t[1], t[2], t[3], t[4]]));
         }
     }
+    let mut seen_all = SEEN.lock().unwrap();
+    let seen = seen_all.get_or_insert_with(HashSet::new);
+    // Older files first, so a fork's copies are skipped rather than its parent's originals.
+    paths.sort_by_key(|(_, p)| std::fs::metadata(p).and_then(|m| m.created().or_else(|_| m.modified())).ok());
     for (id, p) in paths {
         let f = files.entry(p.clone()).or_default();
-        read_new(&p, f);
+        read_new(&p, f, seen);
         let s = sessions.entry(id).or_default();
         s.3 = "claude";
         if s.0.is_none() && !p.to_string_lossy().contains("/subagents/") {
@@ -252,6 +272,7 @@ mod tests {
         );
         let lines = [
             r#"{"timestamp":"2026-10-09T16:03:00Z","type":"session_meta","payload":{"id":"x","cwd":"/w"}}"#.to_string(),
+            tc(500, "2026-10-09T16:03:00Z"),
             r#"{"timestamp":"2026-10-09T16:03:01Z","type":"turn_context","payload":{"model":"gpt-6-sol"}}"#.to_string(),
             tc(1050, "2026-10-09T16:03:02Z"),
             tc(1050, "2026-10-09T16:03:03Z"),
