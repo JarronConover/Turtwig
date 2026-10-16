@@ -166,6 +166,18 @@ def trust_folder(path):
         tmp.replace(CLAUDE_JSON)
 
 
+def checked_out(primary, branch):
+    """The worktree that already has `branch` checked out, if any (git allows only one)."""
+    out = run(["git", "-C", str(primary), "worktree", "list", "--porcelain"], check=False, capture_output=True).stdout
+    path = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = line[9:]
+        elif line == f"branch refs/heads/{branch}" and path:
+            return Path(path)
+    return None
+
+
 def worktree_dir(chat):
     repo = chat.get("repo") or "redo"
     base = WORKTREES if repo == "redo" else HOME / "dev" / f"{PRIMARY[repo].name}-worktrees"
@@ -179,7 +191,7 @@ def ensure_worktree(chat, restore_from=None):
         return Path(chat["dir"])
     repo = chat.get("repo") or "redo"
     primary = PRIMARY[repo]
-    wt_dir = worktree_dir(chat)
+    wt_dir = checked_out(primary, chat["branch"]) or worktree_dir(chat)
     if wt_dir.exists():
         if restore_from:
             wip_restore(wt_dir, restore_from)
@@ -514,6 +526,22 @@ def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id):
          remote_src, remote_dst], capture_output=True)
 
 
+def adopt_worktree_branch(chat):
+    """A chat brought in from super.engineering knows only its folder: when that's a worktree, take its
+    repo and branch, so the box makes the same worktree (with the WIP) instead of using its main checkout."""
+    d = chat.get("dir")
+    if chat.get("branch") or not d or not Path(d).exists():
+        return
+    common = run(["git", "-C", d, "rev-parse", "--path-format=absolute", "--git-common-dir"], check=False, capture_output=True).stdout.strip()
+    own = run(["git", "-C", d, "rev-parse", "--path-format=absolute", "--git-dir"], check=False, capture_output=True).stdout.strip()
+    branch = run(["git", "-C", d, "branch", "--show-current"], check=False, capture_output=True).stdout.strip()
+    repo = repo_of(Path(common).parent) if common else None
+    if not (repo and branch and common != own):
+        return
+    chat["repo"], chat["branch"] = repo, branch
+    save(chat, f"chat branch: {chat['name']} on {branch}", wait=True)
+
+
 def cmd_move(args):
     if HOST != "mac":
         sys.exit("run moves from the Mac (it can reach the box; the box can't reach it)")
@@ -531,10 +559,14 @@ def cmd_move(args):
             take_over(chat, local)
             print(f"moved {chat['name']} to the Mac: {local}")
         else:
+            adopt_worktree_branch(chat)
+            stop_elsewhere(chat)
             release_here(chat)
             box_dir = json.loads(on_box("_prepare", chat["id"], "mac"))["dir"]
             copy_transcript("mac", chat["dir"], "box", box_dir, chat["id"])
             on_box("_take", chat["id"], box_dir)
+            # The box wrote the chat's new home to the state branch; take it here too, so the Mac stops listing it.
+            git_state("pull", "-q", "--rebase", "origin", "state", check=False)
             print(f"moved {chat['name']} to the box: {box_dir}")
     except (SystemExit, subprocess.CalledProcessError) as err:
         # Put the chat back where it was, running, so a failed move loses nothing.

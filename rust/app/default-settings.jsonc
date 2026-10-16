@@ -851,7 +851,7 @@
               "drop_zones": "edges_x",
               "tooltip": "{{ .hosts[.c.host].label // .c.host }} · {{ .c.state }}",
               "menu": [
-                { "label": "Move to {{ if .c.host == \"box\" then \"Mac\" else \"box\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
+                { "label": "Move to {{ if .c.host == \"box\" then \"the Mac\" else \"the cloud\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
                 { "if": ".c.alive | not", "label": "Start", "do": { "do": "chat.start", "chat": "{{ .c.id }}" } },
                 { "label": "Fork chat", "do": { "do": "chat.fork", "chat": "{{ .c.id }}" } },
                 { "separator": true },
@@ -1144,11 +1144,13 @@
             { "if": ".selected.worktree.uncommitted > 0 and .selected.chat", "type": "Pill", "props": { "text": "Commit and push", "icon": "git-commit-horizontal", "do": { "do": "chat.send", "text": "Commit and push your changes." } } },
             { "if": "(.selected.worktree.is_primary | not) and .selected.worktree.branch and .selected.worktree.host == \"box\"", "type": "Pill", "props": { "text": "Test on Mac", "icon": "laptop", "tooltip": "Check this branch out on the Mac with the box's latest work", "do": { "do": "worktree.test_local", "branch": "{{ .selected.worktree.branch }}" } } },
             {
-              "if": ".selected.chat and .selected.worktree.host == \"box\"",
+              "if": ".selected.chat and .selected.chat.kind != \"subagent\" and (.selected.worktree.host == \"box\" or .selected.chat.host == \"mac\")",
+              "id": "move-chat",
               "type": "Pill",
               "props": {
-                "text": "Move chat to {{ if .selected.chat.host == \"box\" then \"Mac\" else \"box\" end }}",
-                "icon": "{{ if .selected.chat.host == \"box\" then \"laptop\" else \"server\" end }}",
+                "text": "Move chat to {{ if .selected.chat.host == \"box\" then \"Mac\" else \"the cloud\" end }}",
+                "icon": "{{ if .selected.chat.host == \"box\" then \"laptop\" else \"cloud\" end }}",
+                "tooltip": "{{ if .selected.chat.host == \"box\" then \"Continue this chat on the Mac, with the worktree's latest work\" else \"Continue this chat on the box: it gets the same branch with your uncommitted and unpushed work, and keeps running when the laptop sleeps\" end }}",
                 "do": { "do": "chat.move", "to": "{{ if .selected.chat.host == \"box\" then \"mac\" else \"box\" end }}" }
               }
             },
@@ -1395,7 +1397,7 @@
     { "label": "Commit and push", "if": ".selected.chat", "do": { "do": "chat.send", "text": "Commit and push your changes." } },
     { "label": "Test this branch on the Mac", "if": ".selected.worktree.branch and (.selected.worktree.is_primary | not)", "do": { "do": "worktree.test_local", "branch": "{{ .selected.worktree.branch }}" } },
     { "label": "Move chat to the Mac", "if": ".selected.chat.host == \"box\"", "do": { "do": "chat.move", "to": "mac" } },
-    { "label": "Move chat to the box", "if": ".selected.chat.host == \"mac\" and .selected.worktree.host == \"box\"", "do": { "do": "chat.move", "to": "box" } },
+    { "label": "Move chat to the cloud (the box)", "if": ".selected.chat.host == \"mac\"", "do": { "do": "chat.move", "to": "box" } },
     { "label": "Stop chat", "if": ".selected.chat.alive", "do": "chat.stop" },
     { "label": "Start chat", "if": ".selected.chat and (.selected.chat.alive | not)", "do": "chat.start" },
     { "label": "Archive chat", "if": ".selected.chat", "do": "chat.archive" },

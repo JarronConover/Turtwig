@@ -47,9 +47,12 @@ snapshot_worktree() {
 
 sync_sessions() {
   local s=$AGENT_SESSIONS_DIR
+  # GitLab refuses any file over 100MB, which fails the whole push (WIP included): transcripts that
+  # big (screenshots add up) stay on their machine.
   if [ "$AGENT_HOST" = box ] && [ -d "$CLAUDE_PROJECTS_DIR" ]; then
     mkdir -p "$s/hosts/$AGENT_HOST/projects"
-    rsync -a "$CLAUDE_PROJECTS_DIR/" "$s/hosts/$AGENT_HOST/projects/"
+    rsync -a --max-size=95m "$CLAUDE_PROJECTS_DIR/" "$s/hosts/$AGENT_HOST/projects/"
+    find "$s/hosts/$AGENT_HOST/projects" -type f -size +95M -delete
   elif [ "$AGENT_HOST" = mac ]; then
     # Only the chats that live on the Mac, not every local session.
     local f id slug
@@ -59,10 +62,11 @@ sync_sessions() {
       slug=$(jq -r .dir "$f" | sed 's#[^A-Za-z0-9]#-#g')
       [ -f "$CLAUDE_PROJECTS_DIR/$slug/$id.jsonl" ] || continue
       mkdir -p "$s/hosts/mac/projects/$slug"
-      rsync -a "$CLAUDE_PROJECTS_DIR/$slug/$id.jsonl" "$s/hosts/mac/projects/$slug/"
-      [ -d "$CLAUDE_PROJECTS_DIR/$slug/$id" ] && rsync -a "$CLAUDE_PROJECTS_DIR/$slug/$id" "$s/hosts/mac/projects/$slug/"
+      rsync -a --max-size=95m "$CLAUDE_PROJECTS_DIR/$slug/$id.jsonl" "$s/hosts/mac/projects/$slug/"
+      [ -d "$CLAUDE_PROJECTS_DIR/$slug/$id" ] && rsync -a --max-size=95m "$CLAUDE_PROJECTS_DIR/$slug/$id" "$s/hosts/mac/projects/$slug/"
     done
   fi
+  find "$s/hosts" -type f -size +95M -print -delete 2> /dev/null | while read -r big; do log "too big for the remote, kept local only: $big"; done
   git -C "$s" add -A
   if git -C "$s" rev-parse -q --verify HEAD > /dev/null; then
     git -C "$s" diff --cached --quiet && [ ! -f "$AGENT_HOME/push-pending" ] && return 0
@@ -87,7 +91,7 @@ while :; do
   shopt -s nullglob
   entries=("$AGENT_QUEUE_DIR"/*)
   shopt -u nullglob
-  for entry in "${entries[@]}"; do
+  for entry in ${entries[@]+"${entries[@]}"}; do
     snapshot_worktree "$(cat "$entry")"
     rm -f "$entry"
   done
