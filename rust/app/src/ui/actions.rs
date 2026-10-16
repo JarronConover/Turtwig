@@ -40,6 +40,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("project.move", "{repo?, index? | target: repo with zone}: reorder a project (repo defaults to `dragged`)"),
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
     ("worktree.delete", "{path}"),
+    ("transcript.load_earlier", "{chat?}: load `chat.transcript_page` more of a long chat's older messages (scrolling to the top does this too)"),
     ("worktree.rename_branch", "{path, branch?}: rename the worktree's git branch (asks when branch is missing)"),
     ("worktree.new", "{repo, host: mac|box, branch?}: a worktree on that branch, checked out if it exists, else new from origin/main (asks when branch is missing)"),
     ("project.settings", "{repo}: edit the project's name, badge letter and color (saved in state as project_name:REPO, project_letter:REPO, project_hue:REPO)"),
@@ -499,6 +500,11 @@ impl Workspace {
                     }
                 }
             }
+            "transcript.load_earlier" => {
+                if let Some(id) = chat() {
+                    self.load_earlier(&id, cx);
+                }
+            }
             "worktree.rename_branch" => {
                 if let Some(path) = s("path") {
                     match s("branch") {
@@ -680,7 +686,7 @@ impl Workspace {
                 }
             }
             "drop.preview" => {
-                self.drop_hint = s("key").map(|key| crate::ui::render::DropHint { key, zone: s("zone").unwrap_or("inside".into()), kind: s("kind").unwrap_or_default() });
+                self.drop_hint = s("key").map(|key| crate::ui::render::DropHint { key, zone: s("zone").unwrap_or("inside".into()), kind: s("kind").unwrap_or_default(), value: a.get("value").cloned().unwrap_or(Value::Null) });
                 self.drop_preview = true;
             }
             "diff.refresh" => {

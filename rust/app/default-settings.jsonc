@@ -90,7 +90,10 @@
     "sidebar_rows": "worktrees",
     // Projects: "merged" lists each repo once with every machine's worktrees (each marked with its
     // machine); "by_host" gives each machine its own copy of the project.
-    "sidebar_projects": "merged"
+    "sidebar_projects": "merged",
+    // Worktree order in each project and section: "manual" (as you drag them) or "recent" (newest
+    // activity first). Dragging a worktree while sorted by recent switches to manual, with a notice.
+    "sidebar_order": "manual"
   },
 
   "views": {
@@ -147,7 +150,13 @@
                   "props": { "text": "Projects", "collapsed": "{{ .state[\"collapsed:projects\"] // false }}" },
                   "style": { "cursor": "pointer", "radius": 6 },
                   "tooltip": "{{ if .state[\"collapsed:projects\"] then \"Show\" else \"Hide\" end }} projects",
-                  "on": { "click": { "do": "state.toggle", "key": "collapsed:projects" } }
+                  "on": { "click": { "do": "state.toggle", "key": "collapsed:projects" } },
+                  "menu": [
+                    { "label": "Sort by recent activity", "checked": ".state.sidebar_order == \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "recent" } },
+                    { "label": "Sort manually", "checked": ".state.sidebar_order != \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "manual" } },
+                    { "separator": true },
+                    { "label": "{{ if .state[\"collapsed:projects\"] then \"Show\" else \"Hide\" end }} projects", "do": { "do": "state.toggle", "key": "collapsed:projects" } }
+                  ]
                 },
                 {
                   "if": ".state[\"collapsed:projects\"] | not",
@@ -252,12 +261,15 @@
                       "menu": [
                         { "label": "Rename…", "do": { "do": "section.rename", "id": "{{ .s.id }}" } },
                         { "separator": true },
+                        { "label": "Sort by recent activity", "checked": ".state.sidebar_order == \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "recent" } },
+                        { "label": "Sort manually", "checked": ".state.sidebar_order != \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "manual" } },
+                        { "separator": true },
                         { "label": "Delete section", "do": { "do": "section.delete", "id": "{{ .s.id }}" } }
                       ]
                     },
                     {
                       "if": "(\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end | not",
-                      "for": "[.s.items[] | select(.chats | any(.kind == \"orchestrator\"))] + [.s.items[] | select(.chats | any(.kind == \"orchestrator\") | not)]",
+                      "for": ".s.items",
                       "as": "w", "key": ".w.path",
                       "type": "column",
                       "children": [
@@ -404,7 +416,9 @@
       "about": "One worktree in the sidebar. props: w (a worktree), in_section (bool: sections show the project badge and emoji), child (bool: a worker under the section's orchestrator, drawn indented with a tree line).",
       "type": "row",
       "style": {
-        "height": 33, "padding": "{{ if .props.child then [0, 12, 0, 30] elif .props.in_section then [0, 12, 0, 8] else [0, 12, 0, 27] end }}",
+        "height": "{{ if .props.w.drop_gap then 66 else 33 end }}",
+        "padding": "{{ (if .props.w.drop_gap then 33 else 0 end) as $top | (if .props.child then [0, 12, 0, 30] elif .props.in_section then [0, 12, 0, 8] else [0, 12, 0, 27] end) | .[0] = $top }}",
+        "opacity": "{{ if .props.w.drag_source then 0.45 else 1 end }}",
         "gap": 8, "align": "center", "radius": 8, "border": 1, "cursor": "pointer",
         "border_color": "{{ if .props.w.selected then \"@selection_border\" else \"transparent\" end }}",
         "background": "{{ if .props.w.selected then \"@selection\" else \"transparent\" end }}",
@@ -417,7 +431,16 @@
         "drop_item": {
           "accept": "worktree",
           "valid": ".dragged as $d | .props.w as $t | .zone as $z | (if $t.section then [.sections[] | select(.id == $t.section.id) | .items[].path] else [.projects[] | select(.repo == $t.repo) | .items[].path] end) as $list | ($list | index($t.path)) as $ti | ($list | index($d)) as $di | $d != $t.path and ($t.section != null or ([.worktrees[] | select(.path == $d)][0].repo == $t.repo)) and ($di == null or ($z == \"before\" and $di != $ti - 1) or ($z == \"after\" and $di != $ti + 1))",
-          "do": { "do": "worktree.move", "section": "{{ .props.w.section.id }}", "target": "{{ .props.w.path }}" }
+          "do": [
+            {
+              "do": "if", "cond": "{{ .state.sidebar_order == \"recent\" }}",
+              "then": [
+                { "do": "state.set", "key": "sidebar_order", "value": "manual" },
+                { "do": "notify", "text": "Sidebar switched to manual order so your arrangement sticks. Right-click Projects to sort by recent activity again." }
+              ]
+            },
+            { "do": "worktree.move", "section": "{{ .props.w.section.id }}", "target": "{{ .props.w.path }}" }
+          ]
         }
       },
       "drag": { "kind": "worktree", "value": "{{ .props.w.path }}", "label": "{{ .props.w.title }}" },
@@ -461,7 +484,7 @@
         { "if": ".props.w.section", "label": "Remove from section", "do": { "do": "section.assign", "path": "{{ .props.w.path }}", "section": null } }
       ],
       "children": [
-        { "type": "DropLine", "props": { "key": "wt:{{ .props.w.path }}" } },
+        { "if": ".props.w.drop_room | not", "type": "DropLine", "props": { "key": "wt:{{ .props.w.path }}" } },
         { "if": ".props.child", "type": "icon", "props": { "name": "corner-down-right", "size": 12, "color": "@text_faint" }, "style": { "margin": [0, -2, 0, -14] } },
         { "if": ".props.w.chats | any(.kind == \"orchestrator\")", "type": "icon", "props": { "name": "workflow", "size": 14, "color": "@accent" }, "tooltip": "Orchestrator" },
         { "if": ".props.in_section and (.props.w.chats | any(.kind == \"orchestrator\") | not)", "type": "Badge", "props": { "letter": "{{ .props.w.letter }}", "hue": "{{ .props.w.hue }}", "size": 16 } },
@@ -1217,6 +1240,8 @@
     { "label": "New orchestrator chat in redo", "do": { "do": "chat.new", "repo": "redo", "kind": "orchestrator" } },
     { "label": "New feature chat in redo…", "do": { "do": "prompt", "title": "Branch name", "then": { "do": "chat.new", "repo": "redo", "kind": "feature", "branch": "{{ .input }}" } } },
     { "label": "New section…", "do": "section.new" },
+    { "label": "Sidebar: sort by recent activity", "if": ".state.sidebar_order != \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "recent" } },
+    { "label": "Sidebar: sort manually", "if": ".state.sidebar_order == \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "manual" } },
     { "label": "Restore removed projects", "if": ".app.removed_projects | length > 0", "do": "project.restore" },
     { "label": "Sidebar: list chats under worktrees", "if": ".state.sidebar_rows != \"chats\"", "do": { "do": "state.set", "key": "sidebar_rows", "value": "chats" } },
     { "label": "Sidebar: worktrees only", "if": ".state.sidebar_rows == \"chats\"", "do": { "do": "state.set", "key": "sidebar_rows", "value": "worktrees" } },
@@ -1249,6 +1274,8 @@
     "step_detail_lines": 40,
     // How many of a chat's newest transcript entries to load when it opens (long chats run to 40,000+).
     "transcript_tail": 600,
+    // How many more older entries to load each time you scroll to the top of a long chat.
+    "transcript_page": 600,
     // Typing one of these at the start of a word opens a list of matches under the composer.
     // Messages sent while the agent is working wait here and go out one per turn as it finishes.
     "queue": true,

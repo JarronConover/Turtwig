@@ -370,6 +370,12 @@ impl Workspace {
                 cx.new(|_| DragPreview { label: item.label.clone(), style: preview_style.clone(), theme: theme2.clone() })
             });
         }
+        // A press that drags, resizes, or clicks something isn't the start of a text selection; otherwise the
+        // chat keeps selecting as the pointer moves after a drop (the drop eats the mouse-up).
+        let presses = obj.contains_key("drag") || kind == "resize_handle" || obj.get("on").and_then(Value::as_object).is_some_and(|o| o.contains_key("click") || o.contains_key("double_click") || o.contains_key("mouse_down"));
+        if presses {
+            el = el.on_mouse_down(MouseButton::Left, |_, _, cx| gpui_kit::base::GlobalState::suppress_text_selection(cx));
+        }
         if let Some(Value::Object(d)) = st.get("drag_over_item") {
             let accept = accepted(obj.get("on").and_then(|o| o.get("drop_item")));
             let (d, theme) = (d.clone(), theme.clone());
@@ -443,7 +449,7 @@ impl Workspace {
                             return clear(ws, cx);
                         }
                     }
-                    let hint = DropHint { key: k2.clone(), zone: zone.into(), kind: item.kind.clone() };
+                    let hint = DropHint { key: k2.clone(), zone: zone.into(), kind: item.kind.clone(), value: item.value.clone() };
                     if ws.drop_hint.as_ref() != Some(&hint) {
                         ws.drop_hint = Some(hint);
                         cx.notify();
@@ -453,9 +459,14 @@ impl Workspace {
                     let Some((_, action, _)) = specs.iter().find(|(accept, _, _)| accept.is_empty() || accept.contains(&item.kind)) else { return };
                     let Some(hint) = ws.drop_hint.take().filter(|h| h.key == drop_key) else { return };
                     let mut action = action.clone();
-                    if let Value::Object(o) = &mut action {
+                    let fill = |o: &mut Map<String, Value>| {
                         o.insert("dragged".into(), item.value.clone());
-                        o.insert("zone".into(), Value::String(hint.zone));
+                        o.insert("zone".into(), Value::String(hint.zone.clone()));
+                    };
+                    match &mut action {
+                        Value::Object(o) => fill(o),
+                        Value::Array(list) => list.iter_mut().filter_map(Value::as_object_mut).for_each(fill),
+                        _ => {}
                     }
                     ws.run_action(&action, window, cx);
                     cx.stop_propagation();
@@ -770,6 +781,8 @@ pub struct DropHint {
     pub key: String,
     pub zone: String,
     pub kind: String,
+    /** What's being dragged (a worktree's path, a chat id). */
+    pub value: Value,
 }
 
 /** The pill that follows the pointer while dragging. Look: theme `drag_preview`. */

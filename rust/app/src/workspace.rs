@@ -46,6 +46,8 @@ pub struct Workspace {
     pub(crate) inputs: HashMap<String, Entity<gpui_kit::component::input::InputState>>,
     /** Each `input` node's `on.submit` action and the context it was drawn in. */
     pub(crate) input_submits: HashMap<String, (Value, jaq_json::Val)>,
+    /** Chats whose older lines are being fetched. */
+    loading_earlier: std::collections::HashSet<String>,
     /** The open completion list under a composer: (chat, trigger, entries, selected). */
     pub(crate) completion: Option<(String, String, Vec<crate::completions::Entry>, usize)>,
     /** Messages typed while a chat was working, sent one per turn as it finishes (`chat.queue`). */
@@ -208,6 +210,7 @@ impl Workspace {
             history_loading: false,
             inputs: HashMap::new(),
             input_submits: HashMap::new(),
+            loading_earlier: Default::default(),
             completion: None,
             queued: HashMap::new(),
             view_handle: None,
@@ -963,6 +966,7 @@ impl Workspace {
                 let (name, letter, hue) = self.project_look(&p.repo, &p.name, p.hue);
                 let (show_external, show_primary) = (!self.flag(&format!("hide_external:{}", p.repo)), !self.flag(&format!("hide_primary:{}", p.repo)));
                 let shown = self.visible_items(&p.items, |w| (show_external || !w.external) && (show_primary || !w.is_primary));
+                let gaps = self.drop_gaps(&shown);
                 let primary = p.items.iter().find(|w| w.is_primary).or(p.items.first());
                 json!({"name": name, "repo": p.repo, "hue": hue, "letter": letter,
                        "hosts": self.project_hosts.get(i).cloned().unwrap_or_else(|| vec!["box".into()]),
@@ -971,7 +975,7 @@ impl Workspace {
                        "external_count": p.items.iter().filter(|w| w.external).count(),
                        "hidden_count": p.items.iter().chain(self.model.sections.iter().flat_map(|s| s.items.iter())).filter(|w| w.repo == p.repo && self.flag(&format!("hidden:{}", w.path))).count(),
                        "primary_path": primary.map(|w| w.path.clone()), "primary_host": primary.map(|w| w.host.clone()),
-                       "items": shown.into_iter().map(|w| self.worktree_json(w, Value::Null)).collect::<Vec<_>>()})
+                       "items": shown.into_iter().map(|w| self.row_json(w, Value::Null, &gaps)).collect::<Vec<_>>()})
             })
             .collect();
         let sections: Vec<Value> = self
@@ -979,9 +983,13 @@ impl Workspace {
             .sections
             .iter()
             .map(|s| {
+                // A section's orchestrator leads it; its workers follow.
+                let mut shown = self.visible_items(&s.items, |_| true);
+                shown.sort_by_key(|w| !self.chats_of(w).iter().any(|c| c.kind == "orchestrator"));
+                let gaps = self.drop_gaps(&shown);
                 json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
                        "host": self.section_hosts.get(&s.id).cloned().unwrap_or_else(|| "box".into()),
-                       "items": self.visible_items(&s.items, |_| true).into_iter().map(|w| self.worktree_json(w, json!({"id": s.id, "name": s.name}))).collect::<Vec<_>>()})
+                       "items": shown.into_iter().map(|w| self.row_json(w, json!({"id": s.id, "name": s.name}), &gaps)).collect::<Vec<_>>()})
             })
             .collect();
         let removed: Vec<Value> = self.model.projects.iter().filter(|p| self.project_removed(&p.repo)).map(|p| json!({"repo": p.repo, "name": self.project_look(&p.repo, &p.name, p.hue).0})).collect();
@@ -1046,11 +1054,39 @@ impl Workspace {
         (name, letter, hue)
     }
 
-    /** What the sidebar lists: not hidden, its project not removed, passing `keep`; pinned ones first. */
+    /** What the sidebar lists: not hidden, its project not removed, passing `keep`; pinned ones first, then
+    by `state.sidebar_order` ("manual": as arranged; "recent": newest activity first). */
     fn visible_items<'a>(&self, items: &'a [Worktree], keep: impl Fn(&Worktree) -> bool) -> Vec<&'a Worktree> {
         let mut out: Vec<&Worktree> = items.iter().filter(|w| !self.flag(&format!("hidden:{}", w.path)) && !self.project_removed(&w.repo) && keep(w)).collect();
+        if self.state.get("sidebar_order").and_then(Value::as_str) == Some("recent") {
+            out.sort_by(|a, b| b.age.unwrap_or(0.).total_cmp(&a.age.unwrap_or(0.)));
+        }
         out.sort_by_key(|w| !self.flag(&format!("pinned:{}", w.path)));
         out
+    }
+
+    /** While a worktree is dragged over a row's edge, the row it would land above opens a gap (`drop_gap`),
+    so the list makes room live. The gap is inside that row, so the pointer stays over the same target. */
+    fn drop_gaps(&self, shown: &[&Worktree]) -> Vec<String> {
+        let Some(h) = self.drop_hint.as_ref().filter(|h| h.kind == "worktree") else { return vec![] };
+        let Some(target) = h.key.strip_prefix("wt:") else { return vec![] };
+        let Some(i) = shown.iter().position(|w| w.path == target) else { return vec![] };
+        match h.zone.as_str() {
+            "before" => vec![target.to_string()],
+            "after" => shown.get(i + 1).map(|w| vec![w.path.clone(), target.to_string()]).unwrap_or_default(),
+            _ => vec![],
+        }
+    }
+
+    fn row_json(&self, w: &Worktree, section: Value, gaps: &[String]) -> Value {
+        let mut v = self.worktree_json(w, section);
+        if let Value::Object(o) = &mut v {
+            // gaps[0] opens the room; a target whose room opens on the row below (gaps[1]) hides its drop line.
+            o.insert("drop_gap".into(), Value::Bool(gaps.first() == Some(&w.path)));
+            o.insert("drop_room".into(), Value::Bool(gaps.contains(&w.path)));
+            o.insert("drag_source".into(), Value::Bool(self.drop_hint.as_ref().is_some_and(|h| h.value.as_str() == Some(&w.path))));
+        }
+        v
     }
 
     fn worktree_json(&self, w: &Worktree, section: Value) -> Value {
@@ -1624,6 +1660,16 @@ impl Workspace {
         };
         let working = if designer { self.designer.working } else { self.chat(&chat_id).map(|c| c.state == "working").unwrap_or(false) };
         let state = self.sync_list(&chat_id, working);
+        if !designer && !state.is_following_tail() && state.item_count() > 0 && state.logical_scroll_top().item_ix == 0 && self.transcripts.get(&chat_id).is_some_and(|t| t.start > 0) {
+            self.load_earlier(&chat_id, cx);
+        }
+        let loading_earlier = self.loading_earlier.contains(&chat_id).then(|| {
+            let st = self.settings.chat.get("jump").and_then(Value::as_object).cloned().unwrap_or_default();
+            let label = self.settings.chat.get("jump_labels").and_then(|l| l.get("loading")).and_then(Value::as_str).unwrap_or("Loading earlier messages…").to_string();
+            div().absolute().top(px(10.)).left_0().right_0().flex().justify_center()
+                .child(style::apply(h_flex().gap(px(6.)).items_center(), &st, &theme).child(self.spinner(Some("xsmall"), None, cx)).child(label))
+                .into_any_element()
+        });
         let row_view = chat_id.clone();
         let rows = list(state.clone(), cx.processor(move |ws: &mut Workspace, ix: usize, _, cx| ws.transcript_row(&row_view, ix, cx))).size_full();
         let jump = self.jump_chip(&chat_id, &state, &theme, window, cx);
@@ -1644,8 +1690,54 @@ impl Workspace {
             .child(rows)
             .when(shift_holds, |d| d.child(crate::ui::trace_view::shift_scroll_layer(None, 1.)))
             .children(jump)
+            .children(loading_earlier)
             .children(overlay)
             .into_any_element()
+    }
+
+    /** Loads `chat.transcript_page` more of a chat's older lines (when scrolled to the top), keeping
+    the view where it was. */
+    pub(crate) fn load_earlier(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(t) = self.transcripts.get(chat_id) else { return };
+        if t.start == 0 || !self.loading_earlier.insert(chat_id.to_string()) {
+            return;
+        }
+        let page = self.settings.chat.get("transcript_page").and_then(Value::as_u64).unwrap_or(600) as usize;
+        let tail = t.lines - t.start + page;
+        let remote = self.route(&Call::TranscriptUnwatch { chat_id: chat_id.to_string() });
+        let id = chat_id.to_string();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = remote.call(Call::TranscriptRead { chat_id: id.clone(), from: 0, tail: Some(tail) }).await;
+            this.update(cx, |ws, cx| {
+                ws.loading_earlier.remove(&id);
+                if let Ok(v) = res {
+                    let entries = v["entries"].as_array().cloned().unwrap_or_default();
+                    let start = v["from"].as_u64().unwrap_or(0) as usize;
+                    let mut fresh = crate::transcript::Transcript::default();
+                    fresh.append(start, &entries);
+                    fresh.revision = ws.transcripts.get(&id).map(|t| t.revision + 1).unwrap_or(1);
+                    ws.transcripts.insert(id.clone(), fresh);
+                    ws.reanchor_list(&id);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /** After older rows were added above, rebuilds a chat's list and keeps the same row at the top. */
+    fn reanchor_list(&mut self, chat_id: &str) {
+        let Some(t) = self.transcripts.get(chat_id) else { return };
+        let Some(l) = self.lists.get_mut(chat_id) else { return };
+        let blocks = crate::ui::trace_view::blocks_of(&t.items, l.working);
+        let top = l.state.logical_scroll_top();
+        let added = blocks.len().saturating_sub(l.blocks.len());
+        l.state.reset(blocks.len());
+        l.state.scroll_to(ListOffset { item_ix: top.item_ix + added, offset_in_item: top.offset_in_item });
+        l.blocks = std::rc::Rc::new(blocks);
+        (l.rev, l.items) = (t.revision, t.items.len());
     }
 
     /** `chat.follow`: "at_bottom" (stay at the newest message while you're there), "always", or "never". */

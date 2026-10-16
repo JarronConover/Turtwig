@@ -18,6 +18,8 @@ pub enum Item {
 #[derive(Default)]
 pub struct Transcript {
     pub lines: usize,
+    /** The first file line loaded (long chats load only their newest lines at first). */
+    pub start: usize,
     pub items: Vec<Item>,
     tool_index: HashMap<String, usize>,
     /** How the newest compaction started ("auto" or "manual"), from its boundary line. */
@@ -42,6 +44,9 @@ impl Transcript {
         if from != self.lines {
             if from < self.lines {
                 return;
+            }
+            if self.lines == 0 && self.items.is_empty() {
+                self.start = from;
             }
             self.lines = from;
         }
@@ -310,5 +315,21 @@ mod compaction_tests {
             other => panic!("expected a step, got {other:?}"),
         }
         assert!(matches!(&t.items[1], Item::User { text } if text == "next question"));
+    }
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::Transcript;
+    use serde_json::json;
+
+    #[test]
+    fn remembers_where_a_tail_load_started() {
+        let line = json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}});
+        let mut t = Transcript::default();
+        t.append(1200, &[line.clone(), line.clone()]);
+        assert_eq!((t.start, t.lines), (1200, 1202));
+        t.append(1202, &[line]);
+        assert_eq!((t.start, t.lines), (1200, 1203));
     }
 }
