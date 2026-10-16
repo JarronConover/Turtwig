@@ -387,6 +387,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             tmux,
             suggestion,
             agent,
+            session: s("session_id"),
         });
     }
     out

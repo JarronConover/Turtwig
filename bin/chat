@@ -746,6 +746,9 @@ def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id):
     """Copy a chat's transcript (and its subagent folder) between machines. Claude Code keeps a session
     under its folder's real path, so both ends use that (a box chat in ~/dev/redo lives under ~/project);
     the copy is checked, so a move never resumes a chat whose conversation didn't arrive."""
+    chat = load(chat_id)
+    if chat and agent_def(chat).get("session") == "discovered":
+        return copy_rollouts(src_host, dst_host, chat)
     src_real, dst_real = real_dir(src_host, src_dir), real_dir(dst_host, dst_dir)
     sources = [project_slug(src_real)] + ([project_slug(src_dir)] if project_slug(src_dir) != project_slug(src_real) else [])
     dst = f".claude/projects/{project_slug(dst_real)}/"
@@ -766,6 +769,38 @@ def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id):
         if arrived:
             return
     sys.exit(f"the conversation didn't copy to the {dst_host} (looked in {', '.join(sources)} on the {src_host})")
+
+
+def cmd__transcript_paths(args):
+    print(json.dumps([str(p) for p in agent_transcript_paths(find(args.chat))]))
+
+
+def copy_rollouts(src_host, dst_host, chat):
+    """A Codex chat's rollouts (its own, the ones it forked from, its subagents') go to the same place
+    under the other machine's home; the chat's own must arrive."""
+    paths = json.loads(on_host(src_host, "_transcript_paths", chat["id"]) or "[]")
+    if not paths:
+        sys.exit(f"no rollout for {chat['name']} on the {src_host}")
+    src_home = home_of(src_host)
+    rels = [os.path.relpath(p, src_home) for p in paths if p.startswith(src_home + "/")]
+    for rel in rels:
+        parent = os.path.dirname(rel)
+        if dst_host == "box":
+            run(["ssh", "-n", BOX_SSH, f"mkdir -p {shlex.quote(parent)}"], check=False, capture_output=True)
+            run(["rsync", "-a", f"{HOME}/{rel}", f"{BOX_SSH}:{rel}"], check=False, capture_output=True)
+        else:
+            (HOME / parent).mkdir(parents=True, exist_ok=True)
+            run(["rsync", "-a", f"{BOX_SSH}:{rel}", f"{HOME}/{rel}"], check=False, capture_output=True)
+    main = rels[0] if rels else None
+    if dst_host == "box":
+        arrived = bool(main) and run(["ssh", "-n", BOX_SSH, f"test -s {shlex.quote(main)}"], check=False, capture_output=True).returncode == 0
+    else:
+        arrived = bool(main) and (HOME / main).is_file()
+    if not arrived:
+        sys.exit(f"{chat['name']}'s rollout didn't copy to the {dst_host}")
+    # Its recorded rollout path belongs to the machine it left; the new one finds it by session id.
+    chat.pop("transcript", None)
+    save(chat, f"chat rollout copied: {chat['name']}", wait=True)
 
 
 def adopt_worktree_branch(chat):
@@ -1223,6 +1258,9 @@ def main():
     h.add_argument("chat")
     h.add_argument("frm")
     h.set_defaults(fn=cmd__prepare)
+    h = sub.add_parser("_transcript_paths")
+    h.add_argument("chat")
+    h.set_defaults(fn=cmd__transcript_paths)
     h = sub.add_parser("_paths")
     h.add_argument("paths", nargs="*")
     h.set_defaults(fn=cmd__paths)

@@ -1237,8 +1237,11 @@ impl Workspace {
             .unwrap_or_default();
         let chats_here: Vec<Value> = self.current_worktree().map(|w| self.chats_of(w).into_iter().map(|c| self.chat_json(c)).collect()).unwrap_or_default();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
-        let tabs: Vec<(String, String)> = self.current_worktree().map(|w| self.chats_of(w).into_iter().filter(|c| self.chat_open(c)).map(|c| (c.id.clone(), c.name.clone())).collect()).unwrap_or_default();
-        let usage = self.usage.context(self.current_chat().map(|c| c.id.as_str()), self.current_worktree().map(|w| (w.host.as_str(), w.path.as_str())), &tabs, &self.usage_providers(), &self.meter_options());
+        // Usage is filed under the agent's own session id (Codex picks its own; Claude's is the chat id).
+        let usage_id = |c: &Chat| c.session.clone().unwrap_or_else(|| c.id.clone());
+        let tabs: Vec<(String, String)> = self.current_worktree().map(|w| self.chats_of(w).into_iter().filter(|c| self.chat_open(c)).map(|c| (usage_id(c), c.name.clone())).collect()).unwrap_or_default();
+        let current_usage_id = self.current_chat().map(usage_id);
+        let usage = self.usage.context(current_usage_id.as_deref(), self.current_worktree().map(|w| (w.host.as_str(), w.path.as_str())), &tabs, &self.usage_providers(), &self.meter_options());
         to_val(&json!({
             "projects": projects,
             "sections": sections,

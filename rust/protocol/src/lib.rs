@@ -218,6 +218,9 @@ pub struct Chat {
     /** The agent CLI it runs: a key of the daemon's `agents` (claude, codex). */
     #[serde(default = "default_agent")]
     pub agent: String,
+    /** The agent's own session id when it picks one (Codex); usage is filed under it. */
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 fn default_agent() -> String {
