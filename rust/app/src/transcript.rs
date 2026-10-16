@@ -32,6 +32,8 @@ pub struct Transcript {
     echoes: Vec<(String, usize)>,
     /** Background shells and agents that have finished: their tool_use ids and task ids. */
     finished: HashSet<String>,
+    /** A subagent's own transcript: every line is a sidechain, so they're kept. */
+    keep_sidechain: bool,
 }
 
 /** Something a chat started that's still running: a background shell or a subagent. */
@@ -78,6 +80,11 @@ impl Transcript {
     }
 
     /** Background shells and subagents started in the loaded lines that haven't finished. */
+    /** An empty transcript for a chat id (`sub:...` ids are subagents). */
+    pub fn for_chat(id: &str) -> Self {
+        Transcript { keep_sidechain: id.starts_with("sub:"), ..Default::default() }
+    }
+
     pub fn background(&self) -> Vec<Background> {
         let mut out = vec![];
         for it in &self.items {
@@ -95,7 +102,8 @@ impl Transcript {
                 }
                 "Agent" | "Task" => {
                     let task = result.as_deref().and_then(|r| after(r, "agentId: ")).map(|s| word(s).to_string());
-                    let running = result.is_none() || (bg && task.is_some());
+                    let launched = result.as_deref().is_some_and(|r| r.contains("agent launched") || r.contains("working in the background"));
+                    let running = result.is_none() || ((bg || launched) && task.is_some());
                     if running && !done(&task) {
                         let kind = input.get("subagent_type").and_then(Value::as_str).filter(|t| *t != "general-purpose");
                         let label = match kind {
@@ -153,7 +161,7 @@ impl Transcript {
 
     /** Adds the older lines `from..self.start` in front. */
     pub fn prepend(&mut self, from: usize, entries: &[Value]) {
-        let mut older = Transcript { lines: from, start: from, ..Default::default() };
+        let mut older = Transcript { lines: from, start: from, keep_sidechain: self.keep_sidechain, ..Default::default() };
         for e in entries {
             older.lines += 1;
             older.push_entry(e);
@@ -182,7 +190,7 @@ impl Transcript {
     }
 
     fn push_entry(&mut self, e: &Value) {
-        if e.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        if !self.keep_sidechain && e.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             return;
         }
         let kind = e.get("type").and_then(Value::as_str).unwrap_or("");

@@ -778,7 +778,7 @@ impl Workspace {
                 self.sync_selection(window, cx);
             }
             Incoming::Event(Event::Transcript { chat_id, from, entries }) => {
-                self.transcripts.entry(chat_id.clone()).or_default().append(from, &entries);
+                self.transcripts.entry(chat_id.clone()).or_insert_with(|| crate::transcript::Transcript::for_chat(&chat_id)).append(from, &entries);
             }
             Incoming::Event(Event::TermOutput { term_id, data }) => {
                 if let Some(t) = self.term_by_id.get(&(host.to_string(), term_id)).cloned() {
@@ -1268,7 +1268,7 @@ impl Workspace {
                         let entries = v["entries"].as_array().cloned().unwrap_or_default();
                         let start = v["from"].as_u64().unwrap_or(from as u64) as usize;
                         this.update(cx, |ws, cx| {
-                            ws.transcripts.entry(id).or_default().append(start, &entries);
+                            ws.transcripts.entry(id.clone()).or_insert_with(|| crate::transcript::Transcript::for_chat(&id)).append(start, &entries);
                             cx.notify();
                         })
                         .ok();
