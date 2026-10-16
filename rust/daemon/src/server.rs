@@ -528,14 +528,32 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             if !(ok(&["set-buffer", "-b", &buf, "--", &text]) && ok(&["paste-buffer", "-p", "-d", "-b", &buf, "-t", &target])) {
                 return Err("couldn't type into the chat".into());
             }
-            std::thread::sleep(Duration::from_millis(60));
-            if ok(&["send-keys", "-t", &target, "C-m"]) { Ok(json!({})) } else { Err("couldn't submit the message".into()) }
+            // Claude Code can drop an Enter that lands while it's still taking the paste in: press it, then
+            // again (a few times at most) while the prompt line still holds the text.
+            std::thread::sleep(Duration::from_millis(150));
+            for _ in 0..4 {
+                if !ok(&["send-keys", "-t", &target, "C-m"]) {
+                    return Err("couldn't submit the message".into());
+                }
+                std::thread::sleep(Duration::from_millis(350));
+                let pane = util::run("tmux", &["capture-pane", "-p", "-t", &target], &[], None, Duration::from_secs(5)).stdout;
+                let waiting = pane.lines().rev().find(|l| l.trim_start().starts_with('❯')).map(|l| l.trim_start().trim_start_matches('❯').trim().to_string());
+                if waiting.as_deref().is_none_or(str::is_empty) {
+                    break;
+                }
+            }
+            Ok(json!({}))
         }
         Call::ChatKeys { chat_id, keys } => {
             let target = format!("={}:", util::chat_session(&chat_id));
             let mut args = vec!["send-keys", "-t", target.as_str()];
             args.extend(keys.iter().map(|k| k.as_str()));
             let o = util::run("tmux", &args, &[], None, Duration::from_secs(10));
+            // Esc ends the turn, and no hook says so: the chat is idle from here.
+            if o.ok && keys == ["Escape"] {
+                let sid = registry_chat(&chat_id).and_then(|c| c.get("id").and_then(Value::as_str).map(str::to_string)).unwrap_or(chat_id.clone());
+                shared.states.lock().unwrap().insert(sid, ("idle".into(), None));
+            }
             if o.ok { Ok(json!({})) } else { Err(o.message()) }
         }
         Call::SectionCreate { name } => sc_tool(&["section", "create", &name, "--manual"], None),
