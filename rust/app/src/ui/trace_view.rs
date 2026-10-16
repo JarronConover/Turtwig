@@ -514,3 +514,16 @@ mod angle_tests {
         assert_eq!(f("café → <x> ✓"), "café → &lt;x> ✓");
     }
 }
+
+/** Actions this module handles (named in SETTINGS.md with the rest). */
+pub(crate) const ACTIONS: &[(&str, &str)] = &[];
+
+/** Runs `name` if it's one of this module's actions; false otherwise. */
+pub(crate) fn dispatch(_ws: &mut crate::workspace::Workspace, _name: &str, _a: &serde_json::Map<String, serde_json::Value>, _window: &mut gpui_kit::Window, _cx: &mut gpui_kit::Context<crate::workspace::Workspace>) -> bool {
+    false
+}
+
+/** What inspect.json shows about this module's views. */
+pub(crate) fn inspect(_ws: &crate::workspace::Workspace) -> serde_json::Value {
+    serde_json::Value::Null
+}

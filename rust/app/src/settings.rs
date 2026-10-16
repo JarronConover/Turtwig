@@ -53,6 +53,10 @@ pub struct Settings {
     #[serde(default)]
     pub diff: Value,
     pub terminal: TerminalSettings,
+    /** Every other top-level section (window, strings, dialogs, palette, mouse, sidebar, daemon, inspect, ...),
+    read with `Settings::get("section.key")`. */
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
     /** Problems applying `patch` (unknown ids and the like), shown with other settings problems. */
     #[serde(skip)]
     pub warnings: Vec<String>,
@@ -173,4 +177,34 @@ pub fn parse_color(hex: &str) -> gpui_kit::Hsla {
     let mut c: gpui_kit::Hsla = gpui_kit::rgb(rgb).into();
     c.a = a;
     c
+}
+
+impl Settings {
+    /** A value by dotted path into any section, e.g. `get("strings.connecting")` or `get("chat.labels.thinking")`. */
+    pub fn get(&self, path: &str) -> Option<&Value> {
+        let mut parts = path.split('.');
+        let first = parts.next()?;
+        let mut v = match first {
+            "chat" => &self.chat,
+            "motion" => &self.motion,
+            "diff" => &self.diff,
+            "designer" => &self.designer,
+            "hosts" => &self.hosts,
+            other => self.extra.get(other)?,
+        };
+        for p in parts {
+            v = v.get(p)?;
+        }
+        Some(v)
+    }
+
+    /** A user-facing string from `strings`, else `default`. */
+    pub fn text(&self, key: &str, default: &str) -> String {
+        self.extra.get("strings").and_then(|s| s.get(key)).and_then(Value::as_str).unwrap_or(default).to_string()
+    }
+
+    /** A number by dotted path, else `default`. */
+    pub fn num(&self, path: &str, default: f64) -> f64 {
+        self.get(path).and_then(Value::as_f64).unwrap_or(default)
+    }
 }

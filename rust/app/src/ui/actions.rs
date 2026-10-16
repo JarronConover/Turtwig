@@ -868,6 +868,10 @@ impl Workspace {
                 let msg = crate::script::action_message(other, a);
                 self.script_deliver(msg, window, cx);
             }
+            // Actions that live with the views they drive (transcript steps, the diff, terminals).
+            other if crate::ui::trace_view::dispatch(self, other, a, window, cx) => {}
+            other if crate::ui::diff_view::dispatch(self, other, a, window, cx) => {}
+            other if crate::terminal::dispatch(self, other, a, window, cx) => {}
             other => self.exprs.note(format!("unknown action `{other}`")),
         }
         self.pending_motion = true;

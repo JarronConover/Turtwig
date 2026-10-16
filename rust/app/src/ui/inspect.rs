@@ -55,6 +55,11 @@ impl Workspace {
             "about": "The running app as of `at`: `context` is what settings expressions see; `layout` is where nodes with ids are (x, y, w, h in points); see SETTINGS.md.",
             "window": {"width": f32::from(size.width), "height": f32::from(size.height), "focused": self.focused, "number": window_number()},
             "perf": self.perf.borrow().summary(),
+            "views": {
+                "transcripts": crate::ui::trace_view::inspect(self),
+                "diff": crate::ui::diff_view::inspect(self),
+                "terminals": crate::terminal::inspect(self, cx),
+            },
             "transcripts": self.lists.iter().map(|(chat, l)| (chat.clone(), json!({"following": l.state.is_following_tail(), "at_end": l.state.is_scrolled_to_end(), "rows": l.state.item_count(), "top": l.state.logical_scroll_top().item_ix, "kinds": l.kinds()}))).collect::<serde_json::Map<_, _>>(),
             "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
             "context": ctx,

@@ -272,7 +272,7 @@ pub fn write_reference() {
         md.push_str(&format!("| `{k}` | {d} |\n"));
     }
     md.push_str("\n## Actions\n\nUsed by `on`, `menu`, `keys`, and `commands`. An action is a name (`\"palette.open\"`), an object\n`{\"do\": \"name\", ...args}`, or a list of actions run in order.\n\n| action | arguments |\n| --- | --- |\n");
-    for (a, d) in ACTIONS {
+    for (a, d) in ACTIONS.iter().chain(crate::ui::trace_view::ACTIONS).chain(crate::ui::diff_view::ACTIONS).chain(crate::terminal::ACTIONS) {
         md.push_str(&format!("| `{a}` | {d} |\n"));
     }
     md.push_str("\n## Theme tokens in the defaults\n\n");
@@ -305,7 +305,7 @@ pub fn write_reference() {
 
 fn schema() -> Value {
     let types: Vec<&str> = NODE_TYPES.iter().map(|(t, _)| *t).filter(|t| !t.starts_with('<')).collect();
-    let actions: Vec<String> = ACTIONS.iter().flat_map(|(a, _)| a.split(" / ").map(str::to_string)).collect();
+    let actions: Vec<String> = ACTIONS.iter().chain(crate::ui::trace_view::ACTIONS).chain(crate::ui::diff_view::ACTIONS).chain(crate::terminal::ACTIONS).flat_map(|(a, _)| a.split(" / ").map(str::to_string)).collect();
     let styles: serde_json::Map<String, Value> = STYLE_KEYS
         .iter()
         .flat_map(|(k, d)| k.split(" / ").map(move |k| (k.to_string(), json!({"description": d}))))
