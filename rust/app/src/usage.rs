@@ -158,7 +158,14 @@ impl Usage {
                 *a += b;
             }
         }
-        let plans = self.plans(providers);
+        let plans: Vec<Value> = self
+            .plans(providers)
+            .into_iter()
+            .map(|mut p| {
+                p["limits"] = p["limits"].as_array().into_iter().flatten().map(|l| meter.decorate(l.clone())).collect();
+                p
+            })
+            .collect();
         let by_provider: Vec<Value> = providers
             .iter()
             .filter(|(id, _)| self.windows.contains_key(*id))
@@ -209,7 +216,7 @@ impl Usage {
             let limits: Vec<Value> = limits.into_iter().map(|mut l| { l["provider_name"] = json!(name); l }).collect();
             out.push(json!({
                 "provider": id, "name": name, "icon": p["icon"], "color": p["color"], "limits": limits,
-                "updated": updated, "updated_text": updated.map(|t| format!("{} ago", duration_text(now() - t))),
+                "updated": updated, "updated_text": updated.map(|t| ago(now() - t)),
             }));
         }
         out
@@ -238,13 +245,13 @@ impl Usage {
     /** `.plan`: every provider's limits in one list, plus the gauge: `meter` for the chosen mode and
     `meters` for every mode (the picker's previews), over the providers in `usage.meter_providers`. */
     fn plan_with_meters(&self, plans: &[Value], o: &MeterOptions) -> Value {
-        let limits: Vec<Value> = plans.iter().flat_map(|p| p["limits"].as_array().cloned().unwrap_or_default()).map(|l| o.decorate(l)).collect();
+        let limits: Vec<Value> = plans.iter().flat_map(|p| p["limits"].as_array().cloned().unwrap_or_default()).collect();
         let counted: Vec<Value> = limits.iter().filter(|l| o.providers.as_ref().is_none_or(|ps| ps.iter().any(|p| l["provider"] == p.as_str()))).cloned().collect();
         let shown = |mode: &str| meter(&counted, mode).unwrap_or(Value::Null);
         let updated = plans.iter().filter_map(|p| p["updated"].as_f64()).reduce(f64::max);
         json!({
             "limits": limits,
-            "updated": updated, "updated_text": updated.map(|t| format!("{} ago", duration_text(now() - t))),
+            "updated": updated, "updated_text": updated.map(|t| ago(now() - t)),
             "meter_mode": o.mode, "meter": shown(&o.mode),
             "meters": { "smart": shown("smart"), "session": shown("session"), "weekly": shown("weekly") },
         })
@@ -348,6 +355,10 @@ fn thousands(x: f64) -> String {
         out.push(*c);
     }
     format!("{}{out}.{frac}", if neg { "-" } else { "" })
+}
+
+fn ago(secs: f64) -> String {
+    if secs < 60. { "just now".into() } else { format!("{} ago", duration_text(secs)) }
 }
 
 fn duration_text(secs: f64) -> String {

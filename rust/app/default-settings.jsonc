@@ -1179,7 +1179,7 @@
               "id": "move-chat",
               "type": "Pill",
               "props": {
-                "text": "Move {{ if .selected.move.scope == \"section\" then \"section\" else \"chat\" end }} to {{ if .selected.chat.host == \"box\" then \"Mac\" else \"the cloud\" end }}",
+                "text": "Move {{ if .selected.move.scope == \"section\" then \"section\" elif .selected.move.chats > 1 then (.selected.move.chats | tostring) + \" chats\" else \"chat\" end }} to {{ if .selected.chat.host == \"box\" then \"Mac\" else \"the cloud\" end }}",
                 "icon": "{{ if .selected.chat.host == \"box\" then \"laptop\" else \"cloud\" end }}",
                 "tooltip": "{{ (if .selected.chat.host == \"box\" then \"Continue on the Mac\" else \"Continue on the box, which keeps running when the laptop sleeps\" end) + (if .selected.move.scope == \"section\" then \": the whole \" + .selected.move.section + \" section moves (\" + (.selected.move.worktrees | tostring) + \" worktrees, \" + (.selected.move.chats | tostring) + \" chats) with each worktree's uncommitted and unpushed work\" elif .selected.move.chats > 1 then \": this worktree's \" + (.selected.move.chats | tostring) + \" chats move with its uncommitted and unpushed work\" else \": same branch, with the worktree's uncommitted and unpushed work\" end) }}",
                 "do": {
