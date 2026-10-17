@@ -18,7 +18,7 @@ pub const STYLE_KEYS: &[(&str, &str)] = &[
     ("align", "cross-axis: start | center | end | stretch | baseline"),
     ("justify", "main-axis: start | center | end | between | around"),
     ("wrap", "bool: wrap children onto new lines"),
-    ("background_image", "a picture behind the node's content: a file (absolute, ~/, or in the settings folder) or http(s) URL; works on every node and every style object in settings (chat bubbles, cards, chips, the composer). With `background_fit` (cover, contain, fill, scale_down, none), `background_opacity` (0..1) and `background_dim` (a color laid over it). It follows the node's `radius`. Give `background` a see-through color (or none) so it shows."),
+    ("background_image", "a picture, animated GIF/WebP or video (mp4, mov, m4v, webm: muted, looping) behind the node's content: a file (absolute, ~/, or in the settings folder) or http(s) URL; works on every node and every style object in settings (chat bubbles, cards, chips, the composer). With `background_fit` (cover, contain, fill, scale_down, none), `background_opacity` (0..1) and `background_dim` (a color laid over it). It follows the node's `radius`. Give `background` a see-through color (or none) so it shows."),
     ("background", "color: `#rrggbb`, `#rrggbbaa`, `hsl(h, s, l)` / `hsl(h, s, l, a)` (degrees, percents, 0..1), `@token`, or `transparent`"),
     ("color", "text color"),
     ("border", "number: border width on all sides; border_top/right/bottom/left for one side"),
@@ -343,7 +343,7 @@ pub fn apply<E: Styled + ParentElement>(mut el: E, style: &Map<String, Value>, t
                 .size_full()
                 .rounded(px(radius))
                 .overflow_hidden()
-                .child(crate::workspace::image_element(src, fit).size_full().opacity(opacity))
+                .child(div().size_full().opacity(opacity).child(crate::workspace::media_element(src, fit)))
                 .when_some(dim, |d, c| d.child(div().absolute().inset_0().bg(c)))
                 .into_any_element(),
         );

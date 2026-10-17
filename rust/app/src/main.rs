@@ -6,6 +6,8 @@ mod logo;
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
 mod macos;
+#[cfg(target_os = "macos")]
+mod video;
 mod remote;
 mod script;
 mod settings;

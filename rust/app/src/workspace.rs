@@ -1730,7 +1730,7 @@ impl Workspace {
             div()
                 .absolute()
                 .inset_0()
-                .child(image_element(src, fit).size_full().opacity(opacity))
+                .child(div().size_full().opacity(opacity).child(media_element(src, fit)))
                 .when_some(dim, |d, c| d.child(div().absolute().inset_0().bg(c)))
                 .into_any_element(),
         )
@@ -3292,6 +3292,28 @@ pub(crate) fn waiting_options(w: &Value, settings: &Settings) -> (Vec<String>, V
 
 /** A picture from a file (absolute, ~/, or relative to the settings folder) or a URL, fit "cover" |
 "contain" | "fill" | "scale_down" | "none". */
+/** A picture, an animated GIF/WebP, or (on macOS) a video, muted and looping: by the source's extension. */
+pub(crate) fn media_element(src: &str, fit: &str) -> AnyElement {
+    #[cfg(target_os = "macos")]
+    if crate::video::is_video(src) {
+        let path = if src.starts_with("http://") || src.starts_with("https://") {
+            src.to_string()
+        } else {
+            let p = std::path::PathBuf::from(crate::script::expand(src));
+            (if p.is_absolute() { p } else { settings::dir().join(p) }).to_string_lossy().into_owned()
+        };
+        let fit = match fit {
+            "contain" => ObjectFit::Contain,
+            "fill" => ObjectFit::Fill,
+            "scale_down" => ObjectFit::ScaleDown,
+            "none" => ObjectFit::None,
+            _ => ObjectFit::Cover,
+        };
+        return crate::video::element(&path, fit);
+    }
+    image_element(src, fit).size_full().into_any_element()
+}
+
 pub(crate) fn image_element(src: &str, fit: &str) -> Img {
     let fit = match fit {
         "contain" => ObjectFit::Contain,
