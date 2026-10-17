@@ -2641,9 +2641,15 @@ impl Workspace {
         }
     }
 
-    /** Sends settings `daemon` to a host's daemon (its timings, limits, and parsing rules). */
+    /** Sends settings `daemon` to a host's daemon (its timings, limits, parsing rules, and the box's ssh name). */
     fn configure_host(&self, host: &str) {
-        let options = self.settings.get("daemon").cloned().unwrap_or(Value::Object(Map::new()));
+        let mut options = self.settings.get("daemon").cloned().unwrap_or(Value::Object(Map::new()));
+        // The box's ssh name for the daemon and its scripts, unless `daemon.ssh_host` names one.
+        if let Value::Object(o) = &mut options {
+            if o.get("ssh_host").is_none_or(Value::is_null) {
+                o.insert("ssh_host".into(), Value::String(self.ssh_host_of(&self.default_host())));
+            }
+        }
         self.remote_for_host(host).send(Call::Configure { options });
     }
 
