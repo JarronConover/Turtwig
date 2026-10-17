@@ -73,7 +73,6 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("app.snapshot", "capture the window to snapshot.png in the settings folder (for agents to look at)"),
     ("drop.preview", "{key, zone: before|inside|after, kind?, value?}: show a drop target's indicator without dragging (for styling), as if `value` were being dragged; cleared by the next drag"),
     ("diff.refresh", "reload the selected worktree's diff now"),
-    ("diff.collapse_all / diff.expand_all", "collapse or expand every file in the diff"),
     ("designer.send", "{text}: ask the designer (a local agent that edits these settings live) for a change"),
     ("designer.reset", "end the designer conversation and start fresh"),
     ("designer.history", "reread the designer's past conversations into `.designer.sessions` (newest first: id, title (the latest message), first, messages, age_text, current)"),
@@ -904,11 +903,6 @@ impl Workspace {
                     d.fetched = d.fetched.map(|t| t - std::time::Duration::from_secs(10));
                 }
             }
-            "diff.collapse_all" => {
-                let paths: Vec<String> = self.diffs.values().flat_map(|d| d.files.iter().map(|f| f.path.clone())).collect();
-                self.diff_collapsed.extend(paths);
-            }
-            "diff.expand_all" => self.diff_collapsed.clear(),
             "designer.send" => {
                 if let Some(t) = s("text") {
                     self.designer_send(t, cx);

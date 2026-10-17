@@ -1909,9 +1909,25 @@
 
   "diff": {
     "row_height": 20, "gutter_width": 44, "sign_width": 14, "note_font_size": 12,
-    "header": { "font_family": ".SystemUIFont", "font_size": 12.5 },
+    "header": { "font_family": "@font_ui", "font_size": 12.5 },
+    // Style objects over the built-in rows: a file's header, a hunk's @@ line, and each code line.
+    // gutter is the line numbers (click opens the line); its hover applies while pointed at.
+    "file_header": {}, "hunk": {}, "line": {}, "gutter": { "hover": { "opacity": 0.7 } },
+    "tab_width": 4,
+    "icons": { "open": "chevron-down", "closed": "chevron-right" },
+    // {n} is the count. context_sign is shown for unchanged lines; expand/collapse name header clicks for agents.
+    "labels": { "add_sign": "+", "del_sign": "−", "context_sign": " ", "arrow": "→", "added": "+{n}", "removed": "−{n}", "expand": "Expand", "collapse": "Collapse" },
+    // Long lines wrap instead of scrolling sideways (rows then size to their text).
+    "wrap": false,
+    // Where the file list sits: "left", "right", or "hidden".
+    "file_list_side": "left",
+    // A component name (or node) to draw instead of a built-in part, with the item as .props:
+    // file_row {path, old_path, status, adds, dels, dir, name, binary, collapsed, index, worktree, base};
+    // line {kind: add|del|context|meta, old, new, text, file, sign, row, worktree, base}. null: built in.
+    "render": { "file_row": null, "line": null },
     "max_lines_per_file": 4000, "refresh_ms": 2000,
-    // Each a color or @token.
+    // Each a color or @token. status_A, status_D, status_M, status_R... color a file's status letter
+    // (unset: A uses add, D uses del, the rest muted).
     "colors": { "add_bg": "@diff_add_bg", "del_bg": "@diff_del_bg", "add": "@diff_add", "del": "@diff_del", "muted": "@text_faint", "hunk_bg": "@diff_hunk_bg", "file_bg": "@diff_file_bg", "hover": "@hover" },
     // The line link for Mac worktrees (open_url is for box ones); both take {host} {machine} {path} {line}.
     "open_url_local": "cursor://file{path}:{line}",

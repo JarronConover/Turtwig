@@ -230,9 +230,9 @@ pub struct Workspace {
     badge: Option<String>,
     dock_icon: Option<Vec<u8>>,
     pub(crate) diff_collapsed: HashSet<String>,
-    /** Where the diff's rows are: first and last row drawn, row height, each file's header row (inspect.json). */
+    /** Per diff (`PATH|BASE`): rows drawn, row height, each file's header row (inspect.json). */
     pub(crate) diff_geom: std::rc::Rc<std::cell::RefCell<Value>>,
-    pub(crate) diff_scroll: UniformListScrollHandle,
+    pub(crate) diff_scroll: HashMap<String, crate::ui::diff_view::DiffScroll>,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     pub(crate) _subscriptions: Vec<Subscription>,
@@ -453,7 +453,7 @@ impl Workspace {
             dock_icon: None,
             diff_collapsed: HashSet::new(),
             diff_geom: Default::default(),
-            diff_scroll: UniformListScrollHandle::new(),
+            diff_scroll: HashMap::new(),
             focus: cx.focus_handle(),
             _tasks: [watch, env_push, designer_listen, usage_loop, update_loop].into_iter().chain(listeners).chain(clicks).collect(),
             _subscriptions: vec![],
