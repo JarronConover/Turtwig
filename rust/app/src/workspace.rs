@@ -150,6 +150,10 @@ pub struct Workspace {
     pub(crate) motion: std::rc::Rc<std::cell::RefCell<crate::ui::motion::MotionStore>>,
     pub(crate) pending_motion: bool,
     pub(crate) designer: crate::designer::Designer,
+    /** The latest press: the innermost node with a handler under it, when, and where; and the node the
+    latest single press (the first half of any double) landed on. */
+    pub(crate) press: Option<(String, std::time::Instant, Point<Pixels>)>,
+    pub(crate) first_press: Option<String>,
     /** The designer's conversations, as the history list last read them. */
     pub(crate) designer_sessions: Vec<Value>,
     designer_tx: flume::Sender<crate::designer::Out>,
@@ -350,6 +354,8 @@ impl Workspace {
             pending_motion: false,
             designer: Default::default(),
             designer_sessions: vec![],
+            press: None,
+            first_press: None,
             designer_tx,
             problems_written: String::new(),
             render_generation: 0,
@@ -384,7 +390,8 @@ impl Workspace {
             anim_epoch: std::time::Instant::now(),
             lists: HashMap::new(),
             virtual_lists: HashMap::new(),
-            activity: vec![],
+            // The log carries over a restart, so what happened just before one can still be read.
+            activity: std::fs::read_to_string(settings::dir().join("activity.log")).map(|t| t.lines().map(str::to_string).collect()).unwrap_or_default(),
             clickables: vec![],
             menus: vec![],
             clickables_last: vec![],
@@ -1797,6 +1804,38 @@ impl Workspace {
                 json!({"scope": "section", "section": s.name, "worktrees": items.len(), "chats": items.iter().map(|x| live(x)).sum::<usize>()})
             }
             _ => json!({"scope": "worktree", "section": null, "worktrees": 1, "chats": live(w)}),
+        }
+    }
+
+    /** Records a press for the innermost node that sees it (the first to call this for that event). */
+    pub(crate) fn note_press(&mut self, id: &str, at: Point<Pixels>, count: usize) {
+        let now = std::time::Instant::now();
+        if self.press.as_ref().is_some_and(|(_, t, p)| *p == at && now.duration_since(*t) < std::time::Duration::from_millis(50)) {
+            return;
+        }
+        self.press = Some((id.to_string(), now, at));
+        if count == 1 {
+            self.first_press = Some(id.to_string());
+        }
+        self.log_input(id, count, "press");
+    }
+
+    /** Whether this event's press is this node's own (or nothing inside it recorded one). */
+    pub(crate) fn press_is(&self, id: &str, at: Point<Pixels>) -> bool {
+        match &self.press {
+            Some((who, t, p)) if *p == at && t.elapsed() < std::time::Duration::from_millis(50) => who == id,
+            _ => true,
+        }
+    }
+
+    pub(crate) fn first_press_is(&self, id: &str) -> bool {
+        self.first_press.as_deref() == Some(id)
+    }
+
+    /** `inspect.log_input`: presses go in activity.log too, to see where clicks land. */
+    pub(crate) fn log_input(&mut self, id: &str, count: usize, what: &str) {
+        if self.settings.get("inspect.log_input").and_then(Value::as_bool) == Some(true) {
+            self.log_action(&json!({"input": what, "node": id, "count": count}));
         }
     }
 

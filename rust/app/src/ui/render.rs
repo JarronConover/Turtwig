@@ -388,7 +388,13 @@ impl Workspace {
         // chat keeps selecting as the pointer moves after a drop (the drop eats the mouse-up).
         let presses = obj.contains_key("drag") || kind == "resize_handle" || obj.get("on").and_then(Value::as_object).is_some_and(|o| o.contains_key("click") || o.contains_key("double_click") || o.contains_key("mouse_down"));
         if presses {
-            el = el.on_mouse_down(MouseButton::Left, |_, _, cx| gpui_kit::base::GlobalState::suppress_text_selection(cx));
+            // Which node a press landed on: the innermost one with a handler records it first (presses bubble
+            // outward), so a header can tell a press of its own from one on a button inside it.
+            let pid = id.clone();
+            el = el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, e: &MouseDownEvent, _, cx| {
+                gpui_kit::base::GlobalState::suppress_text_selection(cx);
+                ws.note_press(&pid, e.position, e.click_count);
+            }));
         }
         if let Some(Value::Object(d)) = st.get("drag_over_item") {
             let accept = accepted(obj.get("on").and_then(|o| o.get("drop_item")));
@@ -516,16 +522,25 @@ impl Workspace {
             }
             let (has_double, has_down) = (double.is_some(), down.is_some());
             if let Some(down) = down {
+                let me = id.clone();
                 el = el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, e: &MouseDownEvent, window, cx| {
+                    // Only presses on this node itself: not on a button inside it, and a double press only
+                    // when its first half landed here too.
+                    if !ws.press_is(&me, e.position) {
+                        ws.log_input(&me, e.click_count, "not its own");
+                        return;
+                    }
                     match (e.click_count, &double) {
-                        (2, Some(d)) => ws.run_action(d, window, cx),
+                        (2, Some(d)) if ws.first_press_is(&me) => ws.run_action(d, window, cx),
+                        (2, Some(_)) => ws.log_input(&me, 2, "first press elsewhere"),
                         (1, _) => ws.run_action(&down, window, cx),
                         _ => {}
                     }
                 }));
             } else if let Some(d) = double.clone() {
+                let me = id.clone();
                 el = el.on_click(cx.listener(move |ws, e: &ClickEvent, window, cx| {
-                    if e.click_count() == 2 {
+                    if e.click_count() == 2 && ws.first_press_is(&me) {
                         ws.run_action(&d, window, cx);
                     }
                 }));
@@ -541,10 +556,12 @@ impl Workspace {
                 if !has_down && !has_double && !obj.contains_key("drag") {
                     // Its presses are its own: the header around it mustn't read them as dragging the window
                     // or (pressed twice) zooming it.
-                    el = el.on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    let pid = id.clone();
+                    el = el.on_mouse_down(MouseButton::Left, cx.listener(move |ws, e: &MouseDownEvent, _, cx| {
                         gpui_kit::base::GlobalState::suppress_text_selection(cx);
+                        ws.note_press(&pid, e.position, e.click_count);
                         cx.stop_propagation();
-                    });
+                    }));
                 }
             }
         }
