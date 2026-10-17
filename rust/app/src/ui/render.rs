@@ -591,7 +591,9 @@ impl Workspace {
         } else {
             el.into_any_element()
         };
-        let moves = self.motion.borrow().enabled && obj.get("motion").and_then(Value::as_bool) != Some(false);
+        // A node lifted "above" (a popover's button while it's open) stays where it is: gliding it would read
+        // its deferred position as a move.
+        let moves = self.motion.borrow().enabled && obj.get("motion").and_then(Value::as_bool) != Some(false) && layer != "above";
         let el = if moves { crate::ui::motion::Motion::new(id, el, self.motion.clone()).into_any_element() } else { el };
         // "layer": "top" paints the node above everything else (popovers, dialogs) and keeps clicks off what's under it;
         // "above" goes over that too (the button that opened a popover stays a button while it's open).

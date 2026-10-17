@@ -397,7 +397,8 @@
                   "type": "box",
                   "style": { "position": "relative" },
                   "children": [
-                    { "type": "IconButton", "id": "designer-history-button", "layer": "{{ if .state.designer_history_open then \"above\" else \"\" end }}", "props": { "icon": "rotate-ccw-clock", "tooltip": "Earlier designer conversations", "do": [{ "do": "state.toggle", "key": "designer_history_open" }, "designer.history"] } },
+                    { "type": "IconButton", "id": "designer-history-button", "props": { "icon": "rotate-ccw-clock", "tooltip": "Earlier designer conversations", "do": [{ "do": "state.toggle", "key": "designer_history_open" }, "designer.history"] } },
+                    { "type": "IconButton", "if": ".state.designer_history_open", "id": "designer-history-button-above", "layer": "above", "motion": false, "style": { "position": "absolute", "top": 0, "left": 0 }, "props": { "icon": "rotate-ccw-clock", "tooltip": "Earlier designer conversations", "do": [{ "do": "state.toggle", "key": "designer_history_open" }, "designer.history"] } },
                     {
                       "if": ".state.designer_history_open and (.app.dragging | not)",
                       "type": "box", "layer": "top",
@@ -754,7 +755,8 @@
           "type": "box",
           "style": { "position": "relative" },
           "children": [
-            { "type": "IconButton", "id": "history-button", "layer": "{{ if .state.history_open then \"above\" else \"\" end }}", "props": { "icon": "clock", "size": 26, "tooltip": "History: past and closed chats on every machine", "do": [{ "do": "state.toggle", "key": "history_open" }, "history.load"] } },
+            { "type": "IconButton", "id": "history-button", "props": { "icon": "clock", "size": 26, "tooltip": "History: past and closed chats on every machine", "do": [{ "do": "state.toggle", "key": "history_open" }, "history.load"] } },
+            { "type": "IconButton", "if": ".state.history_open", "id": "history-button-above", "layer": "above", "motion": false, "style": { "position": "absolute", "top": 0, "left": 0 }, "props": { "icon": "clock", "size": 26, "tooltip": "History: past and closed chats on every machine", "do": [{ "do": "state.toggle", "key": "history_open" }, "history.load"] } },
             {
               "if": ".state.history_open and (.app.dragging | not)",
               "type": "box",
@@ -1023,7 +1025,8 @@
           "type": "row",
           "style": { "position": "relative", "padding": [0, 4], "align": "center", "shrink": 0 },
           "children": [
-            { "type": "IconButton", "id": "chat-history-button", "layer": "{{ if .state.chat_history_open then \"above\" else \"\" end }}", "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
+            { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
+            { "type": "IconButton", "if": ".state.chat_history_open", "id": "chat-history-button-above", "layer": "above", "motion": false, "style": { "position": "absolute", "top": 0, "left": 4 }, "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
             {
               "if": ".state.chat_history_open and (.app.dragging | not)",
               "type": "box",
@@ -1366,8 +1369,17 @@
         {
           "id": "usage-cost-pill",
           "type": "row",
-          "layer": "{{ if .state.usage_cost_open then \"above\" else \"\" end }}",
+         
           "style": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "align": "center", "font_size": 12.5, "font_family": "@font_mono", "cursor": "pointer", "hover": { "background": "@hover" } },
+          "tooltip": "What this worktree's chats cost",
+          "on": { "click": [{ "do": "state.toggle", "key": "usage_cost_open" }, { "do": "state.set", "key": "usage_plan_open", "value": false }] },
+          "children": [{ "type": "text", "props": { "text": "{{ .usage.worktree_text }}" } }]
+        },
+        {
+          "if": ".state.usage_cost_open", "id": "usage-cost-pill-above", "layer": "above", "motion": false,
+          "type": "row",
+         
+          "style": { "position": "absolute", "top": 0, "left": 0, "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "align": "center", "font_size": 12.5, "font_family": "@font_mono", "cursor": "pointer", "hover": { "background": "@hover" } },
           "tooltip": "What this worktree's chats cost",
           "on": { "click": [{ "do": "state.toggle", "key": "usage_cost_open" }, { "do": "state.set", "key": "usage_plan_open", "value": false }] },
           "children": [{ "type": "text", "props": { "text": "{{ .usage.worktree_text }}" } }]
@@ -1432,7 +1444,16 @@
       "style": { "position": "relative" },
       "children": [
         {
-          "type": "IconButton", "id": "usage-plan-button", "layer": "{{ if .state.usage_plan_open then \"above\" else \"\" end }}",
+          "type": "IconButton", "id": "usage-plan-button",
+          "props": {
+            "icon_size": 18, "icon_color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.usage.plan.meter.level] // \"@text_muted\" }}",
+            "icon": "{{ .usage.plan.meter.icon // \"circle-gauge\" }}", "size": 26,
+            "tooltip": "{{ if .usage.plan.meter then .usage.plan.meter.provider_name + \" \" + .usage.plan.meter.name + \": \" + ((.usage.plan.meter.left | floor) | tostring) + \"% left\" else \"Plan usage\" end }}",
+            "do": [{ "do": "state.toggle", "key": "usage_plan_open" }, { "do": "state.set", "key": "usage_cost_open", "value": false }]
+          }
+        },
+        {
+          "type": "IconButton", "if": ".state.usage_plan_open", "id": "usage-plan-button-above", "layer": "above", "motion": false, "style": { "position": "absolute", "top": 0, "left": 0 },
           "props": {
             "icon_size": 18, "icon_color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.usage.plan.meter.level] // \"@text_muted\" }}",
             "icon": "{{ .usage.plan.meter.icon // \"circle-gauge\" }}", "size": 26,
