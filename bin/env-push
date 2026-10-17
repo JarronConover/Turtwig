@@ -1,11 +1,30 @@
 #!/usr/bin/env bash
 # Run on the Mac: give the box TJ's personal Claude setup (skills, global
-# CLAUDE.md, the redo project's auto memory), and bring back memory the box
-# wrote. Files only flow toward the newer copy, so neither side loses edits.
+# CLAUDE.md, every project's auto memory), and bring back skills and memory
+# the box wrote. Files only flow toward the newer copy, so neither side loses
+# edits.
 set -euo pipefail
 host=${AGENT_BOX_SSH:-coder.tj-agents}
-mac_memory="$HOME/.claude/projects/-Users-tj-dev-redo/memory/"
-box_memory=".claude/projects/-home-coder-project/memory/"
+# One shared connection for the dozen ssh and rsync calls below (each new one takes seconds through Coder).
+mux=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/abx-env-%C" -o ControlPersist=120)
+ssh() { command ssh "${mux[@]}" "$@"; }
+export RSYNC_RSH="ssh ${mux[*]}"
+box_home=$(ssh -n "$host" 'echo $HOME' 2> /dev/null | tail -1)
+# Claude Code keeps memory per folder, named after its path: the same folder
+# under each home, except the box's ~/dev/redo, which is a link to ~/project.
+slug() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+to_box() {
+  case "$1" in
+    "$(slug "$HOME/dev/redo")") slug "$box_home/project" ;;
+    "$(slug "$HOME")"-*) printf '%s%s' "$(slug "$box_home")" "${1#"$(slug "$HOME")"}" ;;
+  esac
+}
+to_mac() {
+  case "$1" in
+    "$(slug "$box_home/project")") slug "$HOME/dev/redo" ;;
+    "$(slug "$box_home")"-*) printf '%s%s' "$(slug "$HOME")" "${1#"$(slug "$box_home")"}" ;;
+  esac
+}
 
 ssh -n "$host" 'mkdir -p ~/.agents/skills ~/.claude/projects/-home-coder-project/memory
   if [ -d ~/.claude/skills ] && [ ! -L ~/.claude/skills ]; then
@@ -14,9 +33,23 @@ ssh -n "$host" 'mkdir -p ~/.agents/skills ~/.claude/projects/-home-coder-project
   [ -L ~/.claude/skills ] || ln -s ../.agents/skills ~/.claude/skills' 2> /dev/null
 
 rsync -au --exclude .git --exclude __pycache__ "$HOME/.agents/skills/" "$host:.agents/skills/"
+rsync -au --exclude .git --exclude __pycache__ "$host:.agents/skills/" "$HOME/.agents/skills/"
 rsync -au "$HOME/.claude/CLAUDE.md" "$host:.claude/CLAUDE.md"
-rsync -au "$mac_memory" "$host:$box_memory"
-rsync -au "$host:$box_memory" "$mac_memory"
+rsync -au "$host:.claude/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
+# Every project's memory, both ways (folders with nothing in them are skipped).
+for dir in "$HOME"/.claude/projects/*/memory; do
+  [ -n "$(ls -A "$dir" 2> /dev/null)" ] || continue
+  box=$(to_box "$(basename "$(dirname "$dir")")") || continue
+  [ -n "$box" ] || continue
+  ssh -n "$host" "mkdir -p .claude/projects/$box/memory" 2> /dev/null
+  rsync -au "$dir/" "$host:.claude/projects/$box/memory/"
+done
+for box in $(ssh -n "$host" 'for d in ~/.claude/projects/*/memory; do [ -n "$(ls -A "$d" 2> /dev/null)" ] && basename "$(dirname "$d")"; done' 2> /dev/null); do
+  mac=$(to_mac "$box") || continue
+  [ -n "$mac" ] || continue
+  mkdir -p "$HOME/.claude/projects/$mac/memory"
+  rsync -au "$host:.claude/projects/$box/memory/" "$HOME/.claude/projects/$mac/memory/"
+done
 # Config the factory scripts read (Cursor environments, type-check agents).
 ssh -n "$host" 'mkdir -p ~/.config/redo' 2> /dev/null
 rsync -au "$HOME/.config/redo/cursor-environments.json" "$HOME/.config/redo/cursor-typecheck-agents.json" \
