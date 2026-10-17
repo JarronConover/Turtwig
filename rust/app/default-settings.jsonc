@@ -1926,8 +1926,16 @@
     // The 16 ANSI colors, normal then bright.
     "palette": ["#1e1e1f", "#e5534b", "#3fb950", "#d29922", "#488efc", "#bc8cff", "#39c5cf", "#d6d6d8",
                 "#6e7681", "#ff7b72", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff"],
-    // shape: block | bar | underline | hollow | app; optional "color".
-    "cursor": { "shape": "block", "focused_alpha": 0.75, "unfocused_alpha": 0.3 },
+    // shape: block | bar | underline | hollow | app; optional "color"; thickness: bar/underline points;
+    // blink_ms: blink half-period while focused (0: steady).
+    "cursor": { "shape": "block", "focused_alpha": 0.75, "unfocused_alpha": 0.3, "thickness": 2, "blink_ms": 0 },
+    // Bold text's weight; bold_is_bright draws bold base colors (0-7) in their bright twins; dim text's opacity.
+    "bold_weight": 700, "bold_is_bright": false, "dim_alpha": 0.66,
+    // OSC-8 links programs print: underlined (in color, when set); a click with modifier (cmd | ctrl | alt |
+    // shift | none) opens them. inspect.json lists the ones on screen.
+    "links": { "enabled": true, "modifier": "cmd", "color": null },
+    // Cmd combos go to the app; true (or a list like ["cmd-b"]) sends them to the shell as meta (ESC + key).
+    "cmd_passthrough": false,
     "size": { "cols": 100, "rows": 30 },
     "scrollback": 10000,
     // The wheel: "auto" (to the program when it asks for the mouse; in a tmux shell, tmux's own history,
@@ -1943,7 +1951,9 @@
     "foreground": "#f5f5f7",
     "background": "#1e1e1f",
     // Mac-style editing: each combo sends this text to the shell (readline/zsh codes). Use opt or alt,
-    // cmd, ctrl, shift. {"paste": true} pastes the clipboard; null hands the combo back to the app.
+    // cmd, ctrl, shift. {"paste": true} pastes the clipboard; {"do": ...} (or {"action": ...}) runs an app
+    // action; null hands the combo back to the app. A `terminal` node's props font_size, font_family,
+    // line_height and padding override these for that view.
     "keys": {
       "cmd-backspace": "\u0015",
       "alt-backspace": "\u001b\u007f",

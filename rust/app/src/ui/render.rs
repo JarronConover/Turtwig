@@ -337,7 +337,16 @@ impl Workspace {
             }
             "terminal" => {
                 let path = props.get("path").and_then(Value::as_str).map(str::to_string).or_else(|| self.selected.clone());
-                path.and_then(|p| self.active_terminal(&p, cx)).map(|t| div().size_full().child(t).into_any_element()).into_iter().collect()
+                let queued = crate::terminal::take_actions();
+                if !queued.is_empty() {
+                    self.pending_actions.extend(queued);
+                    cx.notify();
+                }
+                let term = path.and_then(|p| self.active_terminal(&p, cx));
+                if let Some(t) = &term {
+                    t.update(cx, |t, cx| t.set_overrides(&props, &theme, cx));
+                }
+                term.map(|t| div().size_full().child(t).into_any_element()).into_iter().collect()
             }
             "diff" => vec![self.diff_view(&props, window, cx)],
             "attachments" => {
