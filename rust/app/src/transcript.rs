@@ -28,6 +28,8 @@ pub struct Options {
     pub errors: bool,
     /** The "Thinking"/"Working" row while a chat works. */
     pub pending: bool,
+    /** Each run of thinking and tool calls as one row (`chat.group_steps`); false: a row per step. */
+    pub group_steps: bool,
     pub summary_chars: usize,
     pub labels: Value,
     pub tools: Value,
@@ -46,6 +48,7 @@ impl Default for Options {
             pasted: "plain".into(),
             errors: true,
             pending: true,
+            group_steps: true,
             summary_chars: 140,
             labels: Value::Null,
             tools: Value::Null,
@@ -74,6 +77,7 @@ pub fn set_options(chat: &Value) {
         pasted: t("pasted", &d.pasted),
         errors: b("errors", d.errors),
         pending: chat["pending"].get("show").and_then(Value::as_bool).unwrap_or(d.pending),
+        group_steps: chat.get("group_steps").and_then(Value::as_bool).unwrap_or(d.group_steps),
         summary_chars: chat.get("summary_chars").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(d.summary_chars),
         labels: chat.get("labels").cloned().unwrap_or(Value::Null),
         tools: chat.get("tools").cloned().unwrap_or(Value::Null),
@@ -123,6 +127,23 @@ pub fn label(key: &str, default: &str, vars: &[(&str, &str)]) -> String {
         s = s.replace(&format!("{{{k}}}"), v);
     }
     s
+}
+
+/** A label counting `n`: `KEY_one` / `KEY_other` when set, else `KEY`; `{n}` is filled and `{s}` is
+`chat.labels.plural` ("s") unless n is 1. */
+pub fn label_n(key: &str, default: &str, n: usize, vars: &[(&str, &str)]) -> String {
+    let (text, s) = plural_label(&options().labels, key, default, n);
+    let count = n.to_string();
+    let mut all: Vec<(&str, &str)> = vec![("n", &count), ("s", &s)];
+    all.extend_from_slice(vars);
+    all.iter().fold(text, |t, (k, v)| t.replace(&format!("{{{k}}}"), v))
+}
+
+fn plural_label(labels: &Value, key: &str, default: &str, n: usize) -> (String, String) {
+    let form = if n == 1 { "one" } else { "other" };
+    let text = labels.get(format!("{key}_{form}")).or_else(|| labels.get(key)).and_then(Value::as_str).unwrap_or(default).to_string();
+    let s = if n == 1 { String::new() } else { labels.get("plural").and_then(Value::as_str).unwrap_or("s").to_string() };
+    (text, s)
 }
 
 /** How a tool's step reads: prefixes while running, done, and failed (the subject follows them), its icon,
@@ -817,5 +838,22 @@ mod finished_call_tests {
         assert_eq!(t.last_user(), Some("> quoted\n\nmy words"));
         assert_eq!(super::unwrap_pasted("see <pasted_content id=\"a\">x\ny</pasted_content id=\"a\"> ok", "quote"), "see > x\n> y ok");
         assert_eq!(super::unwrap_pasted("<pasted_content id=\"a\">x</pasted_content id=\"a\">", "tags"), "<pasted_content id=\"a\">x</pasted_content id=\"a\">");
+    }
+}
+
+#[cfg(test)]
+mod plural_tests {
+    use serde_json::json;
+
+    #[test]
+    fn picks_plural_forms() {
+        let none = json!(null);
+        assert_eq!(super::plural_label(&none, "steps", "{n} step{s}", 1), ("{n} step{s}".to_string(), String::new()));
+        assert_eq!(super::plural_label(&none, "steps", "{n} step{s}", 3).1, "s");
+        let l = json!({"steps_one": "un paso", "steps_other": "{n} pasos", "plural": "en"});
+        assert_eq!(super::plural_label(&l, "steps", "x", 1).0, "un paso");
+        assert_eq!(super::plural_label(&l, "steps", "x", 2), ("{n} pasos".to_string(), "en".to_string()));
+        crate::transcript::set_options(&json!({}));
+        assert_eq!(super::label_n("steps", "{n} step{s}{failed}", 2, &[("failed", "")]), "2 steps");
     }
 }

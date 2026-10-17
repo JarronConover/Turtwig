@@ -3,8 +3,9 @@ upload (to the box, for box chats), then go out with the next message as paths t
 
 use super::style;
 use crate::workspace::{stage_one, Attachment, Workspace};
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{Icon, Sizable as _};
+use super::expr::{to_val, with};
+use super::render::frame_ctx;
+use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Map, Value};
@@ -40,6 +41,12 @@ impl Workspace {
     /** Whether file names drop a leading timestamp ("1792…-shot.png" → "shot.png"): `chat.attachments.strip_prefix`. */
     pub(crate) fn strip_stamps(&self) -> bool {
         self.attachment_setting("strip_prefix").and_then(|v| v.as_bool()) != Some(false)
+    }
+
+    /** How many leading digits make a timestamp to drop from names shown in `which` ("steps", "chips",
+    "messages"): `chat.attachments.strip_prefix_min_digits`; 0 when strip_prefix is off. */
+    pub(crate) fn stamp_digits(&self, which: &str) -> usize {
+        if !self.strip_stamps() { 0 } else { stamp_digits(self.attachment_setting("strip_prefix_min_digits").as_ref(), which) }
     }
 
     /** An image by its extension (`chat.attachments.image_extensions`). */
@@ -167,9 +174,18 @@ impl Workspace {
         let file_icon = self.attachment_setting("file_icon").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| "file".into());
         let name_size = self.attachment_setting("name_size").and_then(|v| v.as_f64()).unwrap_or(10.) as f32;
         let failed_text = self.settings.text("upload_failed", "Upload failed: {error}");
+        let num = |k: &str, d: f32| self.attachment_setting(k).and_then(|v| v.as_f64()).map(|x| x as f32).unwrap_or(d);
+        let (icon_size, gap, pad, failed_width) = (num("file_icon_size", 18.), num("gap", 4.), num("padding", 4.), num("failed_border_width", 2.));
+        let rm_hover = rm.get("hover").and_then(Value::as_object).cloned().unwrap_or_default();
+        let on_click = self.attachment_setting("on_click").filter(|a| !a.is_null());
+        let digits = self.stamp_digits("chips");
         let mut row = style::apply(div().flex().flex_row().flex_wrap(), &st("attachments"), &theme);
-        for p in list {
+        for (index, p) in list.into_iter().enumerate() {
             let (chat2, id) = (chat.clone(), p.id);
+            let shown = crate::ui::trace_view::strip_stamp(&p.name, digits);
+            let remove_tip = self.settings.text("remove_attachment", "Remove {name}").replace("{name}", &shown);
+            self.clickables.push((format!("att-x:{id}"), remove_tip, serde_json::json!({"do": "chat.detach", "chat": chat, "index": index})));
+            let (rm_hover, hover_theme) = (rm_hover.clone(), theme.clone());
             let remove = div()
                 .id(SharedString::from(format!("att-x:{id}")))
                 .absolute()
@@ -182,11 +198,16 @@ impl Workspace {
                 .justify_center()
                 .bg(rm_bg)
                 .cursor_pointer()
+                .hover(move |mut s| {
+                    style::refine(&mut s, &rm_hover, &hover_theme);
+                    s
+                })
                 .child(Icon::empty().path(format!("icons/{rm_icon}.svg")).size(px(rmf("icon_size", 11.))).text_color(rm_fg))
                 .on_click(cx.listener(move |ws, _, _, cx| {
                     if let Some(v) = ws.attachments.get_mut(&chat2) {
                         v.retain(|x| x.id != id);
                     }
+                    cx.stop_propagation();
                     cx.notify();
                 }));
             let failed = if let Status::Failed(e) = &p.status { Some(e.clone()) } else { None };
@@ -199,28 +220,65 @@ impl Workspace {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(4.))
-                    .p(px(4.))
-                    .child(Icon::empty().path(format!("icons/{file_icon}.svg")).size(px(18.)))
-                    .child(div().w_full().text_size(px(name_size)).text_center().truncate().child(p.name.clone()))
+                    .gap(px(gap))
+                    .p(px(pad))
+                    .child(Icon::empty().path(format!("icons/{file_icon}.svg")).size(px(icon_size)))
+                    .child(div().w_full().text_size(px(name_size)).text_center().truncate().child(shown.clone()))
                     .into_any_element()
             };
             let width = if p.is_image { crate::workspace::fit(&p.preview, size * factor, size).0.max(size) } else { size };
+            let spinner = (p.status == Status::Uploading).then(|| self.spinner(Some("small"), None, cx));
             let mut chip = style::apply(div().id(SharedString::from(format!("att:{id}"))).relative().w(px(width)).h(px(size)).overflow_hidden(), &st("attachment"), &theme)
                 .child(body)
-                .when(p.status == Status::Uploading, |d| {
-                    d.child(div().absolute().inset_0().flex().items_center().justify_center().bg(overlay).child(Spinner::new().small()))
-                })
+                .when_some(spinner, |d, sp| d.child(div().absolute().inset_0().flex().items_center().justify_center().bg(overlay).child(sp)))
                 .child(remove);
+            if let Some(action) = &on_click {
+                let (path, agent) = (p.preview.to_string_lossy().into_owned(), if let Status::Ready(a) = &p.status { Some(a.clone()) } else { None });
+                let c = with(&frame_ctx(), vec![
+                    ("path".into(), to_val(&Value::from(path))),
+                    ("agent_path".into(), to_val(&agent.map(Value::from).unwrap_or(Value::Null))),
+                    ("name".into(), to_val(&Value::from(shown.clone()))),
+                    ("index".into(), to_val(&Value::from(index))),
+                    ("chat".into(), to_val(&Value::from(chat.clone()))),
+                ]);
+                let action = self.exprs.resolve_action(action, &c);
+                self.clickables.push((format!("att:{id}"), shown.clone(), action.clone()));
+                chip = chip.cursor_pointer().on_click(cx.listener(move |ws, _, window, cx| ws.run_action(&action, window, cx)));
+            }
             if let Some(e) = failed {
                 let tip = failed_text.replace("{error}", &e);
-                chip = chip.border_2().border_color(danger).tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx));
+                chip = chip.border(px(failed_width)).border_color(danger).tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx));
             } else {
-                let name = p.name.clone();
+                let name = shown.clone();
                 chip = chip.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx));
             }
             row = row.child(chip);
         }
         Some(row.into_any_element())
+    }
+}
+
+/** `strip_prefix_min_digits`: a number for every place, or {steps, chips, messages}. Sent messages' files
+were stamped by the app, so any digits count there; elsewhere 10, so "2024-report.pdf" keeps its name. */
+fn stamp_digits(setting: Option<&Value>, which: &str) -> usize {
+    let default = if which == "messages" { 1 } else { 10 };
+    match setting {
+        Some(Value::Number(n)) => n.as_u64().unwrap_or(default as u64) as usize,
+        Some(Value::Object(o)) => o.get(which).and_then(Value::as_u64).map(|n| n as usize).unwrap_or(default),
+        _ => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn stamp_digits_by_place() {
+        assert_eq!(super::stamp_digits(None, "steps"), 10);
+        assert_eq!(super::stamp_digits(None, "messages"), 1);
+        assert_eq!(super::stamp_digits(Some(&json!(6)), "messages"), 6);
+        assert_eq!(super::stamp_digits(Some(&json!({"chips": 3})), "chips"), 3);
+        assert_eq!(super::stamp_digits(Some(&json!({"chips": 3})), "steps"), 10);
     }
 }

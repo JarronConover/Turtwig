@@ -1765,7 +1765,9 @@
     "pending": { "show": true },
     // Tool step summaries are cut to this many characters.
     "summary_chars": 140,
+    // Counted labels may have KEY_one / KEY_other forms (e.g. "steps_one"); {s} is `plural` unless n is 1.
     "labels": {
+      "plural": "s",
       "steps": "{n} step{s}{failed}", "steps_failed": ", {n} failed", "earlier_steps": "{n} earlier step{s}",
       "thinking": "Thinking", "thought": "Thought", "pending_thinking": "Thinking", "pending_working": "Working",
       "activity_thinking": "Thinking", "activity_writing": "Writing", "more_lines": "… {n} more lines",
@@ -1774,8 +1776,23 @@
       "skill_subject": "the {skill} skill", "background_finished": "A background task finished", "another_session": "another session"
     },
     // Per tool name (or "*"): { "doing", "done", "failed", "icon", "activity" }; any field overrides the built-in table.
+    // "subject": what follows the prefix, as jq or a {{ }} template over .input, .summary, .name.
+    // "detail": what an open step shows: diff | command | result | json | markdown, or a component (gets
+    // .props {input, result, is_error, name, id}).
     "tools": {},
+    // Replace a transcript part with a component name or node; it gets the item as .props: user and
+    // assistant {kind, text, index, chat, key, uploads, raw}, notice, step {kind: tool | thinking, id, title,
+    // icon, running, error, open, tool, input, result, summary, text}. null: the built-in look.
+    "render": { "user": null, "assistant": null, "step": null, "notice": null },
+    // Each run of thinking and tool calls as one row (false: a row per step); fold_running: a long run
+    // folds its earlier steps while it's still going.
+    "group_steps": true, "fold_running": true,
+    // Show thinking as Markdown instead of plain text.
+    "thinking_markdown": false,
+    // A failed step's line: style keys over trace_line.
+    "trace_line_error": { "color": "@danger" },
     "tool_names": { "strip": "mcp__", "separator": " · " },
+    // icons may also set pending_thinking / pending_working (each falls back to pending).
     "step_line": {
       "icon_size": 14, "chevron_size": 12, "pulse_ms": 1400, "pulse_min": 0.35, "pulse_max": 1,
       "icons": { "pending": "brain", "thinking": "brain", "fold": "list-checks", "open": "chevron-down", "closed": "chevron-right" }
@@ -1783,18 +1800,27 @@
     "step_detail": {
       "removed": "@diff_del", "removed_background": "@diff_del_bg", "added": "@diff_add", "added_background": "@diff_add_bg",
       "error": "@danger", "removed_prefix": "- ", "added_prefix": "+ ", "command_prefix": "$ ", "json_fallback": true,
-      "tab_width": 4, "padding_x": 8, "padding_bottom": 12
+      "tab_width": 4, "padding_x": 8, "padding_bottom": 12,
+      // The "… N more lines" row: style keys over italic.
+      "more": {}
     },
+    // strip_prefix_min_digits: how many leading digits before a dash make a timestamp to hide, for step
+    // titles, chips, and files in sent messages (or one number for all). on_click: an action with
+    // .path, .agent_path, .name, .index, .chat.
     "attachments": {
       "size": 64, "image_width_factor": 2.5, "image_extensions": ["png", "jpg", "jpeg", "gif", "webp"], "strip_prefix": true,
-      "file_icon": "file", "name_size": 10, "uploading_overlay": "#00000073", "failed_border": "@danger",
-      "remove": { "size": 18, "icon_size": 11, "icon": "x", "top": 3, "right": 3, "background": "#000000a6", "color": "#ffffff" }
+      "strip_prefix_min_digits": { "steps": 10, "chips": 10, "messages": 1 },
+      "file_icon": "file", "file_icon_size": 18, "gap": 4, "padding": 4, "name_size": 10, "uploading_overlay": "#00000073",
+      "failed_border": "@danger", "failed_border_width": 2, "on_click": null,
+      "remove": { "size": 18, "icon_size": 11, "icon": "x", "top": 3, "right": 3, "background": "#000000a6", "color": "#ffffff", "hover": {} }
     },
+    // The file icon in a sent message's file chips (`file` styles the chip).
+    "file_icon_size": 14,
     // ---- Chips over the transcript ----
     "jump_icon": "arrow-down", "jump_icon_size": 13, "jump_bottom": 14,
     // The "Loading earlier messages…" chip (its look falls back to `jump`), and how close to the top loads more.
     "loading_chip_top": 10, "load_earlier_within": 0,
-    "drop_overlay_icon": "paperclip",
+    "drop_overlay_icon": "paperclip", "drop_overlay_icon_size": 22,
     // ---- The message box ----
     "composer_lines": { "min": 1, "max": 10 }, "composer_gap": 6, "composer_radius": 6,
     "suggestion_hint": "   ⇥ Tab",
@@ -1840,7 +1866,9 @@
     "type_to_focus": true,
     // Claude Code's suggested next prompt shows in the empty message box; Tab fills it in (doesn't send).
     "suggestions": true,
-    // Copy and Fork under each message while you hover it.
+    // Copy and Fork under each message while you hover it. An object sets buttons (["copy", "fork"], or
+    // {icon, tooltip, do, id?} with templates over .text .chat .index), show (hover | always), designer (true:
+    // also in the designer), icons, tooltips, icon_size, padding, radius, height, gap, color, hover.
     "message_actions": true,
     // Select and copy message text with the mouse.
     "selectable": true,
@@ -1904,7 +1932,9 @@
     "notice": { "font_size": 12.5, "color": "@danger" },
     "empty": { "color": "@text_muted", "width": "full", "padding": [0, 32], "text_align": "center", "line_height": 1.5 },
     "waiting": { "padding": 12, "radius": 10, "border": 1, "border_color": "@warning", "background": "@waiting_bg", "font_size": 13 },
-    "waiting_option": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "background": "@pill", "hover": { "background": "@pill_hover" }, "font_size": 12.5, "align": "center" }
+    "waiting_option": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "background": "@pill", "hover": { "background": "@pill_hover" }, "font_size": 12.5, "align": "center" },
+    // The row of answer buttons in the waiting card.
+    "waiting_row": { "gap": 6, "wrap": true }
   },
 
   "diff": {

@@ -1,8 +1,10 @@
 /*! The transcript in the style of shadcn's Trace: user turns as right-aligned bubbles, replies as text,
 and each run of thinking and tool calls as quiet one-line steps that expand; long runs fold. */
 
+use super::expr::{to_val, with};
+use super::render::{frame_ctx, value_text};
 use super::style;
-use crate::transcript::{label, tool_look, Item};
+use crate::transcript::{label, label_n, tool_look, Item};
 use crate::workspace::Workspace;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{h_flex, v_flex, Icon};
@@ -20,10 +22,11 @@ pub(crate) enum Block {
 /** Groups items into rows: each run of thinking and tool calls is one row. */
 pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
     let mut blocks: Vec<Block> = vec![];
+    let group = crate::transcript::options().group_steps;
     for (i, item) in items.iter().enumerate() {
         let step = matches!(item, Item::Tool { .. } | Item::Thinking { .. });
         match (step, blocks.last_mut()) {
-            (true, Some(Block::Steps(v))) => v.push(i),
+            (true, Some(Block::Steps(v))) if group => v.push(i),
             (true, _) => blocks.push(Block::Steps(vec![i])),
             (false, _) => blocks.push(Block::One(i)),
         }
@@ -36,17 +39,17 @@ pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
     blocks
 }
 
-/** (running, done, failed) titles and an icon for a tool call: the subject (a file, a pattern, a
-command) after the tool's prefixes from `crate::transcript::tool_look`. */
-fn describe(name: &str, input: &Value, summary: &str, strip_stamps: bool) -> (String, String, String, String) {
+/** (running, done, failed) titles and an icon for a tool call: the subject (a file, a pattern, a command,
+or `subject` from `chat.tools.NAME.subject`) after the tool's prefixes; `strip_min` 0 keeps timestamps. */
+fn describe(name: &str, input: &Value, summary: &str, strip_min: usize, subject: Option<String>) -> (String, String, String, String) {
     let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let file = |k: &str| {
         let p = s(k);
         let name = p.rsplit('/').next().unwrap_or(&p).to_string();
-        if strip_stamps { strip_stamp(&name, 10) } else { name }
+        if strip_min > 0 { strip_stamp(&name, strip_min) } else { name }
     };
     let look = tool_look(name);
-    let subject = match name {
+    let subject = if let Some(given) = subject { given } else { match name {
         "Read" | "Edit" | "MultiEdit" | "Write" => file("file_path"),
         "NotebookEdit" => file("notebook_path"),
         "Bash" => upper_first(&if s("description").is_empty() { s("command").lines().next().unwrap_or("").to_string() } else { s("description") }),
@@ -77,7 +80,7 @@ fn describe(name: &str, input: &Value, summary: &str, strip_stamps: bool) -> (St
             let shown = crate::transcript::tool_display_name(name);
             if summary.is_empty() { shown } else { format!("{shown}: {summary}") }
         }
-    };
+    } };
     let join = |prefix: &str| match (prefix.is_empty(), subject.is_empty()) {
         (true, _) => subject.clone(),
         (false, true) => prefix.to_string(),
@@ -88,6 +91,9 @@ fn describe(name: &str, input: &Value, summary: &str, strip_stamps: bool) -> (St
 
 /** "1792164281008-Screenshot.png" → "Screenshot.png": a leading run of at least `min` digits before a dash. */
 pub(crate) fn strip_stamp(name: &str, min: usize) -> String {
+    if min == 0 {
+        return name.to_string();
+    }
     name.split_once('-').filter(|(stamp, _)| stamp.len() >= min && stamp.chars().all(|c| c.is_ascii_digit())).map(|(_, n)| n.to_string()).unwrap_or_else(|| name.to_string())
 }
 
@@ -132,7 +138,8 @@ type Styles<'a> = &'a dyn Fn(&str) -> Map<String, Value>;
 
 impl Workspace {
     /** Row `bi` of a chat's transcript. */
-    pub(crate) fn render_block(&mut self, chat_id: &str, items: &[Item], blocks: &[Block], bi: usize, working: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_block(&mut self, chat_id: &str, items: &[Item], blocks: &[Block], bi: usize, working: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = self.settings.theme.clone();
         let cs = self.settings.chat.clone();
         let st = |k: &str| match cs.get(k) {
@@ -140,14 +147,16 @@ impl Workspace {
             _ => Map::new(),
         };
         let fold_after = cs.get("fold_steps_after").and_then(Value::as_u64).unwrap_or(5).max(1) as usize;
+        let fold_running = cs.get("fold_running").and_then(Value::as_bool) != Some(false);
         let n = blocks.len() - usize::from(matches!(blocks.last(), Some(Block::Pending(_))));
         match blocks.get(bi)? {
-            Block::One(i) => self.render_message(chat_id, *i, &items[*i], &st, &theme),
+            Block::One(i) => self.render_message(chat_id, *i, &items[*i], &st, &theme, window, cx),
             Block::Pending(title) => {
                 let key = format!("{chat_id}:pending");
                 let look = LineLook::of(&cs);
-                let text = if *title == "Working" { label("pending_working", "Working", &[]) } else { label("pending_thinking", "Thinking", &[]) };
-                let line = self.trace_line(&key, &look.icon("pending", "brain"), &text, true, false, false, false, vec![], &st, &theme, cx);
+                let (text, kind) = if *title == "Working" { (label("pending_working", "Working", &[]), "working") } else { (label("pending_thinking", "Thinking", &[]), "thinking") };
+                let icon = look.icon(&format!("pending_{kind}"), &look.icon("pending", "brain"));
+                let line = self.trace_line(&key, &icon, &text, true, false, false, false, vec![], &st, &theme, cx);
                 Some(style::apply(v_flex(), &st("trace"), &theme).child(line).into_any_element())
             }
             Block::Steps(steps) => {
@@ -155,27 +164,26 @@ impl Workspace {
                 let mut trace = style::apply(v_flex(), &st("trace"), &theme);
                 let key = format!("{chat_id}:run:{}", steps[0]);
                 let folded = steps.len() > fold_after;
-                let plural = |n: usize| if n == 1 { "" } else { "s" };
                 let fold_icon = LineLook::of(&cs).icon("fold", "list-checks");
                 if folded && !active {
                     let open = self.expanded_tools.contains(&key);
                     let tools = steps.iter().filter(|i| matches!(items[**i], Item::Tool { .. })).count();
                     let errors = steps.iter().filter(|i| matches!(items[**i], Item::Tool { is_error: true, .. })).count();
-                    let failed = if errors > 0 { label("steps_failed", ", {n} failed", &[("n", &errors.to_string())]) } else { String::new() };
-                    let title = label("steps", "{n} step{s}{failed}", &[("n", &tools.to_string()), ("s", plural(tools)), ("failed", &failed)]);
-                    let lines = if open { steps.iter().map(|&i| self.render_step(chat_id, i, &items[i], false, &st, &theme, cx)).collect() } else { vec![] };
+                    let failed = if errors > 0 { label_n("steps_failed", ", {n} failed", errors, &[]) } else { String::new() };
+                    let title = label_n("steps", "{n} step{s}{failed}", tools, &[("failed", &failed)]);
+                    let lines = if open { steps.iter().map(|&i| self.render_step(chat_id, i, &items[i], false, &st, &theme, window, cx)).collect() } else { vec![] };
                     trace = trace.child(self.trace_line(&key, &fold_icon, &title, false, false, true, open, lines, &st, &theme, cx));
                 } else {
-                    let hidden = if active && folded { steps.len() - fold_after } else { 0 };
+                    let hidden = if active && folded && fold_running { steps.len() - fold_after } else { 0 };
                     if hidden > 0 {
                         let open = self.expanded_tools.contains(&key);
-                        let lines = if open { steps[..hidden].iter().map(|&i| self.render_step(chat_id, i, &items[i], false, &st, &theme, cx)).collect() } else { vec![] };
-                        let title = label("earlier_steps", "{n} earlier step{s}", &[("n", &hidden.to_string()), ("s", plural(hidden))]);
+                        let lines = if open { steps[..hidden].iter().map(|&i| self.render_step(chat_id, i, &items[i], false, &st, &theme, window, cx)).collect() } else { vec![] };
+                        let title = label_n("earlier_steps", "{n} earlier step{s}", hidden, &[]);
                         trace = trace.child(self.trace_line(&key, &fold_icon, &title, false, false, true, open, lines, &st, &theme, cx));
                     }
                     let last = *steps.last().unwrap_or(&0);
                     for &i in &steps[hidden..] {
-                        trace = trace.child(self.render_step(chat_id, i, &items[i], active && i == last, &st, &theme, cx));
+                        trace = trace.child(self.render_step(chat_id, i, &items[i], active && i == last, &st, &theme, window, cx));
                     }
                 }
                 Some(trace.into_any_element())
@@ -183,16 +191,29 @@ impl Workspace {
         }
     }
 
-    fn render_message(&mut self, chat_id: &str, i: usize, item: &Item, st: Styles, theme: &Map<String, Value>) -> Option<AnyElement> {
+    /** `chat.render.KIND` (a component name or node) drawing one transcript part, if set. */
+    fn chat_part(&mut self, kind: &str, props: Value, path: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let spec = self.settings.chat.get("render").and_then(|r| r.get(kind)).cloned();
+        self.render_part(spec.as_ref(), props, path, window, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_message(&mut self, chat_id: &str, i: usize, item: &Item, st: Styles, theme: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = format!("{chat_id}:{i}");
         match item {
             Item::User { text } => {
+                let (uploads, rest) = crate::workspace::split_uploads(text);
+                let props = serde_json::json!({"kind": "user", "text": rest, "raw": text, "index": i, "chat": chat_id, "key": key,
+                    "uploads": uploads.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>()});
+                if let Some(el) = self.chat_part("user", props, &format!("chat:{key}"), window, cx) {
+                    return Some(self.with_message_actions(chat_id, i, &key, text, true, el, theme));
+                }
                 let image_style = st("image");
                 let max = |k: &str, d: f32| image_style.get(k).and_then(Value::as_f64).map(|x| x as f32).unwrap_or(d);
                 let (mw, mh) = (max("max_width", 360.), max("max_height", 240.));
-                let (uploads, rest) = crate::workspace::split_uploads(text);
                 let file_icon = self.attachment_setting("file_icon").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| "file".into());
-                let strip = self.strip_stamps();
+                let icon_size = self.settings.num("chat.file_icon_size", 14.) as f32;
+                let digits = self.stamp_digits("messages");
                 let thumbs: Vec<AnyElement> = uploads
                     .into_iter()
                     .map(|p| {
@@ -201,10 +222,10 @@ impl Workspace {
                             style::apply_plain(img(p).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme).into_any_element()
                         } else {
                             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                            let name = if strip { strip_stamp(&name, 1) } else { name };
+                            // `gap` in `chat.file` overrides this one: style::apply refines after it.
                             style::apply(h_flex().gap(px(6.)), &st("file"), theme)
-                                .child(Icon::empty().path(format!("icons/{file_icon}.svg")).size(px(14.)))
-                                .child(name)
+                                .child(Icon::empty().path(format!("icons/{file_icon}.svg")).size(px(icon_size)))
+                                .child(strip_stamp(&name, digits))
                                 .into_any_element()
                         }
                     })
@@ -212,21 +233,27 @@ impl Workspace {
                 let body = (!rest.is_empty()).then(|| self.markdown(&format!("{key}:u"), &rest, theme));
                 let bubble = style::apply(v_flex(), &st("user"), theme).children(body).children(thumbs);
                 let row = h_flex().w_full().justify_end().child(bubble).into_any_element();
-                Some(self.with_message_actions(chat_id, &key, text, true, row, theme))
+                Some(self.with_message_actions(chat_id, i, &key, text, true, row, theme))
             }
             Item::Image { media_type, data } => {
                 let image = self.images.entry(key.clone()).or_insert_with(|| crate::workspace::decode_image(media_type, data)).clone();
                 image.map(|i| h_flex().w_full().justify_end().child(style::apply_plain(img(i).object_fit(ObjectFit::Contain), &st("image"), theme)).into_any_element())
             }
             Item::Assistant { text } => {
-                let body = style::apply(div(), &st("assistant"), theme).child(self.markdown(&key, text, theme));
-                Some(self.with_message_actions(chat_id, &key, text, false, body.into_any_element(), theme))
+                let props = serde_json::json!({"kind": "assistant", "text": text, "index": i, "chat": chat_id, "key": key});
+                let body = match self.chat_part("assistant", props, &format!("chat:{key}"), window, cx) {
+                    Some(el) => el,
+                    None => style::apply(div(), &st("assistant"), theme).child(self.markdown(&key, text, theme)).into_any_element(),
+                };
+                Some(self.with_message_actions(chat_id, i, &key, text, false, body, theme))
             }
-            Item::Notice { text } => Some(style::apply(div(), &st("notice"), theme).child(text.clone()).into_any_element()),
+            Item::Notice { text } => {
+                let props = serde_json::json!({"kind": "notice", "text": text, "index": i, "chat": chat_id, "key": key});
+                self.chat_part("notice", props, &format!("chat:{key}"), window, cx).or_else(|| Some(style::apply(div(), &st("notice"), theme).child(text.clone()).into_any_element()))
+            }
             _ => None,
         }
     }
-
     fn markdown(&self, key: &str, text: &str, theme: &Map<String, Value>) -> TextView {
         let selectable = self.settings.chat.get("selectable").and_then(Value::as_bool) != Some(false);
         let angles = self.settings.chat.get("markdown").and_then(|m| m.get("show_angle_brackets")).and_then(Value::as_bool) != Some(false);
@@ -290,9 +317,14 @@ impl Workspace {
     /** A message with Copy and Fork under it while hovered. `chat.message_actions`: false hides them; an
     object sets `buttons` (["copy", "fork"]), `show` ("hover" or "always"), `icons`, `tooltips`, `icon_size`,
     `padding`, `radius`, `height`, `gap`, `color`, and `hover` (colors or @tokens). */
-    fn with_message_actions(&self, chat_id: &str, key: &str, text: &str, mine: bool, body: AnyElement, theme: &Map<String, Value>) -> AnyElement {
+
+    /** A message with its action buttons under it (shown while hovered). `chat.message_actions`: false hides
+    them; an object sets `buttons`, `show` (hover | always), `designer`, icons, tooltips and sizes. */
+    #[allow(clippy::too_many_arguments)]
+    fn with_message_actions(&mut self, chat_id: &str, index: usize, key: &str, text: &str, mine: bool, body: AnyElement, theme: &Map<String, Value>) -> AnyElement {
         let cfg = self.settings.chat.get("message_actions").cloned().unwrap_or(Value::Bool(true));
-        if cfg == Value::Bool(false) || chat_id == crate::designer::CHAT_ID {
+        let in_designer = chat_id == crate::designer::CHAT_ID && cfg.get("designer").and_then(Value::as_bool) != Some(true);
+        if cfg == Value::Bool(false) || in_designer {
             return body;
         }
         let f = |k: &str, d: f32| cfg.get(k).and_then(Value::as_f64).map(|x| x as f32).unwrap_or(d);
@@ -302,89 +334,133 @@ impl Workspace {
         let hover = style::color(&tok("hover", "@hover"), theme).unwrap_or(gpui_kit::black());
         let (icon_size, pad, radius) = (f("icon_size", 13.), f("padding", 4.), f("radius", 5.));
         let always = cfg.get("show").and_then(Value::as_str) == Some("always");
-        let buttons: Vec<String> = cfg
-            .get("buttons")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-            .unwrap_or_else(|| vec!["copy".into(), "fork".into()]);
+        let buttons: Vec<Value> = cfg.get("buttons").and_then(Value::as_array).cloned().unwrap_or_else(|| vec!["copy".into(), "fork".into()]);
+        let ctx = with(&frame_ctx(), vec![("text".into(), to_val(&Value::from(text))), ("chat".into(), to_val(&Value::from(chat_id))), ("index".into(), to_val(&Value::from(index)))]);
+        // Each button as (name, icon, tooltip, action); named ones are the built-ins.
+        let specs: Vec<(String, String, String, Value)> = buttons
+            .iter()
+            .enumerate()
+            .filter_map(|(n, b)| match b.as_str() {
+                Some("copy") => Some(("copy".into(), text_of("icons", "copy", "copy"), text_of("tooltips", "copy", "Copy"), serde_json::json!({"do": "clipboard.copy", "text": text}))),
+                Some("fork") => Some((
+                    "fork".into(),
+                    text_of("icons", "fork", "git-fork"),
+                    text_of("tooltips", "fork", "Fork this chat (a new tab that starts from this conversation)"),
+                    serde_json::json!({"do": "chat.fork", "chat": chat_id}),
+                )),
+                Some(_) => None,
+                None => {
+                    let r = |k: &str| b.get(k).map(|v| value_text(&self.exprs.resolve(v, &ctx))).unwrap_or_default();
+                    let name = b.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("b{n}"));
+                    Some((name, r("icon"), r("tooltip"), self.exprs.resolve_action(b.get("do").unwrap_or(&Value::Null), &ctx)))
+                }
+            })
+            .collect();
         let group = SharedString::from(format!("msg:{key}"));
         let view = self.view_handle.clone();
-        let button = |id: String, icon: String, tip: String, action: Value| {
-            let view = view.clone();
-            let tip = SharedString::from(tip);
-            div()
-                .id(SharedString::from(id))
-                .p(px(pad))
-                .rounded(px(radius))
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover))
-                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-                .child(Icon::empty().path(format!("icons/{icon}.svg")).size(px(icon_size)).text_color(muted))
-                .on_click(move |_, window, cx| {
-                    if let Some(v) = view.as_ref().and_then(|v| v.upgrade()) {
-                        let action = action.clone();
-                        v.update(cx, |ws, cx| ws.run_action(&action, window, cx));
-                    }
-                })
-        };
         let mut bar = h_flex()
             .gap(px(f("gap", 2.)))
             .h(px(f("height", 22.)))
             .when(mine, |d| d.justify_end())
             .when(!always, |d| d.invisible().group_hover(group.clone(), |s| s.visible()));
-        for b in &buttons {
-            bar = match b.as_str() {
-                "copy" => bar.child(button(
-                    format!("{key}:copy"),
-                    text_of("icons", "copy", "copy"),
-                    text_of("tooltips", "copy", "Copy"),
-                    serde_json::json!({"do": "clipboard.copy", "text": text}),
-                )),
-                "fork" => bar.child(button(
-                    format!("{key}:fork"),
-                    text_of("icons", "fork", "git-fork"),
-                    text_of("tooltips", "fork", "Fork this chat (a new tab that starts from this conversation)"),
-                    serde_json::json!({"do": "chat.fork", "chat": chat_id}),
-                )),
-                _ => bar,
-            };
+        for (name, icon, tip, action) in specs {
+            let id = format!("{key}:{name}");
+            self.clickables.push((id.clone(), tip.clone(), action.clone()));
+            let view = view.clone();
+            let tip = SharedString::from(tip);
+            bar = bar.child(
+                div()
+                    .id(SharedString::from(id))
+                    .p(px(pad))
+                    .rounded(px(radius))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .when(!tip.is_empty(), |d| d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)))
+                    .child(Icon::empty().path(format!("icons/{icon}.svg")).size(px(icon_size)).text_color(muted))
+                    .on_click(move |_, window, cx| {
+                        if let Some(v) = view.as_ref().and_then(|v| v.upgrade()) {
+                            let action = action.clone();
+                            v.update(cx, |ws, cx| ws.run_action(&action, window, cx));
+                        }
+                    }),
+            );
         }
         v_flex().w_full().group(group).child(body).child(bar).into_any_element()
     }
 
+    /** `chat.tools.NAME` (or `"*"`): a tool's own entry, else the catch-all. */
+    fn tool_setting(name: &str, key: &str) -> Option<Value> {
+        let o = crate::transcript::options();
+        o.tools.get(name).or_else(|| o.tools.get("*")).and_then(|t| t.get(key)).cloned()
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn render_step(&mut self, chat_id: &str, i: usize, item: &Item, running: bool, st: Styles, theme: &Map<String, Value>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_step(&mut self, chat_id: &str, i: usize, item: &Item, running: bool, st: Styles, theme: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match item {
             Item::Thinking { text } => {
                 let key = format!("{chat_id}:think:{i}");
                 let open = self.expanded_tools.contains(&key);
                 let has_text = !text.trim().is_empty();
-                let body = (has_text && open).then(|| div().whitespace_normal().child(text.trim().to_string()).into_any_element());
                 let look = LineLook::of(&self.settings.chat);
                 let title = if running { label("thinking", "Thinking", &[]) } else { label("thought", "Thought", &[]) };
-                self.trace_line(&key, &look.icon("thinking", "brain"), &title, running, false, has_text, open, body.into_iter().collect(), st, theme, cx)
+                let icon = look.icon("thinking", "brain");
+                let props = serde_json::json!({"kind": "thinking", "id": key, "index": i, "chat": chat_id, "title": title, "icon": icon, "running": running, "open": open, "text": text});
+                if let Some(el) = self.chat_part("step", props, &format!("chat:{key}"), window, cx) {
+                    return el;
+                }
+                let md = self.settings.chat.get("thinking_markdown").and_then(Value::as_bool) == Some(true);
+                let body = (has_text && open).then(|| {
+                    if md { self.markdown(&format!("{key}:md"), text.trim(), theme).into_any_element() } else { div().whitespace_normal().child(text.trim().to_string()).into_any_element() }
+                });
+                self.trace_line(&key, &icon, &title, running, false, has_text, open, body.into_iter().collect(), st, theme, cx)
             }
             Item::Tool { id, name, summary, input, result, is_error } => {
-                let (doing, done, failed, icon) = describe(name, input, summary, self.strip_stamps());
+                let subject = Self::tool_setting(name, "subject").map(|t| {
+                    let c = to_val(&serde_json::json!({"input": input, "summary": summary, "name": name}));
+                    match &t {
+                        Value::String(code) if !code.contains("{{") => value_text(&super::expr::to_json(&self.exprs.first(code, &c))),
+                        other => value_text(&self.exprs.resolve(other, &c)),
+                    }
+                });
+                let (doing, done, failed, icon) = describe(name, input, summary, self.stamp_digits("steps"), subject);
                 let live = running && result.is_none();
                 let title = if *is_error { failed } else if live { doing } else { done };
                 let open = self.expanded_tools.contains(id);
-                let body = if open { self.step_detail(id, name, input, result.as_deref(), *is_error, st, theme) } else { vec![] };
+                let props = serde_json::json!({"kind": "tool", "tool": name, "id": id, "index": i, "chat": chat_id, "title": title, "icon": icon,
+                    "running": live, "error": is_error, "open": open, "summary": summary, "input": input, "result": result});
+                if let Some(el) = self.chat_part("step", props, &format!("chat:{id}"), window, cx) {
+                    return el;
+                }
+                let body = if open { self.step_detail(id, name, input, result.as_deref(), *is_error, st, theme, window, cx) } else { vec![] };
                 self.trace_line(id, &icon, &title, live, *is_error, true, open, body, st, theme, cx)
             }
             _ => div().into_any_element(),
         }
     }
 
-    /** What a step did: an edit as -/+ lines, a command with its output, or the tool's result. */
-    fn step_detail(&mut self, id: &str, name: &str, input: &Value, result: Option<&str>, is_error: bool, st: Styles, theme: &Map<String, Value>) -> Vec<AnyElement> {
-        if name == "AgentMessage" || name == "Compaction" {
+    /** What a step did, by `chat.tools.NAME.detail`: diff (-/+ lines), command (with its output), result,
+    json (the input), markdown (the result), or a component. Unset: the tool's usual one. */
+    #[allow(clippy::too_many_arguments)]
+    fn step_detail(&mut self, id: &str, name: &str, input: &Value, result: Option<&str>, is_error: bool, st: Styles, theme: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mode = Self::tool_setting(name, "detail");
+        let mode_name = match &mode {
+            Some(Value::String(m)) => m.clone(),
+            Some(Value::Object(_)) => String::new(),
+            _ => default_detail(name).to_string(),
+        };
+        if !matches!(mode_name.as_str(), "diff" | "command" | "result" | "json" | "markdown") {
+            let props = serde_json::json!({"input": input, "result": result, "is_error": is_error, "name": name, "id": id});
+            if let Some(el) = self.render_part(mode.as_ref(), props, &format!("detail:{id}"), window, cx) {
+                return vec![el];
+            }
+        }
+        if mode_name == "markdown" {
             let body = self.markdown(&format!("{id}:msg"), result.unwrap_or(""), theme);
             return vec![style::apply(div(), &st("agent_message"), theme).child(body).into_any_element()];
         }
         let max_lines = self.settings.chat.get("step_detail_lines").and_then(Value::as_u64).unwrap_or(40) as usize;
-        // `chat.step_detail`: colors (theme tokens or values) for removed/added/error lines, the line
-        // prefixes, the command prompt, the JSON fallback, the tab width, and the paddings.
+        // `chat.step_detail`: colors for removed/added/error lines, the line prefixes, the command prompt,
+        // the JSON fallback, the tab width, the paddings, and `more` (the "N more lines" row's style).
         let cfg = self.settings.chat.get("step_detail").cloned().unwrap_or(Value::Null);
         let c = |k: &str, d: &str| style::color(&cfg.get(k).cloned().unwrap_or_else(|| Value::from(d)), theme);
         let txt = |k: &str, d: &str| cfg.get(k).and_then(Value::as_str).unwrap_or(d).to_string();
@@ -392,16 +468,17 @@ impl Workspace {
         let (del, add, cmd) = (txt("removed_prefix", "- "), txt("added_prefix", "+ "), txt("command_prefix", "$ "));
         let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let mut lines: Vec<(Option<Hsla>, Option<Hsla>, String)> = vec![];
-        match name {
-            "Edit" => {
+        match mode_name.as_str() {
+            "diff" => {
                 lines.extend(s("old_string").lines().map(|l| (c("removed_background", "@diff_del_bg"), c("removed", "@diff_del"), format!("{del}{l}"))));
                 lines.extend(s("new_string").lines().map(|l| (c("added_background", "@diff_add_bg"), c("added", "@diff_add"), format!("{add}{l}"))));
+                lines.extend(s("content").lines().map(|l| (c("added_background", "@diff_add_bg"), c("added", "@diff_add"), format!("{add}{l}"))));
             }
-            "Write" => lines.extend(s("content").lines().map(|l| (c("added_background", "@diff_add_bg"), c("added", "@diff_add"), format!("{add}{l}")))),
-            "Bash" => {
+            "command" => {
                 lines.push((None, None, format!("{cmd}{}", s("command"))));
                 lines.extend(result.unwrap_or("").lines().map(|l| (None, None, l.to_string())));
             }
+            "json" => lines.extend(serde_json::to_string_pretty(input).unwrap_or_default().lines().map(|l| (None, None, l.to_string()))),
             _ => {
                 lines.extend(result.unwrap_or("").lines().map(|l| (None, if is_error { c("error", "@danger") } else { None }, l.to_string())));
                 if lines.is_empty() && cfg.get("json_fallback").and_then(Value::as_bool) != Some(false) {
@@ -417,8 +494,9 @@ impl Workspace {
             code = code.child(div().px(px(pad_x)).whitespace_nowrap().when_some(bg, |d, b| d.bg(b)).when_some(fg, |d, f| d.text_color(f)).child(text));
         }
         if total > max_lines {
-            let more = label("more_lines", "… {n} more lines", &[("n", &(total - max_lines).to_string())]);
-            code = code.child(div().px(px(pad_x)).italic().child(more));
+            let more = label_n("more_lines", "… {n} more lines", total - max_lines, &[]);
+            let more_style = cfg.get("more").and_then(Value::as_object).cloned().unwrap_or_default();
+            code = code.child(style::apply(div().px(px(pad_x)).italic(), &more_style, theme).child(more));
         }
         // Long lines scroll sideways with a horizontal swipe (never with the transcript's vertical scroll),
         // or with shift held, which holds the transcript still; `chat.code_scroll` tunes it.
@@ -474,9 +552,15 @@ impl Workspace {
         theme: &Map<String, Value>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let line_style = st("trace_line");
+        let mut line_style = st("trace_line");
+        if error {
+            let err = self.settings.chat.get("trace_line_error").cloned().unwrap_or_else(|| serde_json::json!({"color": "@danger"}));
+            for (k, v) in err.as_object().cloned().unwrap_or_default() {
+                line_style.insert(k, v);
+            }
+        }
         let hover = line_style.get("hover").and_then(Value::as_object).cloned().unwrap_or_default();
-        let fg = if error { style::color(&Value::from("@danger"), theme) } else { line_style.get("color").and_then(|v| style::color(v, theme)) };
+        let fg = line_style.get("color").and_then(|v| style::color(v, theme));
         let look = LineLook::of(&self.settings.chat);
         let icon_el = Icon::empty().path(format!("icons/{icon}.svg")).size(px(look.icon_size)).when_some(fg, |i, c| i.text_color(c));
         let title_el = div().min_w_0().truncate().child(title.to_string());
@@ -486,11 +570,13 @@ impl Workspace {
         } else {
             title_el.into_any_element()
         };
-        let mut line = style::apply(h_flex().id(SharedString::from(format!("trace:{key}"))).max_w_full().min_w_0(), &line_style, theme)
+        let line_id = format!("trace:{key}");
+        let mut line = style::apply(h_flex().id(SharedString::from(line_id.clone())).max_w_full().min_w_0(), &line_style, theme)
             .when_some(fg, |d, c| d.text_color(c))
             .child(icon_el)
             .child(title_el);
         if expandable {
+            self.clickables.push((line_id, title.to_string(), serde_json::json!({"do": "step.toggle", "id": key})));
             let (hover, theme2, k) = (hover.clone(), theme.clone(), key.to_string());
             line = line
                 .cursor_pointer()
@@ -520,6 +606,15 @@ impl Workspace {
     }
 }
 
+/** The detail a tool shows when no `chat.tools.NAME.detail` says otherwise. */
+fn default_detail(name: &str) -> &'static str {
+    match name {
+        "AgentMessage" | "Compaction" => "markdown",
+        "Edit" | "Write" => "diff",
+        "Bash" => "command",
+        _ => "result",
+    }
+}
 thread_local! {
     static HOVERED_CODE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
@@ -570,6 +665,9 @@ mod tests {
         let running = vec![Item::User { text: "hi".into() }, tool(false)];
         assert!(matches!(blocks_of(&running, true).last(), Some(Block::Steps(_))), "a running tool shows its own progress");
         assert!(!blocks_of(&items, false).iter().any(|b| matches!(b, Block::Pending(_))));
+        crate::transcript::set_options(&serde_json::json!({"group_steps": false}));
+        assert_eq!(blocks_of(&items[..3], false).len(), 3, "a row per step");
+        crate::transcript::set_options(&serde_json::json!({}));
     }
 }
 
@@ -768,16 +866,21 @@ mod look_tests {
     #[test]
     fn titles_read_as_before_and_follow_settings() {
         crate::transcript::set_options(&json!({}));
-        let t = describe("Read", &json!({"file_path": "/a/1792164281008-shot.png"}), "", true);
+        let t = describe("Read", &json!({"file_path": "/a/1792164281008-shot.png"}), "", 10, None);
         assert_eq!((t.0.as_str(), t.1.as_str(), t.2.as_str(), t.3.as_str()), ("Reading shot.png", "Read shot.png", "Couldn't read shot.png", "file-text"));
-        let b = describe("Bash", &json!({"command": "ls -la"}), "", true);
+        let b = describe("Bash", &json!({"command": "ls -la"}), "", 10, None);
         assert_eq!((b.1.as_str(), b.2.as_str()), ("Ls -la", "Failed: Ls -la"));
-        assert_eq!(describe("TodoWrite", &json!({}), "", true).1, "Updated the plan");
-        assert_eq!(describe("mcp__linear__get_issue", &json!({}), "X-1", true).1, "linear · get_issue: X-1");
+        assert_eq!(describe("TodoWrite", &json!({}), "", 10, None).1, "Updated the plan");
+        assert_eq!(describe("mcp__linear__get_issue", &json!({}), "X-1", 10, None).1, "linear · get_issue: X-1");
         crate::transcript::set_options(&json!({"tools": {"Read": {"done": "Opened", "icon": "eye"}, "*": {"failed": "Broke:"}}, "tool_names": {"separator": "/"}}));
-        let t = describe("Read", &json!({"file_path": "x.rs"}), "", true);
+        let t = describe("Read", &json!({"file_path": "x.rs"}), "", 10, None);
         assert_eq!((t.1.as_str(), t.3.as_str()), ("Opened x.rs", "eye"));
-        assert_eq!(describe("mcp__a__b", &json!({}), "", true).2, "Broke: a/b");
+        assert_eq!(describe("mcp__a__b", &json!({}), "", 10, None).2, "Broke: a/b");
+        assert_eq!(describe("Read", &json!({"file_path": "/a/1792164281008-shot.png"}), "", 0, None).1, "Read 1792164281008-shot.png");
+        assert_eq!(describe("Grep", &json!({}), "", 10, Some("TODOs".into())).1, "Searched for TODOs");
+        assert_eq!(super::strip_stamp("2024-report.pdf", 10), "2024-report.pdf");
+        assert_eq!(super::strip_stamp("2024-report.pdf", 1), "report.pdf");
+        assert_eq!(super::default_detail("Write"), "diff");
         crate::transcript::set_options(&json!({}));
     }
 }
