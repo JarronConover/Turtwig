@@ -1608,8 +1608,8 @@ impl Workspace {
         self.completion = found.and_then(|(trigger, query)| {
             let w = self.all_worktrees().into_iter().find(|w| w.chat_ids.iter().any(|c| c == chat)).cloned();
             let local = w.as_ref().filter(|w| w.host != "mac").map(|w| format!("~/dev/{}", w.project));
-            let all = crate::completions::entries(&self.settings, w.as_ref().map(|w| w.path.as_str()), local.as_deref());
-            let items = crate::completions::filter(&all, &query, self.settings.num("chat.completion_limit", 12.) as usize);
+            let all = crate::completions::entries(&self.settings, &trigger, w.as_ref().map(|w| w.path.as_str()), local.as_deref());
+            let items = crate::completions::filter(&all, &query, self.settings.num("chat.completion_limit", 12.) as usize, self.settings.get("chat.completion_rank").and_then(Value::as_str).unwrap_or("default"));
             let keep = self.completion.as_ref().filter(|c| c.0 == chat).map(|c| c.3).unwrap_or(0);
             (!items.is_empty()).then(|| (chat.to_string(), trigger, items.clone(), keep.min(items.len().saturating_sub(1))))
         });

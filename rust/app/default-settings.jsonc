@@ -1887,6 +1887,11 @@
       "table_cell": { "padding": [6, 10] }
     },
     "completion_triggers": ["/"],
+    // What each trigger offers: commands (slash_commands), skills (skill_dirs), files (the worktree's, up to
+    // completion_files_max). Names starting with a skip prefix are left out. rank: default (prefix, then
+    // contains, then description) or fuzzy (letters in order).
+    "completion_sources": { "/": ["commands", "skills"], "@": ["files"] },
+    "completion_skip_prefixes": ["_", "."], "completion_rank": "default", "completion_files_max": 5000,
     // What "/" offers: these commands, then the skills and commands in skill_dirs ({worktree}: the chat's
     // worktree; box worktrees read this Mac's checkout of the same repo).
     "slash_commands": [
@@ -1900,6 +1905,7 @@
       { "name": "resume", "description": "Resume an earlier conversation" },
       { "name": "init", "description": "Write a CLAUDE.md for this repo" }
     ],
+    // Each a path, or {path, kind: skill | command, source: project | personal}.
     "skill_dirs": ["{worktree}/.claude/skills", "{worktree}/.claude/commands", "{worktree}/.agents/skills", "~/.claude/skills", "~/.claude/commands", "~/.agents/skills"],
     // Selecting a worktree opens its live chat, if any: "open" (default) shows no chat when none is
     // running; "recent" shows the newest chat even when it isn't.
