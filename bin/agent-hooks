@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# agent-hooks AGENT [--file PATH] [--dry-run]: merge agent-boxd's event log hook (chat states, what a
+# chat waits on) into the agent's hooks file (its `hooks_file`) on its `hook_events`, keeping every
+# other hook. A hook already there stays where it is (Codex trusts a hook by its place in the file and
+# asks once to trust new ones). An agent with a `hooks_installer` (claude: claude-hooks) runs that.
+set -u
+. "$(dirname "$0")/env.sh"
+
+agent=${1:-}
+[ -n "$agent" ] || { echo "usage: agent-hooks AGENT [--file PATH] [--dry-run]" >&2; exit 2; }
+shift
+def=$(python3 "$AGENT_BOX_DIR/bin/chat" _agent "$agent") || exit 1
+installer=$(jq -r '.hooks_installer // empty' <<< "$def")
+if [ -n "$installer" ] && [ "${1:-}" != --file ] && [ "${1:-}" != --dry-run ]; then
+  exec "$AGENT_BOX_DIR/bin/$installer"
+fi
+file=$(jq -r '.hooks_file // empty' <<< "$def")
+[ -n "$file" ] || { echo "agent $agent has no hooks_file" >&2; exit 1; }
+events=$(jq -c '.hook_events // []' <<< "$def")
+dry=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --file) file="$2"; shift 2 ;;
+    --dry-run) dry=true; shift ;;
+    *) echo "usage: agent-hooks AGENT [--file PATH] [--dry-run]" >&2; exit 2 ;;
+  esac
+done
+
+boxd="$AGENT_BOX_DIR/rust/target/release/agent-boxd"
+current=$( [ -s "$file" ] && cat "$file" || echo '{}')
+merged=$(jq --arg boxd "$boxd hook 2> /dev/null || true" --argjson events "$events" '
+  def ensure(event; cmd):
+    if any(.hooks[event][]?.hooks[]?; .command == cmd) then .
+    else .hooks[event] = ((.hooks[event] // []) + [{hooks: [{type: "command", command: cmd}]}]) end;
+  reduce $events[] as $e (.; ensure($e; $boxd))
+' <<< "$current") || exit 1
+
+if $dry; then
+  printf '%s\n' "$merged"
+  exit 0
+fi
+mkdir -p "$(dirname "$file")"
+tmp=$(mktemp)
+printf '%s\n' "$merged" > "$tmp" && cat "$tmp" > "$file"
+rm -f "$tmp"

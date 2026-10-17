@@ -115,5 +115,37 @@ class Discovery(unittest.TestCase):
                          [fork.name, fork.name.replace("s-fork", "s-src")])
 
 
+class Generic(unittest.TestCase):
+    def tearDown(self):
+        os.environ.pop("AGENT_BOX_OPTIONS", None)
+
+    def test_tmux_names_follow_the_options(self):
+        self.assertEqual(chat.tmux_name({"id": "0123456789ab"}), "chat-01234567")
+        os.environ["AGENT_BOX_OPTIONS"] = json.dumps({"tmux_prefix": "abx-", "tmux_id_chars": 4})
+        self.assertEqual(chat.tmux_name({"id": "0123456789ab"}), "abx-0123")
+
+    def test_trust_sets_the_agents_key_once(self):
+        folder = tempfile.mkdtemp(dir=HOME)
+        chat.trust_folder(chat.AGENTS["claude"], folder)
+        cfg = json.loads(Path(HOME, ".claude.json").read_text())
+        self.assertTrue(cfg["projects"][folder]["hasTrustDialogAccepted"])
+        custom = {"trust": {"file": "~/.tool/trust.json", "path": ["trusted", "{dir}"], "value": "yes"}}
+        chat.trust_folder(custom, folder)
+        self.assertEqual(json.loads(Path(HOME, ".tool", "trust.json").read_text()), {"trusted": {folder: "yes"}})
+        chat.trust_folder({"trust": None}, folder)
+
+    def test_backup_roots_cover_every_agent(self):
+        roots = dict(chat.backup_roots())
+        self.assertEqual(roots[f"{HOME}/.claude/projects"], "projects")
+        self.assertEqual(roots[f"{HOME}/.codex/sessions"], "codex-sessions")
+        os.environ["AGENT_BOX_OPTIONS"] = json.dumps({"agents": {"codex": {"backup": False}}})
+        self.assertEqual(list(dict(chat.backup_roots()).values()), ["projects"])
+
+    def test_the_kind_a_fork_gets(self):
+        self.assertIn("orchestrator", chat.chat_kinds())
+        os.environ["AGENT_BOX_OPTIONS"] = json.dumps({"chat_kinds": ["solo"]})
+        self.assertEqual(chat.chat_kinds(), ["solo"])
+
+
 if __name__ == "__main__":
     unittest.main()

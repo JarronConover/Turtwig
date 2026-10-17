@@ -7,9 +7,9 @@ set -u
 input=$(cat)
 cwd=$(jq -r '.cwd // empty' <<< "$input" 2> /dev/null)
 session=$(jq -r '.session_id // empty' <<< "$input" 2> /dev/null)
-# On the Mac, only chats the registry says live there are synced; every
-# other local Claude session is left alone.
-if [ "$AGENT_HOST" = mac ] && ! mac_chat "$session"; then
+# Where only registry chats are backed up (the Mac), every other local
+# Claude session is left alone.
+if [ "${AGENT_SYNC_TRANSCRIPTS:-}" != all ] && ! own_chat "$session"; then
   exit 0
 fi
 if [ -n "$cwd" ]; then

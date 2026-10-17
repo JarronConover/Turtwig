@@ -1,70 +1,107 @@
 #!/usr/bin/env bash
-# Run on the Mac: give the box TJ's personal Claude setup (skills, global
-# CLAUDE.md, every project's auto memory), and bring back skills and memory
-# the box wrote. Files only flow toward the newer copy, so neither side loses
-# edits.
+# Run on the Mac: give other machines your personal agent setup and bring back
+# what they wrote (option env_push: `paths`, each one-way or two_way, every
+# project's auto memory, the PreToolUse safety hooks matching `hooks_match`).
+# Files only flow toward the newer copy, so neither side loses edits. Targets:
+# env_push.hosts, else every other host with ssh (the box).
 set -euo pipefail
-host=${AGENT_BOX_SSH:-coder.tj-agents}
-# One shared connection for the dozen ssh and rsync calls below (each new one takes seconds through Coder).
-mux=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/abx-env-%C" -o ControlPersist=120)
-ssh() { command ssh "${mux[@]}" "$@"; }
-export RSYNC_RSH="ssh ${mux[*]}"
-box_home=$(ssh -n "$host" 'echo $HOME' 2> /dev/null | tail -1)
+. "$(dirname "$0")/env.sh"
+
+conf=$(cfg env_push); [ -n "$conf" ] && [ "$conf" != null ] || conf='{}'
+c() { jq -r "$1" <<< "$conf"; }
+targets=$(c '.hosts // empty | .[]')
+if [ -z "$targets" ]; then
+  targets=$(cfg hosts | jq -r --arg me "$AGENT_HOST" 'to_entries[] | select(.key != $me and (.value.ssh // "") != "") | .key')
+fi
+[ -n "$targets" ] || { echo "no host to push to" >&2; exit 1; }
+
 # Claude Code keeps memory per folder, named after its path: the same folder
-# under each home, except the box's ~/dev/redo, which is a link to ~/project.
+# under each home, or a `path_aliases` pair (the box's ~/project is the Mac's ~/dev/redo).
 slug() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
-to_box() {
-  case "$1" in
-    "$(slug "$HOME/dev/redo")") slug "$box_home/project" ;;
-    "$(slug "$HOME")"-*) printf '%s%s' "$(slug "$box_home")" "${1#"$(slug "$HOME")"}" ;;
-  esac
-}
-to_mac() {
-  case "$1" in
-    "$(slug "$box_home/project")") slug "$HOME/dev/redo" ;;
-    "$(slug "$box_home")"-*) printf '%s%s' "$(slug "$HOME")" "${1#"$(slug "$box_home")"}" ;;
+# map SLUG FROM_HOST TO_HOST FROM_HOME TO_HOME: the folder's slug on the other machine, if it has one.
+map() {
+  local name=$1 a b
+  while IFS=$'\t' read -r a b; do
+    [ "$name" = "$(slug "$a")" ] && { slug "$b"; return; }
+  done < <(python3 "$AGENT_BOX_DIR/bin/abxcfg.py" aliases "$2" "$3" "$4" "$5" | sed '$d')
+  case "$name" in
+    "$(slug "$4")"-*) printf '%s%s' "$(slug "$5")" "${name#"$(slug "$4")"}" ;;
   esac
 }
 
-ssh -n "$host" 'mkdir -p ~/.agents/skills ~/.claude/projects/-home-coder-project/memory
-  if [ -d ~/.claude/skills ] && [ ! -L ~/.claude/skills ]; then
-    cp -a ~/.claude/skills/. ~/.agents/skills/ && rm -rf ~/.claude/skills
+push_to() {
+  local to=$1 host box_home dir box mac p path two_way replace rel ex
+  host=$(cfg host "$to" | jq -r '.ssh // empty')
+  [ -n "$host" ] || { echo "no ssh for $to" >&2; return 1; }
+  # One shared connection for the dozen ssh and rsync calls below (each new one takes seconds through Coder).
+  local mux=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/abx-env-%C" -o ControlPersist=120)
+  ssh() { command ssh "${mux[@]}" "$@"; }
+  export RSYNC_RSH="ssh ${mux[*]}"
+  box_home=$(ssh -n "$host" 'echo $HOME' 2> /dev/null | tail -1)
+
+  if [ "$(c '.skills_link // false')" = true ]; then
+    ssh -n "$host" 'mkdir -p ~/.agents/skills
+      if [ -d ~/.claude/skills ] && [ ! -L ~/.claude/skills ]; then
+        cp -a ~/.claude/skills/. ~/.agents/skills/ && rm -rf ~/.claude/skills
+      fi
+      [ -L ~/.claude/skills ] || ln -s ../.agents/skills ~/.claude/skills' 2> /dev/null
   fi
-  [ -L ~/.claude/skills ] || ln -s ../.agents/skills ~/.claude/skills' 2> /dev/null
 
-rsync -au --exclude .git --exclude __pycache__ "$HOME/.agents/skills/" "$host:.agents/skills/"
-rsync -au --exclude .git --exclude __pycache__ "$host:.agents/skills/" "$HOME/.agents/skills/"
-rsync -au "$HOME/.claude/CLAUDE.md" "$host:.claude/CLAUDE.md"
-rsync -au "$host:.claude/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
-# Every project's memory, both ways (folders with nothing in them are skipped).
-for dir in "$HOME"/.claude/projects/*/memory; do
-  [ -n "$(ls -A "$dir" 2> /dev/null)" ] || continue
-  box=$(to_box "$(basename "$(dirname "$dir")")") || continue
-  [ -n "$box" ] || continue
-  ssh -n "$host" "mkdir -p .claude/projects/$box/memory" 2> /dev/null
-  rsync -au "$dir/" "$host:.claude/projects/$box/memory/"
+  while IFS=$'\t' read -r p two_way replace ex; do
+    [ -n "$p" ] || continue
+    rel=${p#\~/}
+    path="$HOME/$rel"
+    local excl=()
+    for e in $ex; do excl+=(--exclude "$e"); done
+    if [ "${rel%/}" != "$rel" ]; then
+      ssh -n "$host" "mkdir -p $(printf %q "$rel")" 2> /dev/null
+      [ -d "$path" ] && rsync -au ${excl[@]+"${excl[@]}"} "$path" "$host:$rel"
+    else
+      ssh -n "$host" "mkdir -p $(printf %q "$(dirname "$rel")")" 2> /dev/null
+      if [ "$replace" = true ]; then
+        [ -e "$path" ] && rsync -a "$path" "$host:$rel"
+      else
+        [ -e "$path" ] && rsync -au "$path" "$host:$rel"
+      fi
+    fi
+    if [ "$two_way" = true ]; then
+      mkdir -p "$(dirname "$path")"
+      rsync -au ${excl[@]+"${excl[@]}"} "$host:$rel" "$path" 2> /dev/null || true
+    fi
+  done < <(c '.paths // [] | .[] | [.path, (.two_way // false | tostring), (.replace // false | tostring), ((.exclude // []) | join(" "))] | @tsv')
+
+  if [ "$(c '.memory // false')" = true ]; then
+    # Every project's memory, both ways (folders with nothing in them are skipped).
+    for dir in "$HOME"/.claude/projects/*/memory; do
+      [ -n "$(ls -A "$dir" 2> /dev/null)" ] || continue
+      box=$(map "$(basename "$(dirname "$dir")")" "$AGENT_HOST" "$to" "$HOME" "$box_home") || continue
+      [ -n "$box" ] || continue
+      ssh -n "$host" "mkdir -p .claude/projects/$box/memory" 2> /dev/null
+      rsync -au "$dir/" "$host:.claude/projects/$box/memory/"
+    done
+    for box in $(ssh -n "$host" 'for d in ~/.claude/projects/*/memory; do [ -n "$(ls -A "$d" 2> /dev/null)" ] && basename "$(dirname "$d")"; done' 2> /dev/null); do
+      mac=$(map "$box" "$to" "$AGENT_HOST" "$box_home" "$HOME") || continue
+      [ -n "$mac" ] || continue
+      mkdir -p "$HOME/.claude/projects/$mac/memory"
+      rsync -au "$host:.claude/projects/$box/memory/" "$HOME/.claude/projects/$mac/memory/"
+    done
+  fi
+
+  local matcher command
+  matcher=$(c '.hooks_match.matcher // empty') command=$(c '.hooks_match.command // empty')
+  if [ -n "$matcher$command" ] && [ -f "$HOME/.claude/settings.json" ]; then
+    # Safety hooks (the Linear issue guards and the no-squash rule): each push replaces the remote's
+    # copies of them; its own hooks stay.
+    local synced hooks merge
+    synced='def synced: ($m != "" and .matcher == $m) or any(.hooks[]?; $c != "" and ((.command // "") | test($c)));'
+    hooks=$(jq -c --arg m "$matcher" --arg c "$command" "$synced"' [.hooks.PreToolUse[]? | select(synced)]' "$HOME/.claude/settings.json")
+    merge="$synced"' .hooks.PreToolUse = ([.hooks.PreToolUse[]? | select(synced | not)] + $new)'
+    ssh -n "$host" "f=~/.claude/settings.json; mkdir -p ~/.claude; [ -s \$f ] || echo '{}' > \$f; tmp=\$(mktemp)
+      jq --arg m $(printf %q "$matcher") --arg c $(printf %q "$command") --argjson new $(printf %q "$hooks") $(printf %q "$merge") \$f > \$tmp && cat \$tmp > \$f; rm -f \$tmp" 2> /dev/null
+  fi
+  echo "env pushed to $host"
+}
+
+for to in $targets; do
+  push_to "$to"
 done
-for box in $(ssh -n "$host" 'for d in ~/.claude/projects/*/memory; do [ -n "$(ls -A "$d" 2> /dev/null)" ] && basename "$(dirname "$d")"; done' 2> /dev/null); do
-  mac=$(to_mac "$box") || continue
-  [ -n "$mac" ] || continue
-  mkdir -p "$HOME/.claude/projects/$mac/memory"
-  rsync -au "$host:.claude/projects/$box/memory/" "$HOME/.claude/projects/$mac/memory/"
-done
-# Files TJ drops into the app (screenshots, recordings), at the same place under the box's home, so a
-# chat there can open the Mac path it's given (/Users/tj/... -> ~/...).
-ssh -n "$host" 'mkdir -p ~/.agent-box/uploads' 2> /dev/null
-rsync -au "$HOME/.agent-box/uploads/" "$host:.agent-box/uploads/"
-# Config the factory scripts read (Cursor environments, type-check agents).
-ssh -n "$host" 'mkdir -p ~/.config/redo' 2> /dev/null
-rsync -au "$HOME/.config/redo/cursor-environments.json" "$HOME/.config/redo/cursor-typecheck-agents.json" \
-  "$host:.config/redo/"
-# Safety hooks: the Linear issue guards and the no-squash rule. Each push
-# replaces the box's copies of them; the box's own hooks stay.
-synced='def synced: .matcher == "mcp__.+__save_issue" or any(.hooks[]?; (.command // "") | test("block-squash"));'
-hooks=$(jq -c "$synced"' [.hooks.PreToolUse[]? | select(synced)]' "$HOME/.claude/settings.json")
-merge="$synced"' .hooks.PreToolUse = ([.hooks.PreToolUse[]? | select(synced | not)] + $new)'
-ssh -n "$host" 'mkdir -p ~/.claude/hooks' 2> /dev/null
-rsync -a "$HOME/.claude/hooks/block-squash.py" "$host:.claude/hooks/"
-ssh -n "$host" "f=~/.claude/settings.json; [ -s \$f ] || echo '{}' > \$f; tmp=\$(mktemp)
-  jq --argjson new $(printf %q "$hooks") $(printf %q "$merge") \$f > \$tmp && cat \$tmp > \$f; rm -f \$tmp" 2> /dev/null
-echo "env pushed to $host"

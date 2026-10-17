@@ -23,33 +23,39 @@ import time
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import abxcfg  # noqa: E402
+
 HOME = Path.home()
-ON_BOX = bool(os.environ.get("CODER_AGENT_URL"))
-HOST = "box" if ON_BOX else "mac"
+HOST = abxcfg.host_id()
 AGENT_HOME = HOME / ".agent-box"
 STATE_DIR = AGENT_HOME / "state"
 REGISTRY = STATE_DIR / "registry" / "chats"
-CLAUDE_JSON = HOME / ".claude.json"
 PROJECTS = HOME / ".claude" / "projects"
 
+# The app's `daemon` settings, as this machine's daemon last saved them (~/.agent-box/config.json);
+# AGENT_BOX_OPTIONS (a JSON object) overrides them for one run.
+option = abxcfg.option
+fill = abxcfg.fill
+label = abxcfg.label
 
-def option(key, default):
-    """The app's `daemon` settings, as this machine's daemon last saved them (~/.agent-box/config.json);
-    AGENT_BOX_OPTIONS (a JSON object) overrides them for one run."""
-    try:
-        value = json.loads(os.environ.get("AGENT_BOX_OPTIONS") or "{}").get(key)
-        if value is None:
-            value = json.loads((AGENT_HOME / "config.json").read_text()).get(key)
-    except (OSError, ValueError):
-        return default
-    return default if value is None else value
+# How an agent's `trust` pre-accepts a folder: set `path` (keys; {dir} is the folder) to `value` in `file`.
+TRUST = {"claude": {"file": "~/.claude.json", "path": ["projects", "{dir}", "hasTrustDialogAccepted"], "value": True}}
 
 # Each agent CLI a chat can run. The app's `daemon.agents` (config.json) overrides any key. A template is
 # argv with {placeholders}; a nested list is dropped when a placeholder in it is empty. `session`:
 # "assigned" (the chat id is the session id) or "discovered" (the CLI picks it; found in `sessions_dir`).
+# transcripts_root/backup_dir: what sync-worker backs up, and where under the sessions branch.
+# process_names/process_session_pattern: how another process running the same session is found.
 AGENTS = {
     "claude": {
         "bin": "claude", "session": "assigned", "trust": "claude", "remote_control": True, "stop_elsewhere": True,
+        "rc_url_pattern": r"https://claude\.ai/code/session_[A-Za-z0-9]+",
+        "transcripts_root": "~/.claude/projects", "backup_dir": "projects",
+        "process_names": ["claude"], "process_session_pattern": r"--(resume|session-id)[ =]{session}\b",
+        "hooks_file": "~/.claude/settings.json", "hooks_installer": "claude-hooks", "provider": "anthropic",
+        "hook_events": ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "PermissionRequest", "Stop",
+                        "SubagentStop", "SessionStart", "SessionEnd"],
         "new": ["{bin}", "--session-id", "{id}", "--remote-control", "{name}", ["--model", "{model}"], ["{prompt}"]],
         "resume": ["{bin}", "--resume", "{session}", "--remote-control", "{name}", ["--model", "{model}"]],
         "fork": ["{bin}", "--resume", "{from}", "--fork-session", "--session-id", "{id}", "--remote-control", "{name}",
@@ -57,6 +63,10 @@ AGENTS = {
     },
     "codex": {
         "bin": "codex", "session": "discovered", "sessions_dir": "~/.codex/sessions",
+        "transcripts_root": "~/.codex/sessions", "backup_dir": "codex-sessions",
+        "hooks_file": "~/.codex/hooks.json", "hooks_home_env": "CODEX_HOME", "provider": "openai",
+        "hook_events": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Stop",
+                        "SessionEnd"],
         "new": ["{bin}", "-c", "check_for_update_on_startup=false", "-c", 'projects={"{realdir}"={trust_level="trusted"}}',
                 ["--model", "{model}"], ["{prompt}"]],
         "resume": ["{bin}", "resume", "{session}", "-c", "check_for_update_on_startup=false",
@@ -83,39 +93,23 @@ def session_of(chat):
     return chat["id"] if agent_def(chat).get("session") == "assigned" else chat.get("session_id")
 
 
-def fill(template, values):
-    """argv from an agent template: {key} replaced from values; a nested list goes when any of its keys is empty."""
-    out = []
-    for part in template:
-        if isinstance(part, list):
-            keys = [k for p in part for k in re.findall(r"\{(\w+)\}", p) if k in values]
-            if all(values[k] for k in keys):
-                out += fill(part, values)
-            continue
-        for k, v in values.items():
-            part = part.replace("{" + k + "}", str(v or ""))
-        out.append(part)
-    return out
-
-
-for key, value in (("GIT_AUTHOR_NAME", f"agent-box ({HOST})"), ("GIT_AUTHOR_EMAIL", "tj@getredo.com")):
+for key, value in zip(("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"), abxcfg.git_author()):
     os.environ.setdefault(key, value)
     os.environ.setdefault(key.replace("AUTHOR", "COMMITTER"), value)
 
-# Same layout on both machines (on the box ~/dev/redo links to the template's
-# ~/project), so the factory skills' paths work unchanged.
-PRIMARY = {"redo": HOME / "dev" / "redo", "internal-tools": HOME / "dev" / "redotech-internal-tools",
-           "redo-data": HOME / "dev" / "redo-data"}
-WORKTREES = HOME / "dev" / "redo-worktrees"
-WT = HOME / "redo-monorepo-worktrees" / "bin" / "wt" if ON_BOX else Path("wt")
+repo_of = abxcfg.repo_of
 
 
-def repo_of(directory):
-    real = os.path.realpath(str(directory))
-    for repo, path in PRIMARY.items():
-        if os.path.realpath(str(path)) == real:
-            return repo
-    return None
+def primary_of(repo):
+    """A repo's primary checkout (`repos.REPO.primary`)."""
+    path = abxcfg.primary(repo)
+    if not path:
+        sys.exit(f"unknown repo {repo!r} (known: {', '.join(abxcfg.repos())})")
+    return path
+
+
+def default_repo():
+    return abxcfg.default_repo() or "redo"
 
 
 def now():
@@ -143,16 +137,21 @@ class StateLock:
         self.f.close()
 
 
+def pull_state():
+    git_state("pull", "-q", "--rebase", "--autostash", "origin", abxcfg.state_branch(), check=False)
+
+
 def commit_state(message):
-    """Commit and push the state branch; a failed push retries next write."""
+    """Commit and push the state branch (`state_push_tries` tries, `state_push_wait_secs` apart); a failed
+    push retries next write."""
     git_state("add", "-A")
     if git_state("diff", "--cached", "--quiet", check=False).returncode != 0:
         git_state("commit", "-q", "-m", message)
-    for _ in range(3):
-        git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
-        if git_state("push", "-q", "origin", "HEAD:state", check=False).returncode == 0:
+    for _ in range(max(1, int(option("state_push_tries", 3)))):
+        pull_state()
+        if git_state("push", "-q", "origin", f"HEAD:{abxcfg.state_branch()}", check=False).returncode == 0:
             return
-        time.sleep(2)
+        time.sleep(option("state_push_wait_secs", 2))
     print("warning: state push failed; it will go out with the next write", file=sys.stderr)
 
 
@@ -188,7 +187,7 @@ def cmd__rc(args):
     """After `new` returns: wait for the Remote Control link and record it."""
     chat = load(args.chat)
     if chat and agent_def(chat).get("remote_control"):
-        url = wait_for_rc_url(tmux_name(chat))
+        url = wait_for_rc_url(tmux_name(chat), pattern=agent_def(chat).get("rc_url_pattern"))
         if url:
             chat = load(args.chat) or chat
             chat["rc_url"] = url
@@ -209,7 +208,8 @@ def find(prefix):
 
 
 def tmux_name(chat):
-    return "chat-" + chat["id"][:8]
+    """`tmux_prefix` and the chat id's first `tmux_id_chars` characters (the daemon names them the same)."""
+    return option("tmux_prefix", "chat-") + chat["id"][:int(option("tmux_id_chars", 8))]
 
 
 def tmux_alive(name):
@@ -220,17 +220,28 @@ def project_slug(path):
     return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 
-def trust_folder(path):
-    """Pre-accept the folder trust dialog so a headless start never blocks on it."""
+def trust_folder(agent, path):
+    """Pre-accept the agent's folder trust dialog (its `trust`: a TRUST name or {file, path, value}) so a
+    headless start never blocks on it."""
+    spec = agent.get("trust")
+    spec = TRUST.get(spec) if isinstance(spec, str) else spec
+    if not isinstance(spec, dict) or not spec.get("file") or not spec.get("path"):
+        return
+    file = Path(abxcfg.expand(spec["file"]))
+    keys = [abxcfg.subst(k, {"dir": str(path)}) for k in spec["path"]]
+    value = spec.get("value", True)
     with StateLock():
-        cfg = json.loads(CLAUDE_JSON.read_text()) if CLAUDE_JSON.exists() else {}
-        proj = cfg.setdefault("projects", {}).setdefault(str(path), {})
-        if proj.get("hasTrustDialogAccepted"):
+        cfg = json.loads(file.read_text()) if file.exists() else {}
+        node = cfg
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        if node.get(keys[-1]) == value:
             return
-        proj["hasTrustDialogAccepted"] = True
-        tmp = CLAUDE_JSON.with_suffix(".json.agent-box")
+        node[keys[-1]] = value
+        file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = file.with_suffix(file.suffix + ".agent-box")
         tmp.write_text(json.dumps(cfg, indent=2))
-        tmp.replace(CLAUDE_JSON)
+        tmp.replace(file)
 
 
 def checked_out(primary, branch):
@@ -246,9 +257,36 @@ def checked_out(primary, branch):
 
 
 def worktree_dir(chat):
-    repo = chat.get("repo") or "redo"
-    base = WORKTREES if repo == "redo" else HOME / "dev" / f"{PRIMARY[repo].name}-worktrees"
-    return base / chat["branch"].replace("/", "-")
+    return abxcfg.worktree_path(chat.get("repo") or default_repo(), chat["branch"])
+
+
+def make_worktree(repo, branch, wt_dir, base=None):
+    """A worktree of `branch` at `wt_dir` (made from origin/<base or the default branch> when the branch is
+    new), by the repo's worktree_tool or plain `git worktree add`."""
+    primary = primary_of(repo)
+    run(["git", "-C", str(primary), "fetch", "-q", "origin"], check=False)
+    local = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/heads/{branch}"],
+                check=False, capture_output=True).returncode == 0
+    remote = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}"],
+                 check=False, capture_output=True).returncode == 0
+    if not local and not remote:
+        run(["git", "-C", str(primary), "branch", "-q", "--no-track", branch,
+             f"origin/{base or abxcfg.default_base(primary)}"])
+    tool = abxcfg.worktree_tool(repo)
+    if not tool or not tool.get("create"):
+        wt_dir.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "-C", str(primary), "worktree", "add", "-q", str(wt_dir), branch])
+        return
+    values = {"branch": branch, "path": str(wt_dir), "name": wt_dir.name}
+    made = run(abxcfg.tool_argv(repo, tool, "create", **values), env=abxcfg.tool_env(repo, tool, **values),
+               capture_output=True, check=False, cwd=str(primary))
+    if not wt_dir.exists():
+        sys.exit(f"{tool['bin']} didn't create {wt_dir}: {made.stderr.strip()}")
+    if made.returncode != 0:
+        # e.g. wt's "no free slots": the worktree exists but has no stack config; a chat doesn't need one.
+        last = (made.stderr.strip().splitlines() or [""])[-1]
+        note = abxcfg.subst(tool.get("partial_note") or "", {"path": str(wt_dir), "branch": branch})
+        print(f"warning: {Path(tool['bin']).name}: {last}" + (f" ({note})" if note else ""), file=sys.stderr)
 
 
 def ensure_worktree(chat, restore_from=None):
@@ -256,37 +294,13 @@ def ensure_worktree(chat, restore_from=None):
     restore_from: also apply that host's latest WIP (the worktree must be clean)."""
     if not chat.get("branch"):
         return Path(chat["dir"])
-    repo = chat.get("repo") or "redo"
-    primary = PRIMARY[repo]
-    wt_dir = checked_out(primary, chat["branch"]) or worktree_dir(chat)
+    repo = chat.get("repo") or default_repo()
+    wt_dir = checked_out(primary_of(repo), chat["branch"]) or worktree_dir(chat)
     if wt_dir.exists():
         if restore_from:
             wip_restore(wt_dir, restore_from)
         return wt_dir
-    run(["git", "-C", str(primary), "fetch", "-q", "origin"], check=False)
-    base = chat.get("base")
-    local = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/heads/{chat['branch']}"],
-                check=False, capture_output=True).returncode == 0
-    remote = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/remotes/origin/{chat['branch']}"],
-                 check=False, capture_output=True).returncode == 0
-    if not local and not remote:
-        run(["git", "-C", str(primary), "branch", "-q", "--no-track", chat["branch"], f"origin/{base or 'main'}"])
-    if repo != "redo":
-        # wt is redo-only; the other repos take plain worktrees.
-        wt_dir.parent.mkdir(parents=True, exist_ok=True)
-        run(["git", "-C", str(primary), "worktree", "add", "-q", str(wt_dir), chat["branch"]])
-        if restore_from:
-            wip_restore(wt_dir, restore_from, fresh=True)
-        return wt_dir
-    env = dict(os.environ, WT_PRIMARY=str(primary), WT_BASE=str(WORKTREES))
-    made = run([str(WT), chat["branch"], "--no-start"], env=env, capture_output=True, check=False)
-    if not wt_dir.exists():
-        sys.exit(f"wt didn't create {wt_dir}: {made.stderr.strip()}")
-    if made.returncode != 0:
-        # e.g. "no free slots": the worktree exists but has no stack config;
-        # a chat doesn't need one, and `wt adopt` provisions it later.
-        print(f"warning: wt: {made.stderr.strip().splitlines()[-1]} (run `wt adopt {wt_dir}` before starting its stack)",
-              file=sys.stderr)
+    make_worktree(repo, chat["branch"], wt_dir, chat.get("base"))
     if restore_from:
         wip_restore(wt_dir, restore_from, fresh=True)
     return wt_dir
@@ -296,9 +310,9 @@ def wip_restore(directory, host, fresh=False):
     # A worktree this machine handed off keeps the work it had then; stash that (recoverable, never
     # dropped) so the other machine's newer work can land.
     if not fresh and run(["git", "-C", str(directory), "status", "--porcelain"], check=False, capture_output=True).stdout.strip():
-        run(["git", "-C", str(directory), "stash", "push", "-q", "-u", "-m", f"a.box: before restoring the {host}'s work"], check=False)
-        print(f"stashed {directory}'s local changes (git stash list) before restoring the {host}'s work", file=sys.stderr)
-    args = [str(Path(__file__).parent / "wip-restore")] + (["--fresh"] if fresh else []) + [str(directory), host]
+        run(["git", "-C", str(directory), "stash", "push", "-q", "-u", "-m", f"a.box: before restoring the {label(host)}'s work"], check=False)
+        print(f"stashed {directory}'s local changes (git stash list) before restoring the {label(host)}'s work", file=sys.stderr)
+    args = [str(Path(__file__).parent / "wip-restore")] + (["--fresh"] if fresh else []) + [str(directory), "--from", host]
     out = run(args, check=False, capture_output=True)
     text = (out.stdout + out.stderr).strip()
     if out.returncode != 0 and "no WIP from" not in text:
@@ -308,32 +322,42 @@ def wip_restore(directory, host, fresh=False):
 
 
 def agent_bin(name):
-    # On the Mac, super.engineering's `claude` wrapper comes first on PATH; a.box runs the CLI itself.
-    real = HOME / ".local" / "bin" / name
-    if not ON_BOX and real.exists():
-        return str(real)
-    return shutil.which(name) or str(real)
+    # A host's `agent_bin_dirs` come first (on the Mac, super.engineering's `claude` wrapper is first on
+    # PATH; a.box runs the CLI itself).
+    for d in abxcfg.host().get("agent_bin_dirs") or []:
+        real = Path(abxcfg.expand(d)) / name
+        if real.exists():
+            return str(real)
+    return shutil.which(name) or str(HOME / ".local" / "bin" / name)
 
 
-def session_pids(chat_id):
-    """Claude processes (and their wrappers) running this session outside a.box."""
+def session_pids(chat):
+    """Processes of the chat's agent (its `process_names`, and their wrappers) running its session outside
+    a.box, by `process_session_pattern` ({session}: the session id)."""
+    agent = agent_def(chat)
+    session = session_of(chat)
+    names = agent.get("process_names") or []
+    pattern = agent.get("process_session_pattern")
+    if not (session and names and pattern):
+        return []
+    want = re.compile(pattern.replace("{session}", re.escape(session)))
     out = run(["ps", "-axo", "pid=,args="], capture_output=True, check=False).stdout
     pids = []
     for line in out.splitlines():
         pid, _, args = line.strip().partition(" ")
         words = args.split()[:2]
-        if any(w.endswith("/claude") or w == "claude" for w in words) and re.search(
-                rf"--(resume|session-id)[ =]{re.escape(chat_id)}\b", args):
+        if any(w == n or w.endswith("/" + n) for w in words for n in names) and want.search(args):
             pids.append(int(pid))
     return pids
 
 
 def close_in_super_engineering(chat):
-    """Close the super.engineering tab running this chat, the way its UI would."""
-    sc = HOME / ".super.engineering" / "bin" / "sc"
-    if not sc.exists() or not chat.get("dir"):
+    """Close the foreign tool's (super.engineering's) tab running this chat, the way its UI would."""
+    ft = abxcfg.foreign_tools()
+    sc = Path(abxcfg.expand(ft["sc_bin"])) if ft and ft.get("sc_bin") else None
+    if not sc or not sc.exists() or not chat.get("dir"):
         return
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("SUPER_ENGINEERING_", "SUPERCONDUCTOR_"))}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(tuple(ft.get("env_prefixes") or ()))}
 
     def call(*args):
         try:
@@ -374,33 +398,32 @@ def stop_elsewhere(chat):
     if not agent_def(chat).get("stop_elsewhere"):
         return
     # A process a.box just stopped takes a moment to exit.
-    deadline = time.time() + 5
-    while time.time() < deadline and session_pids(chat["id"]):
+    deadline = time.time() + option("stop_elsewhere_wait_secs", 5)
+    while time.time() < deadline and session_pids(chat):
         time.sleep(0.5)
-    if not session_pids(chat["id"]):
+    if not session_pids(chat):
         return
     close_in_super_engineering(chat)
     for sig in (None, signal.SIGTERM):
         if sig:
-            for pid in session_pids(chat["id"]):
+            for pid in session_pids(chat):
                 try:
                     os.kill(pid, sig)
                 except ProcessLookupError:
                     pass
-        deadline = time.time() + 15
-        while time.time() < deadline and session_pids(chat["id"]):
+        deadline = time.time() + option("stop_elsewhere_kill_secs", 15)
+        while time.time() < deadline and session_pids(chat):
             time.sleep(0.5)
-        if not session_pids(chat["id"]):
+        if not session_pids(chat):
             return
-    sys.exit(f"another process still runs session {chat['id']}: {session_pids(chat['id'])}")
+    sys.exit(f"another process still runs session {chat['id']}: {session_pids(chat)}")
 
 
 def launch(chat, resume, restore_from=None, wait_rc=True, fork_from=None):
     """fork_from: the source chat's session id."""
     agent = agent_def(chat)
     directory = ensure_worktree(chat, restore_from)
-    if agent.get("trust") == "claude":
-        trust_folder(directory)
+    trust_folder(agent, directory)
     name = tmux_name(chat)
     if tmux_alive(name):
         return
@@ -420,15 +443,18 @@ def launch(chat, resume, restore_from=None, wait_rc=True, fork_from=None):
          shlex.join(cmd)])
     chat["dir"] = str(directory)
     if wait_rc and agent.get("remote_control"):
-        chat["rc_url"] = wait_for_rc_url(name) or chat.get("rc_url")
+        chat["rc_url"] = wait_for_rc_url(name, pattern=agent.get("rc_url_pattern")) or chat.get("rc_url")
 
 
-def wait_for_rc_url(name, timeout=None):
-    """The claude.ai link Remote Control prints once the session connects."""
+def wait_for_rc_url(name, timeout=None, pattern=None):
+    """The link Remote Control prints once the session connects (the agent's `rc_url_pattern`), from the
+    pane's last `rc_scan_lines` lines."""
     deadline = time.time() + (timeout if timeout is not None else option("rc_url_wait_secs", 45))
+    pattern = pattern or AGENTS["claude"]["rc_url_pattern"]
     while time.time() < deadline:
-        pane = run(["tmux", "capture-pane", "-pt", name, "-S", "-200"], check=False, capture_output=True).stdout
-        m = re.findall(r"https://claude\.ai/code/session_[A-Za-z0-9]+", pane or "")
+        pane = run(["tmux", "capture-pane", "-pt", name, "-S", f"-{int(option('rc_scan_lines', 200))}"],
+                   check=False, capture_output=True).stdout
+        m = re.findall(pattern, pane or "")
         if m:
             return m[-1]
         time.sleep(1)
@@ -540,7 +566,7 @@ def agent_transcript_paths(chat):
         return []
     out, meta = [path], rollout_meta(path)
     parent = meta.get("forked_from_id")
-    while parent and len(out) < 50:
+    while parent and len(out) < int(option("fork_chain_max", 50)):
         found = rollout_of(chat, parent)
         if not found:
             break
@@ -558,19 +584,26 @@ def slug(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "chat"
 
 
+def chat_kinds():
+    return list(option("chat_kinds", ["orchestrator", "feature", "primary"]))
+
+
 def cmd_new(args):
     chat_id = str(uuid.uuid4())
+    if args.kind not in chat_kinds():
+        sys.exit(f"unknown kind {args.kind!r} (known: {', '.join(chat_kinds())})")
     if args.dir and not args.repo:
         args.repo = repo_of(args.dir)
-    args.repo = args.repo or "redo"
-    if args.kind == "orchestrator" and not args.branch:
-        # Like super.engineering, an orchestrator gets a blank worktree of its
-        # own; /ship-feature renames its branch when it takes it over.
-        args.branch = f"sc-{slug(args.name)}-{chat_id[:4]}"
+    args.repo = args.repo or default_repo()
+    if args.kind in option("branch_kinds", ["orchestrator"]) and not args.branch:
+        # Like super.engineering, an orchestrator gets a blank worktree of its own (`orchestrator_branch`:
+        # {slug} of its name, {id4} of its id); /ship-feature renames its branch when it takes it over.
+        args.branch = abxcfg.subst(option("orchestrator_branch", "sc-{slug}-{id4}"),
+                                   {"slug": slug(args.name), "id4": chat_id[:4], "id": chat_id})
     if args.branch:
         directory = None
     else:
-        directory = Path(args.dir).expanduser().resolve() if args.dir else PRIMARY[args.repo]
+        directory = Path(args.dir).expanduser().resolve() if args.dir else primary_of(args.repo)
     chat = {
         "id": chat_id,
         "name": args.name,
@@ -615,8 +648,7 @@ def cmd_fork(args):
     chat = {k: src.get(k) for k in ("kind", "parent", "feature", "repo", "branch", "base", "dir", "model", "agent")}
     chat.update({"id": chat_id, "name": args.name or f"{src['name']} (fork)", "host": HOST, "status": "running",
                  "created_at": now(), "forked_from": src["id"]})
-    if chat["kind"] == "orchestrator":
-        chat["kind"] = "feature"
+    chat["kind"] = (option("fork_kinds", {"orchestrator": "feature"}) or {}).get(chat["kind"], chat["kind"])
     if not session_of(src):
         sys.exit(f"{src['name']} has no conversation to fork yet")
     launch(chat, resume=False, wait_rc=False, fork_from=session_of(src))
@@ -653,6 +685,12 @@ def cmd_stop(args):
     set_status(find(args.chat), "stopped")
 
 
+def cmd_rename(args):
+    chat = find(args.chat)
+    old, chat["name"] = chat["name"], args.name
+    save(chat, f"chat rename: {old} -> {args.name}")
+
+
 def cmd_archive(args):
     set_status(find(args.chat), "archived")
 
@@ -673,9 +711,9 @@ def cmd_attach(args):
     os.execvp("tmux", ["tmux", "attach", "-t", tmux_name(find(args.chat))])
 
 
-def input_line(name):
-    """The text in Claude's input box (None when the prompt isn't showing)."""
-    prompt = option("prompt_char", "❯")
+def input_line(name, prompt=None):
+    """The text in the agent's input box (None when the prompt isn't showing)."""
+    prompt = prompt or option("prompt_char", "❯")
     pane = run(["tmux", "capture-pane", "-pt", name], check=False, capture_output=True).stdout or ""
     lines = [l for l in pane.splitlines() if l.strip().startswith(prompt)]
     return lines[-1].strip()[len(prompt):].strip() if lines else None
@@ -685,35 +723,56 @@ def cmd_send(args):
     """Type a message into a chat and submit it (a separate Enter, or the TUI treats the burst as a
     paste and doesn't submit). --wait first waits for an empty prompt (a chat that just started or
     resumed drops what's typed while it loads), and Enter is retried while the text still sits there."""
-    name = tmux_name(find(args.chat))
+    chat = find(args.chat)
+    name = tmux_name(chat)
+    prompt = agent_def(chat).get("prompt_char")
     if not tmux_alive(name):
         sys.exit("chat isn't running here")
     if args.wait:
         deadline = time.time() + args.wait
-        while time.time() < deadline and input_line(name) != "":
+        while time.time() < deadline and input_line(name, prompt) != "":
             time.sleep(1)
     run(["tmux", "send-keys", "-t", name, "-l", args.text])
     time.sleep(option("chat_send_pause_secs", 0.5))
     run(["tmux", "send-keys", "-t", name, "C-m"])
     for _ in range(option("send_enter_tries", 4) if args.wait else 0):
         time.sleep(option("send_enter_wait_ms", 350) / 1000)
-        line = input_line(name)
+        line = input_line(name, prompt)
         if not line or not args.text.startswith(line[:20]):
             return
         run(["tmux", "send-keys", "-t", name, "C-m"])
 
 
 
-BOX_SSH = os.environ.get("AGENT_BOX_SSH", "coder.tj-agents")
+def ssh_to(host):
+    """The ssh name that reaches a host (`hosts.HOST.ssh`; the box: the app's ssh_host); exits when none."""
+    target = abxcfg.ssh_of(host)
+    if not target:
+        sys.exit(f"the {label(HOST)} can't reach the {label(host)}: no ssh for it (set daemon.hosts.{host}.ssh)")
+    return target
 
 
-def on_box(*args):
-    """Run this script on the box; returns its stdout."""
-    remote = "$HOME/agent-box/bin/chat " + shlex.join(args)
-    out = run(["ssh", "-n", BOX_SSH, remote], check=False, capture_output=True)
-    if out.returncode != 0:
-        sys.exit(f"box: {out.stderr.strip() or out.stdout.strip()}")
-    return out.stdout
+def remote_tool(host, rel):
+    """A file of a host's agent-box checkout, for its shell."""
+    return f"{abxcfg.remote_path(abxcfg.agent_box_dir(host))}/{rel}"
+
+
+def endpoint(host, rel):
+    """rsync's name for a path under a host's home."""
+    return f"{HOME}/{rel}" if host == HOST else f"{ssh_to(host)}:{rel}"
+
+
+def sh_on(host, script, **kw):
+    """Run a shell snippet on a host (in its home)."""
+    if host == HOST:
+        return run(["bash", "-c", script], check=False, capture_output=True, cwd=str(HOME), **kw)
+    return run(["ssh"] + ([] if kw.get("input") is not None else ["-n"]) + [ssh_to(host), script],
+               check=False, capture_output=True, **kw)
+
+
+def local_end(src, dst):
+    if HOST not in (src, dst):
+        sys.exit(f"the {label(HOST)} can only copy to or from itself, not {label(src)} -> {label(dst)}")
 
 
 def release_here(chat):
@@ -740,13 +799,13 @@ def take_over(chat, directory):
 def prepare_here(chat, frm):
     if chat.get("branch"):
         return ensure_worktree(chat, restore_from=frm)
-    return PRIMARY[chat.get("repo", "redo")]
+    return primary_of(chat.get("repo") or default_repo())
 
 
 def real_dir(host, directory):
     """The folder with symlinks resolved, on its own machine (Claude Code files a session under that)."""
-    if host == "box" and HOST != "box":
-        out = run(["ssh", "-n", BOX_SSH, f"realpath -m {shlex.quote(str(directory))}"], check=False, capture_output=True)
+    if host != HOST:
+        out = sh_on(host, f"realpath -m {shlex.quote(str(directory))}")
         return out.stdout.strip().splitlines()[-1] if out.returncode == 0 and out.stdout.strip() else str(directory)
     return os.path.realpath(str(directory))
 
@@ -758,26 +817,18 @@ def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id):
     chat = load(chat_id)
     if chat and agent_def(chat).get("session") == "discovered":
         return copy_rollouts(src_host, dst_host, chat)
+    local_end(src_host, dst_host)
     src_real, dst_real = real_dir(src_host, src_dir), real_dir(dst_host, dst_dir)
     sources = [project_slug(src_real)] + ([project_slug(src_dir)] if project_slug(src_dir) != project_slug(src_real) else [])
     dst = f".claude/projects/{project_slug(dst_real)}/"
-    remote_dst = f"{BOX_SSH}:{dst}" if dst_host == "box" else f"{HOME}/{dst}"
-    if dst_host == "box":
-        run(["ssh", "-n", BOX_SSH, f"mkdir -p {shlex.quote(dst)}"], check=False, capture_output=True)
-    else:
-        (HOME / dst).mkdir(parents=True, exist_ok=True)
+    sh_on(dst_host, f"mkdir -p {shlex.quote(dst)}")
     for slug in sources:
         src = f".claude/projects/{slug}/"
-        remote_src = f"{BOX_SSH}:{src}" if src_host == "box" else f"{HOME}/{src}"
         run(["rsync", "-a", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
-             remote_src, remote_dst], check=False, capture_output=True)
-        if dst_host == "box":
-            arrived = run(["ssh", "-n", BOX_SSH, f"test -s {shlex.quote(dst + chat_id + '.jsonl')}"], check=False, capture_output=True).returncode == 0
-        else:
-            arrived = (HOME / dst / f"{chat_id}.jsonl").is_file()
-        if arrived:
+             endpoint(src_host, src), endpoint(dst_host, dst)], check=False, capture_output=True)
+        if sh_on(dst_host, f"test -s {shlex.quote(dst + chat_id + '.jsonl')}").returncode == 0:
             return
-    sys.exit(f"the conversation didn't copy to the {dst_host} (looked in {', '.join(sources)} on the {src_host})")
+    sys.exit(f"the conversation didn't copy to the {label(dst_host)} (looked in {', '.join(sources)} on the {label(src_host)})")
 
 
 def cmd__transcript_paths(args):
@@ -787,26 +838,18 @@ def cmd__transcript_paths(args):
 def copy_rollouts(src_host, dst_host, chat):
     """A Codex chat's rollouts (its own, the ones it forked from, its subagents') go to the same place
     under the other machine's home; the chat's own must arrive."""
+    local_end(src_host, dst_host)
     paths = json.loads(on_host(src_host, "_transcript_paths", chat["id"]) or "[]")
     if not paths:
-        sys.exit(f"no rollout for {chat['name']} on the {src_host}")
+        sys.exit(f"no rollout for {chat['name']} on the {label(src_host)}")
     src_home = home_of(src_host)
     rels = [os.path.relpath(p, src_home) for p in paths if p.startswith(src_home + "/")]
     for rel in rels:
-        parent = os.path.dirname(rel)
-        if dst_host == "box":
-            run(["ssh", "-n", BOX_SSH, f"mkdir -p {shlex.quote(parent)}"], check=False, capture_output=True)
-            run(["rsync", "-a", f"{HOME}/{rel}", f"{BOX_SSH}:{rel}"], check=False, capture_output=True)
-        else:
-            (HOME / parent).mkdir(parents=True, exist_ok=True)
-            run(["rsync", "-a", f"{BOX_SSH}:{rel}", f"{HOME}/{rel}"], check=False, capture_output=True)
+        sh_on(dst_host, f"mkdir -p {shlex.quote(os.path.dirname(rel) or '.')}")
+        run(["rsync", "-a", endpoint(src_host, rel), endpoint(dst_host, rel)], check=False, capture_output=True)
     main = rels[0] if rels else None
-    if dst_host == "box":
-        arrived = bool(main) and run(["ssh", "-n", BOX_SSH, f"test -s {shlex.quote(main)}"], check=False, capture_output=True).returncode == 0
-    else:
-        arrived = bool(main) and (HOME / main).is_file()
-    if not arrived:
-        sys.exit(f"{chat['name']}'s rollout didn't copy to the {dst_host}")
+    if not (main and sh_on(dst_host, f"test -s {shlex.quote(main)}").returncode == 0):
+        sys.exit(f"{chat['name']}'s rollout didn't copy to the {label(dst_host)}")
     # Its recorded rollout path belongs to the machine it left; the new one finds it by session id.
     chat.pop("transcript", None)
     save(chat, f"chat rollout copied: {chat['name']}", wait=True)
@@ -828,19 +871,16 @@ def adopt_worktree_branch(chat):
     save(chat, f"chat branch: {chat['name']} on {branch}", wait=True)
 
 
-SC_STORE = {"box": "sc.json", "mac": "sc-mac.json"}
-SHIM = {"mac": Path(__file__).resolve().parent.parent / "shim" / "sc", "box": "$HOME/agent-box/shim/sc"}
-
-
 def sc_on(host, *args, cwd=None):
     """Run the sc shim on a machine (in cwd, for the commands that act on the caller's worktree)."""
     if host == HOST:
-        out = run(["python3", str(SHIM[host]), *args, "--json"], cwd=cwd or str(HOME), capture_output=True, check=False)
+        shim = Path(__file__).resolve().parent.parent / "shim" / "sc"
+        out = run(["python3", str(shim), *args, "--json"], cwd=cwd or str(HOME), capture_output=True, check=False)
     else:
-        remote = (f"cd {shlex.quote(cwd)} && " if cwd else "") + f"python3 {SHIM[host]} " + shlex.join([*args, "--json"])
-        out = run(["ssh", "-n", BOX_SSH, remote], capture_output=True, check=False)
+        remote = (f"cd {shlex.quote(cwd)} && " if cwd else "") + f"python3 {remote_tool(host, 'shim/sc')} " + shlex.join([*args, "--json"])
+        out = run(["ssh", "-n", ssh_to(host), remote], capture_output=True, check=False)
     if out.returncode != 0:
-        raise SystemExit(f"sc {' '.join(args)} on the {host}: {(out.stderr or out.stdout).strip()}")
+        raise SystemExit(f"sc {' '.join(args)} on the {label(host)}: {(out.stderr or out.stdout).strip()}")
     try:
         return json.loads(out.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -849,7 +889,7 @@ def sc_on(host, *args, cwd=None):
 
 def sc_store(host):
     try:
-        data = json.loads((STATE_DIR / SC_STORE[host]).read_text())
+        data = json.loads((STATE_DIR / abxcfg.host(host)["sc_store"]).read_text())
     except (OSError, ValueError):
         data = {}
     data.setdefault("sections", [])
@@ -861,7 +901,11 @@ def on_host(host, *args):
     """Run this script's command on a machine; returns its stdout."""
     if host == HOST:
         return run([sys.executable, __file__, *args], capture_output=True).stdout
-    return on_box(*args)
+    out = run(["ssh", "-n", ssh_to(host), remote_tool(host, "bin/chat") + " " + shlex.join(args)], check=False,
+              capture_output=True)
+    if out.returncode != 0:
+        sys.exit(f"{label(host)}: {out.stderr.strip() or out.stdout.strip()}")
+    return out.stdout
 
 
 def cmd__paths(args):
@@ -874,7 +918,7 @@ def cmd__paths(args):
         branch = run(["git", "-C", p, "branch", "--show-current"], check=False, capture_output=True).stdout.strip() or None
         common = run(["git", "-C", p, "rev-parse", "--path-format=absolute", "--git-common-dir"], check=False, capture_output=True).stdout.strip()
         repo = repo_of(Path(common).parent) if common else None
-        if repo and os.path.realpath(str(PRIMARY[repo])) == os.path.realpath(p):
+        if repo and os.path.realpath(str(primary_of(repo))) == os.path.realpath(p):
             branch = None  # a chat in the main checkout uses the other machine's main checkout, no WIP
         out[p] = [os.path.realpath(p), branch, repo]
     print(json.dumps(out))
@@ -882,11 +926,11 @@ def cmd__paths(args):
 
 def cmd__prepare_wt(args):
     """Make (or reuse) the worktree for a branch here with frm's latest WIP; prints its folder."""
-    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    pull_state()
     if args.branch:
         directory = ensure_worktree({"branch": args.branch, "repo": args.repo}, restore_from=args.frm)
     else:
-        directory = PRIMARY[args.repo]
+        directory = primary_of(args.repo)
     print(json.dumps({"dir": str(directory)}))
 
 
@@ -910,7 +954,7 @@ def move_group(chat, scope):
     here = real.get(chat.get("dir"))
     if scope == "chat" or not here:
         i = info.get(chat.get("dir")) or [None, chat.get("branch"), chat.get("repo")]
-        return None, [(chat.get("dir"), chat.get("branch") or i[1], chat.get("repo") or i[2] or "redo", [chat])]
+        return None, [(chat.get("dir"), chat.get("branch") or i[1], chat.get("repo") or i[2] or default_repo(), [chat])]
     sid = store["worktrees"].get(here, {}).get("section") if scope == "section" else None
     section = next((s for s in store["sections"] if s["section_id"] == sid), None)
     folders = [here]
@@ -924,15 +968,17 @@ def move_group(chat, scope):
         path = next((p for p, r in real.items() if r == folder), folder)
         _, branch, repo = info.get(path, [None, None, None])
         branch = branch or next((c.get("branch") for c in mine if c.get("branch")), None)
-        repo = repo or next((c.get("repo") for c in mine if c.get("repo")), None) or "redo"
+        repo = repo or next((c.get("repo") for c in mine if c.get("repo")), None) or default_repo()
         groups.append((folder, branch, repo, mine))
     return section, groups
 
 
 def move_worktree(folder, branch, repo, chats, src, dst):
-    """Move one worktree's chats (or, with none, its WIP) from src to dst; returns its folder on dst."""
+    """Move one worktree's chats (or, with none, its WIP) from src to dst; returns its folder on dst.
+    One of them is this machine."""
+    local_end(src, dst)
     status = {c["id"]: c["status"] for c in chats}
-    if dst == "box":
+    if src == HOST:
         for c in chats:
             adopt_worktree_branch(c)
             # a.box's own process first, so only another program's copy (super.engineering) is left to stop.
@@ -940,26 +986,26 @@ def move_worktree(folder, branch, repo, chats, src, dst):
             stop_elsewhere(c)
         if not chats and branch:
             cmd__snapshot_dir(argparse.Namespace(dir=folder))
-        new = json.loads(on_box("_prepare_wt", repo, branch or "", src))["dir"]
+        new = json.loads(on_host(dst, "_prepare_wt", repo, branch or "", src))["dir"]
         for c in chats:
             copy_transcript(src, c["dir"], dst, new, c["id"])
-            on_box("_take", c["id"], new)
+            on_host(dst, "_take", c["id"], new)
             if status[c["id"]] == "stopped":
-                on_box("stop", c["id"])
+                on_host(dst, "stop", c["id"])
     else:
         for c in chats:
-            on_box("_release", c["id"])
+            on_host(src, "_release", c["id"])
         if not chats and branch:
-            on_box("_snapshot_dir", folder)
-        git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
-        new = str(ensure_worktree({"branch": branch, "repo": repo}, restore_from=src) if branch else PRIMARY[repo])
+            on_host(src, "_snapshot_dir", folder)
+        pull_state()
+        new = str(ensure_worktree({"branch": branch, "repo": repo}, restore_from=src) if branch else primary_of(repo))
         for c in chats:
             c = find(c["id"])
             copy_transcript(src, folder, dst, new, c["id"])
             take_over(c, Path(new))
             if status[c["id"]] == "stopped":
                 set_status(find(c["id"]), "stopped")
-    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    pull_state()
     return new
 
 
@@ -967,19 +1013,21 @@ def put_back(chats, src):
     """After a failed move: the chats run where they were."""
     for c in chats:
         try:
-            if src == "box":
-                on_box("start", c["id"])
+            if src != HOST:
+                on_host(src, "start", c["id"])
             else:
-                git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+                pull_state()
                 cmd_start(argparse.Namespace(chat=c["id"]))
         except (SystemExit, subprocess.CalledProcessError) as err:
-            print(f"couldn't restart {c['name']} on the {src}: {err}", file=sys.stderr)
+            print(f"couldn't restart {c['name']} on the {label(src)}: {err}", file=sys.stderr)
 
 
 def home_of(host):
     if host == HOST:
         return str(HOME)
-    return run(["ssh", "-n", BOX_SSH, "echo $HOME"], capture_output=True).stdout.strip().splitlines()[-1]
+    if abxcfg.host(host).get("home"):
+        return abxcfg.host(host)["home"]
+    return run(["ssh", "-n", ssh_to(host), "echo $HOME"], capture_output=True).stdout.strip().splitlines()[-1]
 
 
 REWRITE = r"""
@@ -1005,29 +1053,26 @@ for root in roots:
 
 def sync_files(src, dst, moved):
     """Copy the `move_sync_paths` folders (the factory skills' ledgers) to dst, newer files winning, and
-    point the copies at dst's folders: each moved worktree's new path, then dst's home for src's."""
+    point the copies at dst's folders: each moved worktree's new path, then `path_aliases`, then dst's home
+    for src's."""
     roots = [r for r in option("move_sync_paths", ["~/.local/state/redo/", "~/.factory/", "~/.config/redo/"]) if r]
     if not roots:
         return
+    local_end(src, dst)
     homes = {src: home_of(src), dst: home_of(dst)}
     for root in roots:
         rel = root.removeprefix("~/").rstrip("/") + "/"
-        local = f"{HOME}/{rel}"
-        remote = f"{BOX_SSH}:{rel}"
-        frm, to = (local, remote) if dst == "box" else (remote, local)
-        if not (HOME / rel).exists() and dst == "box":
+        if src == HOST and not (HOME / rel).exists():
             continue
-        if dst == "box":
-            run(["ssh", "-n", BOX_SSH, f"mkdir -p {shlex.quote(rel)}"], check=False, capture_output=True)
-        else:
-            (HOME / rel).mkdir(parents=True, exist_ok=True)
-        run(["rsync", "-a", "--update", frm, to], check=False, capture_output=True)
-    pairs = sorted(moved.items(), key=lambda kv: -len(kv[0])) + [(homes[src] + "/", homes[dst] + "/")]
+        sh_on(dst, f"mkdir -p {shlex.quote(rel)}")
+        run(["rsync", "-a", "--update", endpoint(src, rel), endpoint(dst, rel)], check=False, capture_output=True)
+    pairs = sorted(moved.items(), key=lambda kv: -len(kv[0]))
+    pairs += [(a + "/", b + "/") for a, b in abxcfg.alias_pairs(src, dst, homes[src], homes[dst])]
     payload = json.dumps([roots, [list(p) for p in pairs if p[0] != p[1]]])
     if dst == HOST:
         run([sys.executable, "-c", REWRITE], input=payload, check=False)
     else:
-        run(["ssh", BOX_SSH, "python3 -c " + shlex.quote(REWRITE)], input=payload, check=False, capture_output=True)
+        sh_on(dst, "python3 -c " + shlex.quote(REWRITE), input=payload)
 
 
 def move_section(section, src, dst, moved, labels):
@@ -1044,16 +1089,6 @@ def move_section(section, src, dst, moved, labels):
             sc_on(dst, "worktree", "set-label", new, labels[old])
     if not option("move_keep_section", False):
         sc_on(src, "section", "delete", section["section_id"])
-
-
-def wt_bin():
-    found = shutil.which("wt")
-    if found:
-        return found
-    for p in (WT, HOME / "dev" / "redo-monorepo-worktrees" / "bin" / "wt"):
-        if Path(p).is_absolute() and Path(p).exists():
-            return str(p)
-    return None
 
 
 SAVED_CHECK = r"""
@@ -1084,7 +1119,7 @@ def cmd__drop_worktree(args):
     path = os.path.realpath(args.dir)
     common = run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"], check=False, capture_output=True).stdout.strip()
     repo = repo_of(Path(common).parent) if common else None
-    if not repo or os.path.realpath(str(PRIMARY[repo])) == path:
+    if not repo or os.path.realpath(str(primary_of(repo))) == path:
         print(f"kept {path}: not a worktree of a known repo")
         return
     if any(c["host"] == HOST and c["status"] != "archived" and c.get("dir") and os.path.realpath(c["dir"]) == path for c in all_chats()):
@@ -1094,12 +1129,15 @@ def cmd__drop_worktree(args):
         print(f"kept {path}: it has work that isn't in the snapshot the other machine got")
         return
     branch = run(["git", "-C", path, "branch", "--show-current"], check=False, capture_output=True).stdout.strip()
-    primary = str(PRIMARY[repo])
-    wt = wt_bin() if repo == "redo" else None
-    listed = wt and path in run([wt, "list"], check=False, capture_output=True, env=dict(os.environ, WT_PRIMARY=primary, WT_BASE=str(WORKTREES))).stdout
-    if listed:
-        out = run([wt, "remove", path, "--force"] + (["--purge-cache"] if args.mode == "delete" else []), check=False, capture_output=True,
-                  env=dict(os.environ, WT_PRIMARY=primary, WT_BASE=str(WORKTREES)))
+    primary = str(primary_of(repo))
+    tool = abxcfg.worktree_tool(repo)
+    values = {"path": path, "branch": branch, "force": "--force"}
+    env = abxcfg.tool_env(repo, tool, **values) if tool else None
+    listing = abxcfg.tool_argv(repo, tool, "list", **values) if tool else None
+    listed = listing and path in run(listing, check=False, capture_output=True, env=env).stdout
+    argv = tool and abxcfg.tool_argv(repo, tool, "delete" if args.mode == "delete" else "remove", **values)
+    if listed and argv:
+        out = run(argv, check=False, capture_output=True, env=env)
     else:
         out = run(["git", "-C", primary, "worktree", "remove", "--force", path], check=False, capture_output=True)
     if out.returncode != 0 or os.path.exists(path):
@@ -1113,7 +1151,7 @@ def leave_behind(src, folders):
     """What happens to the worktrees a finished move left on src (move_leftovers): keep, hide (from the
     sidebar; the project menu shows them again), remove or delete (see cmd__drop_worktree)."""
     mode = option("move_leftovers", "hide")
-    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    pull_state()
     in_use = {c["dir"] for c in all_chats() if c["host"] == src and c["status"] != "archived" and c.get("dir")}
     for folder in folders:
         if mode == "hide" and (folder in in_use or os.path.realpath(folder) in {os.path.realpath(d) for d in in_use}):
@@ -1121,11 +1159,11 @@ def leave_behind(src, folders):
         try:
             if mode == "hide":
                 run([str(Path(__file__).parent / "abx"), "do", json.dumps({"do": "state.set", "key": f"hidden:{folder}", "value": True})],
-                    check=False, capture_output=True, timeout=15)
+                    check=False, capture_output=True, timeout=option("abx_call_secs", 15))
             elif mode in ("remove", "delete"):
                 print(on_host(src, "_drop_worktree", folder, mode).strip())
         except (SystemExit, subprocess.CalledProcessError, subprocess.TimeoutExpired) as err:
-            print(f"left {folder} on the {src}: {err}", file=sys.stderr)
+            print(f"left {folder} on the {label(src)}: {err}", file=sys.stderr)
 
 
 def is_orchestrator(chat):
@@ -1142,8 +1180,7 @@ def note_moved(chats, src, dst, section, moved):
     if not text:
         return
     paths = "; ".join(f"{a} -> {b}" for a, b in moved.items() if a != b) or "unchanged"
-    names = {"mac": "Mac", "box": "box"}
-    text = text.replace("{from}", names.get(src, src)).replace("{to}", names.get(dst, dst)).replace("{section}", section["name"] if section else "").replace("{paths}", paths)
+    text = text.replace("{from}", label(src)).replace("{to}", label(dst)).replace("{section}", section["name"] if section else "").replace("{paths}", paths)
     for c in chats:
         if is_orchestrator(c) and c["status"] == "running":
             try:
@@ -1153,13 +1190,19 @@ def note_moved(chats, src, dst, section, moved):
 
 
 def cmd_move(args):
-    if HOST != "mac":
-        sys.exit("run moves from the Mac (it can reach the box; the box can't reach it)")
-    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    pull_state()
     chat = find(args.chat)
     src, dst = chat["host"], args.to
+    if dst not in abxcfg.hosts():
+        sys.exit(f"unknown host {dst!r} (known: {', '.join(abxcfg.hosts())})")
     if src == dst:
-        sys.exit(f"{chat['name']} is already on {dst}")
+        sys.exit(f"{chat['name']} is already on the {label(dst)}")
+    if HOST not in (src, dst):
+        # Neither end is here: the source runs it (it reaches the destination or says it can't).
+        print(on_host(src, "move", chat["id"], "--to", dst, *(["--scope", args.scope] if args.scope else []),
+                      *(["--dry-run"] if args.dry_run else [])), end="")
+        return
+    ssh_to(dst if src == HOST else src)
     scope = args.scope or option("move_together", "section")
     section, groups = move_group(chat, scope)
     if args.dry_run:
@@ -1180,66 +1223,83 @@ def cmd_move(args):
                     move_worktree(moved[f], b, r, [find(c["id"]) for c in cs], dst, src)
                 except (SystemExit, subprocess.CalledProcessError) as back:
                     print(f"couldn't move {f} back to the {src}: {back}", file=sys.stderr)
-            sys.exit(f"move failed, left on the {src}: {err}")
+            sys.exit(f"move failed, left on the {label(src)}: {err}")
     every = [c for *_, cs in groups for c in cs]
     if section or any(is_orchestrator(c) for c in every):
         sync_files(src, dst, moved)
     if section:
         move_section(section, src, dst, moved, labels)
     note_moved(every, src, dst, section, moved)
-    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    pull_state()
     leave_behind(src, [f for f, b, *_ in groups if b and f])
     what = f"section {section['name']}" if section else chat["name"]
-    print(f"moved {what} to the {dst}: {len(every)} chat(s), {len(groups)} worktree(s)")
+    print(f"moved {what} to the {label(dst)}: {len(every)} chat(s), {len(groups)} worktree(s)")
     for a, b in moved.items():
         print(f"  {a} -> {b}")
 
 
 def cmd__release(args):
-    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    pull_state()
     chat = find(args.chat)
     release_here(chat)
     print(json.dumps({"dir": chat["dir"]}))
 
 
 def cmd__prepare(args):
-    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    pull_state()
     print(json.dumps({"dir": str(prepare_here(find(args.chat), args.frm))}))
 
 
 def cmd__take(args):
-    git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+    pull_state()
     take_over(find(args.chat), Path(args.dir))
 
 
 def cmd_test_local(args):
-    """Check a branch out on the Mac with the box's latest WIP, for manual
-    testing; the chat (or dispatcher leg) working on it stays on the box.
-    Takes a chat, or --branch for a leg that has no chat of its own."""
-    if HOST != "mac":
-        sys.exit("run this on the Mac")
+    """Check a branch out here with another machine's latest WIP, for manual testing; the chat (or
+    dispatcher leg) working on it stays where it is. Takes a chat, or --branch for a leg that has no chat
+    of its own (its WIP from --from, default the other machine)."""
     if args.branch:
-        chat = {"branch": args.branch, "repo": "redo", "host": "box"}
-        on_box("_snapshot_branch", args.branch)
+        frm = args.frm or abxcfg.remote_host()
+        if not frm:
+            sys.exit("no other machine to take the WIP from (--from HOST)")
+        chat = {"branch": args.branch, "repo": args.repo or default_repo(), "host": frm}
+        on_host(frm, "_snapshot_branch", args.branch)
     else:
-        git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+        pull_state()
         chat = find(args.chat)
         if not chat.get("branch"):
             sys.exit("this chat has no branch to check out")
-        if chat["host"] == "box":
-            on_box("_snapshot", chat["id"])
-    directory = ensure_worktree(chat, restore_from=chat["host"])
-    print(f"{directory}\nStart its stack with: wt start {chat['branch']} -d")
+        if chat["host"] != HOST:
+            on_host(chat["host"], "_snapshot", chat["id"])
+    directory = ensure_worktree(chat, restore_from=chat["host"] if chat["host"] != HOST else None)
+    print(directory)
+    start = stack_argv(chat)
+    if start:
+        print(f"Start its stack with: {shlex.join(start)}")
+
+
+def stack_argv(chat):
+    """The repo's worktree_tool `start` for the chat's branch, or None."""
+    repo = chat.get("repo") or default_repo()
+    tool = abxcfg.worktree_tool(repo)
+    if not tool or not chat.get("branch"):
+        return None
+    return abxcfg.tool_argv(repo, tool, "start", branch=chat["branch"], path=str(worktree_dir(chat)))
 
 
 def cmd__snapshot_branch(args):
-    """Snapshot whichever box worktree has this branch checked out."""
-    out = run(["git", "-C", str(PRIMARY["redo"]), "worktree", "list", "--porcelain"], capture_output=True).stdout
+    """Snapshot whichever worktree here has this branch checked out."""
     path = None
-    for block in out.split("\n\n"):
-        lines = dict(line.split(" ", 1) for line in block.splitlines() if " " in line)
-        if lines.get("branch") == f"refs/heads/{args.branch}":
-            path = lines.get("worktree")
+    for repo in abxcfg.repos():
+        checkout = abxcfg.primary(repo)
+        if not checkout or not checkout.exists():
+            continue
+        out = run(["git", "-C", str(checkout), "worktree", "list", "--porcelain"], capture_output=True, check=False).stdout
+        for block in out.split("\n\n"):
+            lines = dict(line.split(" ", 1) for line in block.splitlines() if " " in line)
+            if lines.get("branch") == f"refs/heads/{args.branch}":
+                path = lines.get("worktree")
     if not path:
         return
     queue = AGENT_HOME / "queue"
@@ -1259,14 +1319,92 @@ def cmd__snapshot(args):
 
 def cmd_stack_start(args):
     chat = find(args.chat)
-    if HOST != "mac" or not chat.get("branch"):
-        sys.exit("stacks start on the Mac, for a chat with a branch")
-    os.execvp(str(WT), [str(WT), "start", chat["branch"], "-d"])
+    if not abxcfg.host().get("stacks"):
+        sys.exit(f"stacks don't run on the {label(HOST)} (daemon.hosts.{HOST}.stacks)")
+    argv = stack_argv(chat)
+    if not argv:
+        sys.exit("this chat has no branch, or its repo's worktree_tool has no `start`")
+    tool = abxcfg.worktree_tool(chat.get("repo") or default_repo())
+    os.execvpe(argv[0], argv, abxcfg.tool_env(chat.get("repo") or default_repo(), tool, branch=chat["branch"]))
+
+
+def backup_roots():
+    """(agent transcripts_root, backup_dir) for each agent whose transcripts sync-worker backs up."""
+    out = {}
+    for name, a in agents().items():
+        root, dest = a.get("transcripts_root"), a.get("backup_dir")
+        if root and dest and a.get("backup", True):
+            out.setdefault(abxcfg.expand(root).rstrip("/"), dest)
+    return list(out.items())
+
+
+def cmd__agent(args):
+    """The agent's definition, its hooks_file resolved (under $<hooks_home_env> when that's set)."""
+    a = dict(agents().get(args.name) or {})
+    if a.get("hooks_file"):
+        home = os.environ.get(a.get("hooks_home_env") or "")
+        a["hooks_file"] = os.path.join(home, os.path.basename(a["hooks_file"])) if home else abxcfg.expand(a["hooks_file"])
+    print(json.dumps(a))
+
+
+def cmd__backup_roots(args):
+    for root, dest in backup_roots():
+        print(f"{root}\t{dest}")
+
+
+def cmd__backup_paths(args):
+    """root, backup_dir, path under root: the transcripts of the chats that live here (running or moving)."""
+    roots = backup_roots()
+    for chat in all_chats():
+        if chat.get("host", "box") != HOST or chat.get("status") not in ("running", "moving"):
+            continue
+        for p in agent_transcript_paths(chat):
+            for root, dest in roots:
+                if str(p).startswith(root + "/"):
+                    print(f"{root}\t{dest}\t{os.path.relpath(p, root)}")
+                    break
+
+
+def cmd__wip_list(args):
+    """Every host's WIP snapshots on its sessions branch (for one worktree with --path), as JSON."""
+    sessions = AGENT_HOME / "sessions"
+    want = wip_key(args.path) if args.path else None
+    if args.path and not want:
+        sys.exit(f"not on a branch with an origin: {args.path}")
+    out = []
+    for hid in abxcfg.hosts():
+        branch = abxcfg.host(hid)["sessions_branch"]
+        ref = f"refs/abx/{branch}"
+        if run(["git", "-C", str(sessions), "fetch", "-q", "origin", f"+refs/heads/{branch}:{ref}"],
+               check=False, capture_output=True).returncode != 0:
+            continue
+        names = run(["git", "-C", str(sessions), "ls-tree", "-r", "--name-only", ref, "--", "wip/"],
+                    check=False, capture_output=True).stdout.split()
+        for name in (n for n in names if n.endswith(".json")):
+            try:
+                meta = json.loads(run(["git", "-C", str(sessions), "show", f"{ref}:{name}"], capture_output=True).stdout)
+            except (subprocess.CalledProcessError, ValueError):
+                continue
+            key = name[len("wip/"):-len(".json")]
+            if want and key != want:
+                continue
+            out.append({**meta, "host": meta.get("host") or hid, "key": key})
+    print(json.dumps(out, indent=2))
+
+
+def wip_key(path):
+    """A worktree's WIP key, as env.sh's wip_key: <origin's repo name>/<branch, / as ~>."""
+    git = lambda *a: run(["git", "-C", str(path), *a], check=False, capture_output=True).stdout.strip()  # noqa: E731
+    branch, origin = git("symbolic-ref", "--quiet", "--short", "HEAD"), git("remote", "get-url", "origin")
+    if not branch or not origin:
+        return None
+    return f"{os.path.basename(origin.removesuffix('.git'))}/{branch.replace('/', '~')}"
+
 
 def cmd_supervise(args):
     """Keep every running chat on this host alive; runs forever."""
     while True:
-        git_state("pull", "-q", "--rebase", "--autostash", "origin", "state", check=False)
+        pull_state()
         for chat in all_chats():
             if chat["host"] != HOST or chat["status"] != "running":
                 continue
@@ -1291,10 +1429,10 @@ def main():
 
     n = sub.add_parser("new", help="start a chat")
     n.add_argument("name")
-    n.add_argument("--kind", default="feature", choices=["orchestrator", "feature", "primary"])
-    n.add_argument("--branch", help="run in this branch's worktree (created with wt)")
-    n.add_argument("--base", help="new branch starts from origin/<base> instead of main")
-    n.add_argument("--repo", choices=list(PRIMARY), help="default: the --dir's repo, else redo")
+    n.add_argument("--kind", default="feature", help=f"one of option chat_kinds ({', '.join(chat_kinds())})")
+    n.add_argument("--branch", help="run in this branch's worktree (made by the repo's worktree_tool)")
+    n.add_argument("--base", help="new branch starts from origin/<base> instead of the default branch")
+    n.add_argument("--repo", choices=list(abxcfg.repos()), help="default: the --dir's repo, else option default_repo")
     n.add_argument("--dir", help="no branch: run here (default: the primary checkout)")
     n.add_argument("--parent", help="orchestrator chat id")
     n.add_argument("--feature", help="feature slug for grouping")
@@ -1318,25 +1456,33 @@ def main():
         s.add_argument("chat", help="id prefix or name")
         s.set_defaults(fn=fn)
 
+    rn = sub.add_parser("rename", help="rename a chat")
+    rn.add_argument("chat")
+    rn.add_argument("name")
+    rn.set_defaults(fn=cmd_rename)
+
     se = sub.add_parser("send", help="type a message into a running chat")
     se.add_argument("chat")
     se.add_argument("text")
     se.add_argument("--wait", type=float, default=0, help="first wait up to this many seconds for an empty prompt")
     se.set_defaults(fn=cmd_send)
 
-    mv = sub.add_parser("move", help="move a chat, with its worktree or whole section, between the box and the Mac (run on the Mac)")
+    mv = sub.add_parser("move", help="move a chat, with its worktree or whole section, to another machine "
+                                     "(run where one end can reach the other over ssh)")
     mv.add_argument("chat")
-    mv.add_argument("--to", required=True, choices=["box", "mac"])
+    mv.add_argument("--to", required=True, help=f"a host id ({', '.join(abxcfg.hosts())})")
     mv.add_argument("--scope", choices=["section", "worktree", "chat"], help="what moves with it (default: option move_together)")
     mv.add_argument("--dry-run", action="store_true", help="print what would move")
     mv.set_defaults(fn=cmd_move)
 
-    tl = sub.add_parser("test-local", help="check the chat's branch out on the Mac with its WIP")
+    tl = sub.add_parser("test-local", help="check the chat's branch out here with its WIP")
     tl.add_argument("chat", nargs="?")
     tl.add_argument("--branch", help="a dispatcher leg's branch instead of a chat")
+    tl.add_argument("--repo", help="the --branch's repo (default: option default_repo)")
+    tl.add_argument("--from", dest="frm", help="the host with the --branch's WIP (default: the other machine)")
     tl.set_defaults(fn=cmd_test_local)
 
-    ss = sub.add_parser("stack-start", help="start the chat branch's local stack (wt start -d)")
+    ss = sub.add_parser("stack-start", help="start the chat branch's local stack (its worktree_tool `start`)")
     ss.add_argument("chat")
     ss.set_defaults(fn=cmd_stack_start)
 
@@ -1369,6 +1515,14 @@ def main():
     h = sub.add_parser("_snapshot_dir")
     h.add_argument("dir")
     h.set_defaults(fn=cmd__snapshot_dir)
+    h = sub.add_parser("_agent", help="an agent's merged definition, as JSON")
+    h.add_argument("name")
+    h.set_defaults(fn=cmd__agent)
+    for name, fn in [("_backup_roots", cmd__backup_roots), ("_backup_paths", cmd__backup_paths)]:
+        sub.add_parser(name).set_defaults(fn=fn)
+    h = sub.add_parser("_wip_list")
+    h.add_argument("--path")
+    h.set_defaults(fn=cmd__wip_list)
     h = sub.add_parser("_take")
     h.add_argument("chat")
     h.add_argument("dir")

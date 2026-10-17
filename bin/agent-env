@@ -1,24 +1,11 @@
 #!/usr/bin/env bash
-# agent-env <command...>: run a command with the box's agent secrets loaded
-# (the Cursor key) and agent-box tools on PATH.
-set -a
-[ -f "$HOME/.config/agent-box/secrets.env" ] && . "$HOME/.config/agent-box/secrets.env"
-set +a
-if [ -n "${CODER_AGENT_URL:-}" ]; then
-  # shim/sc: super.engineering's CLI, backed by git worktrees and the registry.
-  export PATH="$HOME/agent-box/shim:$HOME/redo-monorepo-worktrees/bin:$HOME/.local/bin:$PATH"
-  export WT_PRIMARY="$HOME/dev/redo" WT_BASE="$HOME/dev/redo-worktrees"
-  export REDO_GITLAB_USER_AUTH=1
+# agent-env <command...>: run a command with this machine's agent environment (option agent_env and
+# hosts.HOST.agent_env / env: the secrets file, PATH additions such as shim/sc, variables to set, the
+# session markers to drop that a tmux server started inside another Claude Code or super.engineering
+# session passes on, so the agent doesn't act as its child; auth stays).
+if setup=$(python3 "$(dirname "$0")/abxcfg.py" agent-env 2> /dev/null); then
+  eval "$setup"
+else
+  echo "agent-env: couldn't read the agent-box settings; running without them" >&2
 fi
-# Drop the session markers a tmux server started inside another Claude Code or
-# super.engineering session passes on (Claude would act as its child); keep auth.
-unset CLAUDECODE CLAUDE_PID CLAUDE_EFFORT AI_AGENT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION \
-  CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN \
-  CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_TUI_JUST_SWITCHED
-for v in $(compgen -e); do
-  case $v in SUPER_ENGINEERING_* | SUPERCONDUCTOR_*) unset "$v" ;; esac
-done
-# super.engineering's `claude` wrapper would otherwise shadow the real one.
-PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$HOME/.super.engineering/bin" | paste -sd: -)
-export PATH
 exec "$@"
