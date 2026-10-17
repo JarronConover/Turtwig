@@ -397,7 +397,7 @@
                   "type": "box",
                   "style": { "position": "relative" },
                   "children": [
-                    { "type": "IconButton", "id": "designer-history-button", "props": { "icon": "rotate-ccw-clock", "tooltip": "Earlier designer conversations", "do": [{ "do": "state.toggle", "key": "designer_history_open" }, "designer.history"] } },
+                    { "type": "IconButton", "id": "designer-history-button", "layer": "{{ if .state.designer_history_open then \"above\" else \"\" end }}", "props": { "icon": "rotate-ccw-clock", "tooltip": "Earlier designer conversations", "do": [{ "do": "state.toggle", "key": "designer_history_open" }, "designer.history"] } },
                     {
                       "if": ".state.designer_history_open and (.app.dragging | not)",
                       "type": "box", "layer": "top",
@@ -754,7 +754,7 @@
           "type": "box",
           "style": { "position": "relative" },
           "children": [
-            { "type": "IconButton", "id": "history-button", "props": { "icon": "clock", "size": 26, "tooltip": "History: past and closed chats on every machine", "do": [{ "do": "state.toggle", "key": "history_open" }, "history.load"] } },
+            { "type": "IconButton", "id": "history-button", "layer": "{{ if .state.history_open then \"above\" else \"\" end }}", "props": { "icon": "clock", "size": 26, "tooltip": "History: past and closed chats on every machine", "do": [{ "do": "state.toggle", "key": "history_open" }, "history.load"] } },
             {
               "if": ".state.history_open and (.app.dragging | not)",
               "type": "box",
@@ -1023,7 +1023,7 @@
           "type": "row",
           "style": { "position": "relative", "padding": [0, 4], "align": "center", "shrink": 0 },
           "children": [
-            { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
+            { "type": "IconButton", "id": "chat-history-button", "layer": "{{ if .state.chat_history_open then \"above\" else \"\" end }}", "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
             {
               "if": ".state.chat_history_open and (.app.dragging | not)",
               "type": "box",
@@ -1366,6 +1366,7 @@
         {
           "id": "usage-cost-pill",
           "type": "row",
+          "layer": "{{ if .state.usage_cost_open then \"above\" else \"\" end }}",
           "style": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "align": "center", "font_size": 12.5, "font_family": "@font_mono", "cursor": "pointer", "hover": { "background": "@hover" } },
           "tooltip": "What this worktree's chats cost",
           "on": { "click": [{ "do": "state.toggle", "key": "usage_cost_open" }, { "do": "state.set", "key": "usage_plan_open", "value": false }] },
@@ -1431,7 +1432,7 @@
       "style": { "position": "relative" },
       "children": [
         {
-          "type": "IconButton", "id": "usage-plan-button",
+          "type": "IconButton", "id": "usage-plan-button", "layer": "{{ if .state.usage_plan_open then \"above\" else \"\" end }}",
           "props": {
             "icon_size": 18, "icon_color": "{{ {\"danger\": \"@danger\", \"warning\": \"@warning\", \"ok\": \"@success\"}[.usage.plan.meter.level] // \"@text_muted\" }}",
             "icon": "{{ .usage.plan.meter.icon // \"circle-gauge\" }}", "size": 26,
@@ -1944,7 +1945,9 @@
 
   // The window: title, starting size, the traffic lights' position, and the component kit's look
   // ("dark" | "light" | "system"; the app's own colors are `theme`). Read at launch.
-  "window": { "title": "a.box", "width": 1500, "height": 940, "traffic_lights": { "x": 20, "y": 15 }, "appearance": "dark" },
+  // native_titlebar: let macOS drag and zoom the window from the top strip itself (it then zooms on any
+  // double click there, buttons included); off, the header rows' window.move / window.zoom do it.
+  "window": { "title": "a.box", "width": 1500, "height": 940, "traffic_lights": { "x": 20, "y": 15 }, "appearance": "dark", "native_titlebar": false },
 
   // Words the app shows that aren't in the layout above. {name} parts are filled in.
   "strings": {

@@ -572,7 +572,8 @@ impl Workspace {
             }
         }
         let mut el = el.children(content).children(kids);
-        if obj.get("layer").and_then(Value::as_str) == Some("top") || obj.get("occlude").and_then(Value::as_bool) == Some(true) {
+        let layer = obj.get("layer").map(|l| value_text(&self.exprs.resolve(l, ctx))).unwrap_or_default();
+        if layer == "top" || obj.get("occlude").and_then(Value::as_bool) == Some(true) {
             el = el.occlude();
         }
         let el: AnyElement = if let Some(Value::Array(menu)) = obj.get("menu") {
@@ -592,9 +593,12 @@ impl Workspace {
         };
         let moves = self.motion.borrow().enabled && obj.get("motion").and_then(Value::as_bool) != Some(false);
         let el = if moves { crate::ui::motion::Motion::new(id, el, self.motion.clone()).into_any_element() } else { el };
-        // "layer": "top" paints the node above everything else (popovers, dialogs) and keeps clicks off what's under it.
-        if obj.get("layer").and_then(Value::as_str) == Some("top") {
-            return vec![deferred(el).with_priority(1).into_any_element()];
+        // "layer": "top" paints the node above everything else (popovers, dialogs) and keeps clicks off what's under it;
+        // "above" goes over that too (the button that opened a popover stays a button while it's open).
+        match layer.as_str() {
+            "top" => return vec![deferred(el).with_priority(1).into_any_element()],
+            "above" => return vec![deferred(el).with_priority(2).into_any_element()],
+            _ => {}
         }
         vec![el]
     }

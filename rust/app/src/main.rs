@@ -34,6 +34,10 @@ fn open_main(cx: &mut App) {
             traffic_light_position: Some(point(px(light("x", 20.)), px(light("y", 15.)))),
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(num("width", 1500.)), px(num("height", 940.))), cx))),
+        // The app drags and zooms the window itself (window.move / window.zoom on its header rows); left to AppKit,
+        // a double click anywhere in the titlebar strip zooms, buttons included. window.native_titlebar: true
+        // hands the strip back to AppKit.
+        app_owns_titlebar_drag: window_setting("native_titlebar").and_then(|v| v.as_bool()) != Some(true),
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| workspace::Workspace::new(window, cx)))
