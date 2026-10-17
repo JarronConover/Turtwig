@@ -11,7 +11,7 @@ mkdir -p "$(dirname "$settings")"
 [ -s "$settings" ] || echo '{}' > "$settings"
 tmp=$(mktemp)
 boxd="$AGENT_BOX_DIR/rust/target/release/agent-boxd"
-events=$(cfg agents | jq -c '.claude.hook_events // empty' 2> /dev/null)
+events=$(python3 "$AGENT_BOX_DIR/bin/chat" _agent claude 2> /dev/null | jq -c '.hook_events // empty' 2> /dev/null)
 [ -n "$events" ] || events='["UserPromptSubmit","PreToolUse","PostToolUse","Notification","PermissionRequest","Stop","SubagentStop","SessionStart","SessionEnd"]'
 overlay=$(cfg claude_settings 2> /dev/null)
 if [ -z "$overlay" ] || [ "$overlay" = null ]; then

@@ -153,9 +153,8 @@ pub(crate) fn parse_remote(url: &str) -> Option<(String, String)> {
     Some((host.to_string(), path.trim_start_matches('/').to_string()))
 }
 
-/** The newest merge request for a branch from the repo's forge: `repos.REPO.forge` (else option `forge`, else
-github for a github.com origin, gitlab otherwise): "gitlab" (glab), "github" (gh), "command" (`forge_cmd`, argv
-with {project} {branch} {path} {repo}, printing a MergeRequest as JSON), or "none". */
+/** The branch's newest MR from `repos.REPO.forge` / `forge` (default: github for a github.com origin, else gitlab):
+"gitlab" (glab), "github" (gh), "command" (`forge_cmd` argv, {project} {branch} {path} {repo}, prints one), "none". */
 fn fetch_mr(repo: &str, branch: &str, path: &str) -> Option<MergeRequest> {
     let conf = hosts::repos().get(repo).cloned().unwrap_or(Value::Null);
     let s = |k: &str| conf.get(k).and_then(Value::as_str).map(str::to_string).or_else(|| config::get(k)?.as_str().map(str::to_string));
