@@ -23,7 +23,12 @@ full at the end of this file. Change anything by overriding it in your settings 
 - The designer (the palette button at the top left, ⌘⇧D) is a chat with an agent that edits this file
   while you watch. Each request first snapshots the file into `history/`; `settings.undo` restores.
 - Scripts and agents can drive the app: write an action (or a list of actions) to `run.json` next to
-  the settings file; the app runs it once and deletes the file.
+  the settings file, or to `run.d/<id>.json` (any number at once, run oldest first); the app runs each
+  once and deletes the file. A request in `run.d` (or `{"id": "...", "action": ..., "read": jq}` in
+  `run.json`) gets `results/<id>.json`: `{id, ok, error, errors, value}` (errors noted while it ran;
+  `value`: its `read` expression against the context afterwards). `abx do --wait` waits for it. On the
+  other machine, `abx do` relays through the daemon and its result comes back there;
+  `inspect.remote_actions` ("all", "none", or a list of action names) says which relayed actions run.
 - And see it: `inspect.json` (kept current) holds the live context, the window, and where every node
   with an `id` is drawn; `activity.log` lists every action run (clicks, keys, agents) with a timestamp;
   the `app.snapshot` action writes `snapshot.png`. From a shell, `abx` wraps all of this
@@ -48,9 +53,14 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `components` | Reusable nodes; use one as `{"type": "Name", "props": {...}}` and read props inside as `.props.x`. |
 | `theme` | Named values referenced as `@name` in styles (colors, fonts) and readable as `.theme.name`. `animations: false` turns animation off. |
 | `state` | UI state and starting values. Read as `.state.key`; change with `state.set` / `state.toggle` / `state.cycle`. |
-| `events` | Actions to run when things happen: `chat.waiting`, `chat.finished`, `chat.stopped` (the chat is `.chat`; `.chat.asks` is true when its last reply ends in a question), `designer.finished`. Each is `{"if": jq, "do": action}`. |
-| `dock` | `badge`: a template for the Dock icon's badge; empty or 0 hides it. |
-| `hosts` | Where things run, by host (`box`, `mac`): `label`, `icon`, `color`. Read as `.hosts`; every chat has `.host` and every worktree `.host`. |
+| `events` | Actions to run when things happen. Each is `{"if": jq, "do": action}` or a list of them (a list in your file adds to the default's handlers; give one an `id` to replace the handler with that id). See Events. |
+| `events_options` | `transitions`: which chat state changes are which events, `[{from: state \| [states] \| "*", to, event}]` (default: anything to waiting is `chat.waiting`, working to idle `chat.finished`, working/waiting/idle to stopped `chat.stopped`). |
+| `dock` | `badge`: a template for the Dock icon's badge (empty or 0 hides it; re-evaluated whenever the context changes); `menu`: items for the Dock icon's right-click menu, like `menu_bar` items. |
+| `hosts` | Where things run, by host (`box`, `mac`, or any name): `label`, `icon`, `color`, and `connection` `{ssh_host, daemon, ssh_options?, retry_seconds?, watch_ms?, enabled?}` (no ssh_host: run the daemon here). Without its own `connection`, `app.default_host` uses `connection` and `app.local_host` uses `local`. Read as `.hosts`; every chat has `.host` and every worktree `.host`. |
+| `app` | `local_host` ("mac": the machine the app runs on), `default_host` ("box": where things go when nothing says), `source_dir` (a.box's checkout, ~/dev/agent-box), `bin_dir` (its scripts; default `bin` there), `path` (PATH for everything the app runs), `auto_update`, `update_check_secs`, `update_off_check_secs`, `min_update_check_secs`, `update_command` / `restart_command` (null: the built-in ones). |
+| `window` | `title`, `width`, `height`, `traffic_lights`, `appearance` (dark, light, system: follows macOS live), `native_titlebar`, `remember_frame` (reopen where it was), `activate_on_start`, `on_close` (close: the window closes and the app keeps running; hide; quit; keep: the window stays). Title and appearance re-apply on save. |
+| `menu_bar` | `app_menu`: the a.box menu's items (default Settings, Command Palette, `{"splice": "app"}` for `app`'s items, Quit); `app`: items added to it; `menus`: menus of their own `{name, items}`. Items: `{label, do, if, checked, disabled, shortcut, items (a submenu), id}` or `{separator: true}`; label/if/checked are jq against the context and the menus rebuild when they change. |
+| `uploads` | `dir` (where pasted and dropped files are copied, ~/.agent-box/uploads) and `remote_dir` (the same on the other machine). |
 | `sounds` | A sound per event: `chat.finished`, `chat.question` (a finished turn ending in a question), `chat.waiting`, `chat.stopped`, `designer.finished`. Values are macOS sound names or audio file paths; null silences one. Also `volume` (0-1), `when` (`always` or `unfocused`), `enabled`. The `sound` action plays one anywhere. |
 | `logo` | The logo shown by `logo` nodes, the Dock while the app runs, and the app bundle's icon. See Logo. |
 | `keys` | `[{"key": "cmd-k", "do": <action>, "if": <jq>}]`. Key names: `cmd`, `ctrl`, `alt`, `shift` + `-` + key (`cmd-shift-p`, `ctrl-\``, `cmd-\\`). |
@@ -58,7 +68,10 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `motion` | How things move: `move` (glide to new positions), `enter` (how new nodes come in), `style` (colors and sizes ease), `enabled`. See Motion. |
 | `chat` | Look of the built-in transcript, composer, and waiting card: style objects per part. |
 | `terminal` | Terminal font, size, padding, colors. |
-| `connection` | The box: `ssh_host`, `daemon` path, `retry_seconds`. |
+| `connection` | The default host's connection: `ssh_host`, `daemon` path, `retry_seconds`, `ssh_options`, `watch_ms`, `env_push_seconds`, `env_push_command` (null: `bin_dir`'s env-push). `local` is this Mac's daemon (`enabled`, `daemon`). |
+| `input` | `press_dedupe_ms` (50): how long one press counts as the same press for every node under it. |
+| `scripts_options` | `context_cache_ms`, `min_timer_ms`, `keep_data` (true: `.data` survives a script reload). |
+| `settings_agent` | `command`: the `settings.agent` run (`{dir}`, `{claude}`, `$REQUEST`; null: the built-in one). |
 
 ## Logo
 
@@ -96,15 +109,21 @@ Then show it with a patch: `{ "insert": { "type": "text", "props": { "text": "{{
 | `ab.` | does |
 | --- | --- |
 | `action(name, fn(args, ctx))` | define an action |
-| `on(event, fn(payload, ctx))` / `emit(event, payload)` | handle / raise events (`start` fires on every (re)load; `model` on every box update) |
+| `on(event, fn(payload, ctx))` / `emit(event, payload)` | handle / raise events (`start` fires on every (re)load; `model` on every host update; every event in Events too, its fields as the payload) |
 | `do(action)` | run any action |
-| `context()` / `state` / `set(key, value)` | read the context and UI state; set state |
-| `data(name, value)` | publish a value as `.data.<name>` for expressions |
+| `context()` / `state` / `set(key, value)` | read the context and UI state; set state (what `set` and `data` change shows in `context()` at once) |
+| `data(name, value)` | publish a value as `.data.<name>` for expressions (kept across script reloads unless `scripts_options.keep_data` is false) |
 | `every(ms, fn)` / `after(ms, fn)` / `cancel(id)` | timers |
-| `shell(cmd, cb(result))` | run a command on the Mac: `{code, stdout, stderr}` |
-| `box(method, params, cb(result, error))` | call the box daemon: any call (`exec` runs bash on the box: `{cmd, cwd?, timeout_secs?}`) |
-| `fetch(url, cb(result))` | HTTP GET via curl (`result.stdout` is the body) |
-| `read(path)` / `write(path, text)` | files (`~/` allowed) |
+| `shell(cmd, cb(result), {cwd, host, timeout, env}?)` | run a command on the Mac (or on host's daemon): `{code, stdout, stderr}` |
+| `box(method, params, cb(result, error), {host}?)` | call a daemon (`exec` runs bash there: `{cmd, cwd?, timeout_secs?}`); host defaults to where the call belongs |
+| `http({url, method, headers, body, timeout_secs}, cb(result, error))` / `fetch(url, cb, opts)` | HTTP through curl without a shell: `{status, ok, headers, body}` (`stdout` is the body too) |
+| `read(path)` / `write(path, text, cb(error)?)` | files (`~/` allowed); read gives null when the file can't be read |
+| `call(name, args, cb(result, error))` / `callSync(name, args)` | the app's abilities by name (table below); callSync for the fs and env ones |
+| `clipboard.read(cb)` / `clipboard.write(text, cb?)` | the clipboard (`{text}`) |
+| `fs.list(path)` / `fs.exists` / `fs.stat` / `fs.mkdir` / `fs.remove` / `fs.watch(path, fn(paths))` | files and folders, at once (watch calls fn on changes) |
+| `spawn(cmd, {cwd, env, stdin}, {stdout(line), stderr(line), exit(code)})` | a process whose output streams in; returns `{id, write(data), kill()}` (cmd: a shell line, or a list run directly) |
+| `inspect(cb(doc))` | what inspect.json holds right now |
+| `patch(ops)` / `key(key, action, {if, not_in}?)` / `command(label, action, {if}?)` | change the UI at runtime (`patch` ops over the settings), add a key or a palette entry; undone when scripts reload |
 | `notify(text)` / `log(...)` | a notice in the window / a line in scripts.log |
 
 Inline in a node: `"on": { "click": { "do": "js", "code": "ab.notify('hi ' + ctx.selected.worktree.title)" } }`.
@@ -214,9 +233,40 @@ Examples:
 | `.selected.diff` | the selected worktree's changes for `state.diff_base`: `{loaded, loading, error, base, base_label, files, added, removed, truncated}` |
 | `.state` | UI state (see `state` in the defaults) |
 | `.theme` | theme values |
-| `.app` | `{connected, status, ssh_host, settings_error, errors, dragging (files over the window), focused (the window is in front)}` |
+| `.app` | `{connected, status, ssh_host, settings_error, errors, dragging (files over the window), focused (the window is in front), window {width, height}, layout {id: {x, y, w, h}}, hooks (recent hook events), host_errors {host: [the connection's last stderr lines]}, hosts_up, local_host, default_host, notifications [{at, kind: toast \| system \| sound, text, title}], nav {back, forward, at, visits}, script_actions, palette (while views.palette draws it), settings_sheet (while views.settings does), dialog {title, fields, values}}` |
+| `.selected.transcript` | the active chat's newest items (`inspect.transcript_items`): `{kind: user \| assistant \| thinking \| notice \| image \| tool, text, tool, summary, is_error, done}` |
+| `.composers` | what's typed in each chat's message box, by chat id |
+| `.settings` | the merged settings, without views, components, theme, and patch |
 | `.now` | unix seconds |
-| `.props`, `.<as>`, `.index`, `.input` | inside components, `for` loops, and a `prompt`'s `then` |
+| `.props`, `.<as>`, `.index`, `.input`, `.inputs`, `.output`, `.path` | inside components, `for` loops, and the `then` of prompt / clipboard.read (`.input`), form (`.inputs`), shell / box / http (`.output`), worktree.new / app.snapshot (`.path`) |
+
+## Events
+
+`events.<name>` in settings and `ab.on(name)` in scripts. The fields listed are in the handler's context
+(and a script's payload):
+
+| event | when | fields |
+| --- | --- | --- |
+| `app.start` | the window opened | |
+| `app.focus` / `app.blur` | the window came to the front / went behind | |
+| `app.updated` | auto-update pulled a new build | `.what`, `.restarting` |
+| `app.snapshot_done` | `app.snapshot` finished | `.path`, `.ok` |
+| `settings.reloaded` | settings saved and applied | |
+| `model` | a host sent its new state | `.host` |
+| `host.connected` / `host.disconnected` | a daemon connection came up / dropped | `.host`, `.why` |
+| `hook` | an agent hook fired on any host | `.hook {host, seq, at, event, session_id}` |
+| `chat.added` / `chat.removed` | a chat appeared on / left a host | `.chat`, `.host` |
+| `chat.state` | any chat state change | `.chat`, `.from` |
+| `chat.waiting` / `chat.finished` / `chat.stopped` | by `events_options.transitions` | `.chat` (`.chat.asks`: its last reply ends in a question), `.from` |
+| `chat.message` | a new message arrived in an open chat | `.chat`, `.message {kind, text}` |
+| `worktree.added` / `worktree.removed` | a worktree appeared / went | `.worktree`, `.host` |
+| `worktree.mr` | a worktree's merge request or its checks changed | `.worktree`, `.from` (the old one) |
+| `select` | the selected worktree or chat changed | `.worktree` (path), `.chat` (id) |
+| `notification.click` | a banner without its own `do` was clicked | `.chat`, `.id` |
+| `type_to_focus` | typing with nothing focused | `.text` |
+| `usage.level` | the usage gauge's level changed (ok, warning, danger) | `.level`, `.from` |
+| `designer.finished` | the designer replied | |
+| any `emit` / `ab.emit` name | raised by settings or a script | `.payload` |
 "##;
 
 const RECIPES: &str = r##"
@@ -282,6 +332,10 @@ pub fn write_reference() {
     md.push_str("\n## Actions\n\nUsed by `on`, `menu`, `keys`, and `commands`. An action is a name (`\"palette.open\"`), an object\n`{\"do\": \"name\", ...args}`, or a list of actions run in order.\n\n| action | arguments |\n| --- | --- |\n");
     for (a, d) in ACTIONS.iter().chain(crate::ui::trace_view::ACTIONS).chain(crate::ui::diff_view::ACTIONS).chain(crate::terminal::ACTIONS) {
         md.push_str(&format!("| `{a}` | {d} |\n"));
+    }
+    md.push_str("\n## Script calls\n\n`ab.call(name, args, cb)` from a script.\n\n| call | does |\n| --- | --- |\n");
+    for (c, d) in crate::script::CALLS {
+        md.push_str(&format!("| `{c}` | {d} |\n"));
     }
     md.push_str("\n## Theme tokens in the defaults\n\n");
     if let Some(Value::Object(t)) = defaults.get("theme") {

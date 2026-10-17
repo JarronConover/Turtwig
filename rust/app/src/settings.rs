@@ -10,9 +10,9 @@ pub const DEFAULTS: &str = include_str!("../default-settings.jsonc");
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
+    /** The default host's connection; `local` (this Mac's daemon) and `hosts.<name>.connection` are read
+    from `raw` (see `behavior::host_specs`). */
     pub connection: Connection,
-    #[serde(default)]
-    pub local: LocalConnection,
     /** Named colors, fonts, and sizes; nodes refer to them as `@name`. */
     pub theme: Map<String, Value>,
     /** UI state and its starting values; actions change it, expressions read it as `.state`. */
@@ -60,13 +60,14 @@ pub struct Settings {
     /** Problems applying `patch` (unknown ids and the like), shown with other settings problems. */
     #[serde(skip)]
     pub warnings: Vec<String>,
+    /** The merged settings as JSON (after `patch`), for `.settings` and runtime patches from scripts. */
+    #[serde(skip)]
+    pub raw: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Connection {
     pub ssh_host: String,
-    pub daemon: String,
-    pub retry_seconds: u64,
     /** Extra `ssh` arguments for the box connection. */
     #[serde(default = "default_ssh_options")]
     pub ssh_options: Vec<String>,
@@ -81,15 +82,6 @@ fn default_ssh_options() -> Vec<String> {
 
 fn default_env_push() -> u64 {
     60
-}
-
-/** The daemon on this Mac (its worktrees and chats, from super.engineering), run locally without ssh. */
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct LocalConnection {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub daemon: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,7 +103,7 @@ pub struct TerminalSettings {
 
 impl Default for Settings {
     fn default() -> Self {
-        serde_json::from_value(defaults_value()).expect("built-in settings are complete")
+        from_raw(defaults_value()).expect("built-in settings are complete")
     }
 }
 
@@ -127,13 +119,27 @@ pub fn path() -> PathBuf {
     dir().join("settings.jsonc")
 }
 
+/** a.box's source checkout: `AGENT_BOX_SOURCE`, else `app.source_dir` from the user's file or the
+built-in defaults (read before the merged settings exist, since the live defaults live there). */
+pub fn source_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("AGENT_BOX_SOURCE") {
+        if !p.is_empty() {
+            return PathBuf::from(crate::script::expand(&p));
+        }
+    }
+    let from = |text: &str| serde_json_lenient::from_str::<Value>(text).ok().and_then(|v| v.pointer("/app/source_dir").and_then(Value::as_str).map(str::to_string));
+    let user = std::fs::read_to_string(path()).ok().and_then(|t| from(&t));
+    let dir = user.or_else(|| from(DEFAULTS)).unwrap_or_else(|| "~/dev/agent-box".into());
+    PathBuf::from(crate::script::expand(&dir))
+}
+
 /** A defaults file read live instead of the built-in copy: `AGENT_BOX_DEFAULTS`, or the source checkout's
 `default-settings.jsonc` when it exists. Editing it reloads the app like any settings change. */
 pub fn live_defaults_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("AGENT_BOX_DEFAULTS") {
         return Some(PathBuf::from(p));
     }
-    let p = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("dev/agent-box/rust/app/default-settings.jsonc");
+    let p = source_dir().join("rust/app/default-settings.jsonc");
     p.exists().then_some(p)
 }
 
@@ -145,8 +151,9 @@ pub fn defaults_value() -> Value {
     serde_json_lenient::from_str(&defaults_text()).or_else(|_| serde_json_lenient::from_str(DEFAULTS)).expect("built-in settings parse")
 }
 
-/** The user's file over the defaults. Objects merge key by key; `keys` merge by `key` and `commands`
-by `label`; any other array replaces the default; `null` removes a default. */
+/** The user's file over the defaults. Objects merge key by key; `keys` merge by `id`, else by `key` and
+`if` together, and `commands` by `id`, else `label`; an event given as a list of handlers adds to the
+default's (by `id`); any other array replaces the default; `null` removes a default. */
 pub fn load() -> Result<Settings> {
     let mut base: Value = serde_json_lenient::from_str(&defaults_text()).context("parsing the default settings")?;
     let p = path();
@@ -159,13 +166,47 @@ pub fn load() -> Result<Settings> {
         Some(Value::Array(ops)) => crate::ui::patch::apply(&mut base, &ops),
         _ => vec![],
     };
-    let mut s: Settings = serde_json::from_value(base).context("settings")?;
+    let mut s = from_raw(base)?;
     s.warnings = warnings;
     Ok(s)
 }
 
-fn merge(base: &mut Value, over: Value, key: &str) {
+/** Settings from already-merged JSON (`Settings::raw` with runtime changes on top). */
+pub fn from_raw(raw: Value) -> Result<Settings> {
+    let mut s: Settings = serde_json::from_value(raw.clone()).context("settings")?;
+    s.raw = raw;
+    Ok(s)
+}
+
+fn same_entry(list: &str, a: &Value, b: &Value) -> bool {
+    if let (Some(x), Some(y)) = (a.get("id"), b.get("id")) {
+        return x == y;
+    }
+    match list {
+        "keys" => a.get("key").is_some() && a.get("key") == b.get("key") && a.get("if") == b.get("if"),
+        "commands" => a.get("label").is_some() && a.get("label") == b.get("label"),
+        _ => false,
+    }
+}
+
+fn merge(base: &mut Value, over: Value, path: &str) {
+    let key = path.rsplit('.').next().unwrap_or(path);
+    let is_event = path.strip_prefix("events.").is_some_and(|e| !e.is_empty());
     match (base, over) {
+        // An event's handler list adds to the default's; an object keeps merging into it as before.
+        (b, Value::Array(o)) if is_event && !b.is_null() => {
+            let mut list = match std::mem::take(b) {
+                Value::Array(a) => a,
+                one => vec![one],
+            };
+            for item in o {
+                match list.iter_mut().find(|x| same_entry("", x, &item)) {
+                    Some(existing) => *existing = item,
+                    None => list.push(item),
+                }
+            }
+            *b = Value::Array(list);
+        }
         (Value::Object(b), Value::Object(o)) => {
             for (k, v) in o {
                 if k == "$schema" {
@@ -175,13 +216,13 @@ fn merge(base: &mut Value, over: Value, key: &str) {
                     b.remove(&k);
                     continue;
                 }
-                merge(b.entry(k.clone()).or_insert(Value::Null), v, &k);
+                let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                merge(b.entry(k.clone()).or_insert(Value::Null), v, &child);
             }
         }
         (Value::Array(b), Value::Array(o)) if key == "keys" || key == "commands" => {
-            let id = if key == "keys" { "key" } else { "label" };
             for item in o {
-                match b.iter_mut().find(|x| x.get(id).is_some() && x.get(id) == item.get(id)) {
+                match b.iter_mut().find(|x| same_entry(key, x, &item)) {
                     Some(existing) => *existing = item,
                     None => b.push(item),
                 }
@@ -224,6 +265,16 @@ impl Settings {
         self.extra.get("strings").and_then(|s| s.get(key)).and_then(Value::as_str).unwrap_or(default).to_string()
     }
 
+    /** A string by dotted path, else `default`. */
+    pub fn text_at(&self, path: &str, default: &str) -> String {
+        self.get(path).and_then(Value::as_str).unwrap_or(default).to_string()
+    }
+
+    /** A list of strings by dotted path, else `default`. */
+    pub fn strings(&self, path: &str, default: &[&str]) -> Vec<String> {
+        self.get(path).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_else(|| default.iter().map(|s| s.to_string()).collect())
+    }
+
     /** A number by dotted path, else `default`. */
     pub fn num(&self, path: &str, default: f64) -> f64 {
         self.get(path).and_then(Value::as_f64).unwrap_or(default)
@@ -232,6 +283,28 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn keys_merge_by_key_and_if_and_events_add_handler_lists() {
+        let mut base = json!({
+            "keys": [{"key": "cmd-k", "do": "a"}, {"key": "cmd-w", "if": ".x", "do": "b"}],
+            "commands": [{"label": "L", "do": "c"}],
+            "events": {"chat.finished": {"if": ".app.focused | not", "do": "n"}, "chat.waiting": {"do": "w"}},
+        });
+        super::merge(&mut base, json!({
+            "keys": [{"key": "cmd-k", "do": "a2"}, {"key": "cmd-w", "if": ".y", "do": "b2"}, {"id": "k", "key": "cmd-j", "do": "j"}],
+            "commands": [{"label": "L", "do": "c2"}],
+            "events": {"chat.finished": [{"id": "mine", "do": "m"}], "chat.waiting": {"do": "w2"}},
+        }), "");
+        assert_eq!(base["keys"].as_array().unwrap().len(), 4);
+        assert_eq!(base["keys"][0]["do"], "a2");
+        assert_eq!(base["keys"][1]["do"], "b");
+        assert_eq!(base["commands"][0]["do"], "c2");
+        assert_eq!(base["events"]["chat.finished"], json!([{"if": ".app.focused | not", "do": "n"}, {"id": "mine", "do": "m"}]));
+        assert_eq!(base["events"]["chat.waiting"], json!({"do": "w2"}));
+    }
+
     #[test]
     fn the_defaults_define_each_agent_the_daemon_launches() {
         let v: serde_json::Value = serde_json_lenient::from_str(super::DEFAULTS).expect("defaults parse");

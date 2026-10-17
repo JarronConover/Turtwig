@@ -11,10 +11,20 @@ use std::rc::Rc;
 
 type Filter = jaq_core::Filter<data::JustLut<Val>>;
 
+/** Actions whose `then` runs later with what they produced (`.input`, `.inputs`, `.output`, `.path`),
+so its templates wait until then; every other action resolves at once. */
+pub const LAZY_THEN: &[&str] = &["prompt", "form", "shell", "box", "http", "after", "clipboard.read", "worktree.new", "app.snapshot"];
+
+fn lazy_then(o: &serde_json::Map<String, Value>) -> bool {
+    o.get("do").and_then(Value::as_str).is_some_and(|d| LAZY_THEN.contains(&d))
+}
+
 #[derive(Default)]
 pub struct Exprs {
     cache: RefCell<HashMap<String, Result<Rc<Filter>, String>>>,
     pub errors: RefCell<Vec<String>>,
+    /** While an agent's request runs: every problem noted, repeats included, for its result file. */
+    pub capture: RefCell<Option<Vec<String>>>,
 }
 
 impl Exprs {
@@ -59,6 +69,9 @@ impl Exprs {
     }
 
     pub fn note(&self, e: String) {
+        if let Some(c) = self.capture.borrow_mut().as_mut() {
+            c.push(e.clone());
+        }
         let mut errs = self.errors.borrow_mut();
         if !errs.contains(&e) && errs.len() < 50 {
             errs.push(e);
@@ -78,9 +91,8 @@ impl Exprs {
         match v {
             Value::String(s) if s.contains("{{") => self.template(s, input),
             Value::Array(a) => Value::Array(a.iter().map(|x| self.resolve(x, input)).collect()),
-            // A prompt's `then` waits for the text typed (`.input`); every other action resolves here.
             Value::Object(o) => {
-                let lazy = o.get("do").and_then(Value::as_str) == Some("prompt");
+                let lazy = lazy_then(o);
                 Value::Object(o.iter().map(|(k, x)| (k.clone(), if lazy && k == "then" { x.clone() } else { self.resolve(x, input) })).collect())
             }
             other => other.clone(),
@@ -102,7 +114,7 @@ impl Exprs {
             Value::Array(a) => Val::Arr(Rc::new(a.iter().map(|x| self.resolve_val(x, input)).collect())),
             Value::Object(o) => {
                 let mut map = jaq_json::Map::default();
-                let lazy = o.get("do").and_then(Value::as_str) == Some("prompt");
+                let lazy = lazy_then(o);
                 for (k, x) in o {
                     map.insert(Val::from(k.clone()), if lazy && k == "then" { to_val(x) } else { self.resolve_val(x, input) });
                 }
@@ -112,7 +124,7 @@ impl Exprs {
         }
     }
 
-    /** Actions resolve like any value; a `then` (anywhere) is left for later, when its input exists. */
+    /** Actions resolve like any value; the `then` of a `LAZY_THEN` action is left for later, when its input exists. */
     pub fn resolve_action(&self, v: &Value, input: &Val) -> Value {
         self.resolve(v, input)
     }
@@ -166,6 +178,14 @@ pub fn to_json(v: &Val) -> Value {
     }
 }
 
+/** A top-level field of an object value (null when missing). */
+pub fn first_field(base: &Val, key: &str) -> Val {
+    match base {
+        Val::Obj(m) => m.get(&Val::from(key.to_string())).cloned().unwrap_or(Val::Null),
+        _ => Val::Null,
+    }
+}
+
 /** The context with extra named values (loop items, component props) added at the top level.
 Only the top-level map is copied; everything under it is shared. */
 pub fn with(base: &Val, extra: Vec<(String, Val)>) -> Val {
@@ -192,6 +212,8 @@ mod tests {
         assert_eq!(branch["then"]["id"], "x1");
         let ask = e.resolve(&json!({"do": "prompt", "then": {"do": "chat.new", "branch": "{{ .input }}"}}), &ctx);
         assert_eq!(ask["then"]["branch"], "{{ .input }}");
+        let run = e.resolve(&json!({"do": "shell", "run": "{{ .b.id }}", "then": {"do": "notify", "text": "{{ .output.stdout }}"}}), &ctx);
+        assert_eq!((run["run"].as_str(), run["then"]["text"].as_str()), (Some("x1"), Some("{{ .output.stdout }}")));
     }
 
     #[test]

@@ -11,8 +11,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("state.set", "{key, value}: set a state value (value may be any JSON or a template)"),
     ("state.toggle", "{key, default?}: flip a boolean state value (default: its value when unset)"),
     ("state.cycle", "{key, values: [..]}: move a state value to the next item in values"),
-    ("select", "{worktree?: path, chat?: id, offset?: n}: select a worktree and/or one of its chats; offset moves n worktrees down (negative: up)"),
-    ("chat.new", "{dir?, repo?, name?, kind?, branch?, base?, prompt?, agent?}: start a chat at once; no dir = a fresh worktree in repo; agent: a key of `daemon.agents` (default `daemon.default_agent`)"),
+    ("select", "{worktree?: path, chat?: id, offset?: n}: select a worktree and/or one of its chats; offset moves n worktrees down the sidebar (negative: up), in `sidebar.select_order`"),
+    ("chat.new", "{dir?, repo?, name?, kind?, branch?, base?, prompt?, agent?, model?, select?}: start a chat at once; no dir = a fresh worktree in repo; agent: a key of `daemon.agents` (default `daemon.default_agent`); model: the agent's model; select (default `chat.select_new`): show it once it starts"),
+    ("chat.show", "{chat}: select the worktree holding a chat with it as the active tab (the designer: open its panel); the default `notification.click`"),
     ("chat.send", "{chat, text}: send a message"),
     ("chat.keys", "{chat, keys: [..]}: press keys in the chat's session (Enter, Escape, Up, 1, ...)"),
     ("chat.archive / chat.stop / chat.start", "{chat}"),
@@ -20,19 +21,20 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.take_over", "{chat}: ask, then close a chat in the program running it (super.engineering) and continue it here"),
     ("chat.open", "{chat, host?, force?}: open a chat as a tab, resuming its process if it isn't running (host: where a chat from `.history` lives)"),
     ("tab.move", "{chat?, target: chat id, zone: before|after}: reorder a worktree's tabs (chat defaults to `dragged`)"),
-    ("chat.interrupt", "{chat}: stop what the agent is doing (Esc), keeping the chat open"),
+    ("chat.interrupt", "{chat}: stop what the agent is doing (its `daemon.agents.<agent>.interrupt_keys`, default Escape), keeping the chat open"),
     ("queue.remove / queue.edit / queue.send_now", "{chat, index}: drop a queued message, put it back in the composer to change, or send it now"),
-    ("clipboard.copy", "{text}: put text on the clipboard"),
+    ("clipboard.copy", "{text, quiet?}: put text on the clipboard (quiet: no \"Copied\" notice)"),
+    ("clipboard.read", "{then}: `then` runs with the clipboard's text as `.input`"),
     ("chat.fork", "{chat}: a new tab in the same worktree that starts from a copy of this chat's conversation"),
     ("completion.accept", "{index?}: take an entry from the composer's completion list (`.app.completion`)"),
-    ("history.load", "fetch past chats from every host into `.history` (`.app.history_loading` while it runs)"),
+    ("history.load", "{hosts?: [..], limit?}: fetch past chats from every connected host (or those) into `.history` (`.app.history_loading` while it runs)"),
     ("if", "{cond, then, else?}: run `then` when cond is truthy (true, a non-empty string other than \"false\"), else `else`"),
     ("confirm", "{title, text?, confirm?, cancel?, then}: ask first; `then` runs if they confirm. Shown by the Confirm component (`.app.confirm`)"),
     ("confirm.accept / confirm.cancel", "answer the open confirm dialog"),
     ("chat.attach", "{chat, paths: [..]}: attach files to a chat (preview chips above its composer; uploaded to the box for box chats; sent with the next message). An `on.drop` action gets the dropped files as `paths`."),
     ("composer.send", "{chat}: send what's in a chat's composer"),
-    ("chat.move", "{chat, to: mac|box, scope?: section|worktree|chat}: move a chat between machines, with what daemon.move_together (or scope) takes along: `.selected.move` says what that is"),
-    ("section.new", "{assign?: path}: ask for a name, create the section (and move that worktree into it)"),
+    ("chat.move", "{chat, to?: host (default `app.local_host`), scope?: section|worktree|chat, follow?}: move a chat between machines, with what daemon.move_together (or scope) takes along: `.selected.move` says what that is; follow (default `chat.move_follow`) selects it where it lands"),
+    ("section.new", "{name?, assign?: path, host?}: create a section (asks for a name when it's missing) on host (default the worktree's, else `app.default_host`), and move that worktree into it"),
     ("section.rename", "{id, name?}: rename (asks when name is missing)"),
     ("section.delete", "{id}"),
     ("section.move", "{id?, index? | target: section id with zone}: reorder a section (id defaults to `dragged`)"),
@@ -40,37 +42,43 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("project.move", "{repo?, index? | target: repo with zone}: reorder a project (repo defaults to `dragged`)"),
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
     ("worktree.delete", "{path}"),
-    ("terminal.new", "{path?, id?, label?, command?}: a terminal tab under the worktree (a fresh shell, or `command`)"),
+    ("terminal.new", "{path?, id?, label?, command?, cwd?, host?}: a terminal tab under the worktree (a fresh shell, or `command`), in the worktree's folder on its machine unless cwd / host say otherwise"),
     ("terminal.select / terminal.close", "{path?, id}: show or close a terminal tab (the last one can't be closed); `.selected.terminals` lists them"),
     ("shell.open", "{task, output, label?, path?}: a terminal tab following a background shell's output file"),
     ("subagent.open", "{chat, agent, label?}: open a subagent's conversation (read-only) as a tab next to its chat; `.selected.background` lists running ones"),
-    ("usage.refresh", "fetch token usage from every machine, the plan's limits from Claude Code, and models.dev rates now (`.usage` holds them; they also refresh every usage.refresh_secs)"),
-    ("nav.back / nav.forward", "go back or forward through the worktrees and chats you've looked at, like a browser (`.app.nav.back` / `.forward` say whether you can)"),
+    ("usage.refresh", "{host?}: fetch token usage from every machine (or one), the plans' limits, and models.dev rates now (`.usage` holds them; they also refresh every usage.refresh_secs)"),
+    ("nav.back / nav.forward", "{steps?}: go back or forward through the worktrees and chats you've looked at, like a browser (`.app.nav.back` / `.forward` say whether you can; `.app.nav.visits` lists them)"),
     ("transcript.load_earlier", "{chat?}: load `chat.transcript_page` more of a long chat's older messages (scrolling to the top does this too)"),
     ("worktree.rename_branch", "{path, branch?}: rename the worktree's git branch (asks when branch is missing)"),
-    ("worktree.new", "{repo, host: mac|box, branch?}: a worktree on that branch, checked out if it exists, else new from origin/main (asks when branch is missing)"),
+    ("worktree.new", "{repo?, host?, branch?, select?, then?}: a worktree on that branch, checked out if it exists, else new from origin/main (asks when branch is missing); repo / host default to `worktree.default_repo` / `worktree.default_host` (else `app.default_host`); select (default `worktree.select`) shows it; `then` runs with its `.path`. (A base other than origin/main needs a daemon change.)"),
     ("project.settings", "{repo}: edit the project's name, badge letter and color (saved in state as project_name:REPO, project_letter:REPO, project_hue:REPO)"),
-    ("project.open_remote", "{path}: open the repo's origin (GitLab, GitHub) in the browser"),
+    ("project.open_remote", "{path}: open the repo's origin (GitLab, GitHub) in the browser, at `project.remote_url_template` ({host}, {path})"),
     ("project.unhide", "{repo}: show the project's hidden worktrees again (hidden ones have state hidden:PATH)"),
     ("project.restore", "{repo?}: bring back a removed project (state removed_project:REPO), or all of them"),
     ("worktree.label", "{path, label?}: rename a worktree in the sidebar; a leading emoji becomes its icon (asks when label is missing)"),
     ("worktree.test_local", "{branch}: check the branch out on the Mac with the box's latest work"),
     ("prompt", "{title, placeholder?, value?, then}: ask for text; `then` runs with it as `.input`"),
-    ("palette.open", "the command palette"),
+    ("form", "{title, fields: [{label, value?} | label], then}: ask for several values at once; `then` runs with them as `.inputs` (in order) and the first as `.input`"),
+    ("palette.open", "the command palette (drawn by `views.palette` when settings define one: `.app.palette`)"),
+    ("palette.move / palette.confirm / palette.close", "{by?} / {index?}: for a palette drawn by `views.palette`: move the highlight, run an entry (default the highlighted one), close it. What's typed is state `palette_query`"),
     ("steps.expand_all / steps.collapse_all", "{chat?}: open or close every step line in a chat's transcript"),
     ("ui.click", "{id?, label?, double?, press?}: click a clickable node as if by hand: exact node id, else the first whose id or tooltip contains `label` (inspect.json lists them); `double`/`press` use its double-click or mouse-down action"),
     ("ui.menu", "{id? | node?, item}: run an item of a node's right-click menu (node by exact id, else id or tooltip containing `node`; item by label, exact or containing)"),
-    ("dialog.submit", "{values?: [..]}: fill the open dialog's fields in order (`.app.dialog`, values in inspect.json) and save it"),
+    ("dialog.submit", "{values?: [..]}: fill the open dialog's fields in order (`.app.dialog`, values in inspect.json) and save it. With `views.dialog` in settings, text dialogs are drawn by it and each field is state `dialog_field:N`"),
     ("dialog.cancel", "close the open dialog without saving"),
     ("palette.run", "{label | index}: run a command palette entry (label exact, else the first containing it) without opening the palette"),
-    ("chat.answer", "{chat?, option: index | label | \"cancel\"}: answer a waiting chat's question card (its options are in `.chats[].waiting_on`)"),
+    ("chat.answer", "{chat?, option: index | label | \"cancel\"}: answer a waiting chat's question card (its options are in `.chats[].waiting_on`), with its agent's `answer_key` / `cancel_keys`"),
     ("chat.jump_to_latest", "{chat?}: scroll to the newest message and keep following"),
     ("transcript.scroll", "{chat?, row, offset?}: scroll a chat's transcript so row (see inspect.json `transcripts`) is at the top, offset px into it; stops following new messages"),
     ("completion.move / completion.close", "{by?}: move the composer's completion highlight, or close the list"),
     ("composer.set / composer.type", "{chat?, text}: replace or add to the text in a chat's message box (the designer's is chat `designer`)"),
+    ("composer.accept_suggestion", "{chat?}: put the agent's suggested next prompt in the message box"),
+    ("composer.recall", "{chat?, by?: -1 | 1}: put an earlier message you sent back in the box (-1 older, 1 newer; past the newest empties it)"),
+    ("focus", "{area: composer | terminal | none, chat?}: put typing in a chat's message box or the selected worktree's terminal"),
+    ("chat.attach_clipboard", "{chat?}: attach the files or image on the clipboard to a chat"),
     ("js", "{code, ...args}: run JavaScript with `args`, `ctx` (the context), and `ab` (see Scripts)"),
     ("<a script action>", "any name a script registers with ab.action(name, fn) works as an action everywhere"),
-    ("app.snapshot", "capture the window to snapshot.png in the settings folder (for agents to look at)"),
+    ("app.snapshot", "{path?, then?}: capture the window to path (default snapshot.png in the settings folder, for agents to look at); then `then` runs with `.path`, and the `app.snapshot_done` event fires"),
     ("drop.preview", "{key, zone: before|inside|after, kind?, value?}: show a drop target's indicator without dragging (for styling), as if `value` were being dragged; cleared by the next drag"),
     ("diff.refresh", "reload the selected worktree's diff now"),
     ("diff.collapse_all / diff.expand_all", "collapse or expand every file in the diff"),
@@ -79,19 +87,27 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("designer.history", "reread the designer's past conversations into `.designer.sessions` (newest first: id, title (the latest message), first, messages, age_text, current)"),
     ("designer.open", "{id}: show and continue an earlier designer conversation (one from `.designer.sessions`)"),
     ("settings.undo", "put the settings file back as it was before the last designer request (repeatable)"),
-    ("settings.open / settings.reload / settings.docs", "edit, reload, or read the settings reference"),
+    ("settings.open / settings.reload / settings.docs", "edit, reload, or read the settings reference (`views.settings` in settings draws the panel instead: `.app.settings_sheet`)"),
+    ("settings.save / settings.close", "{text} / -: for a settings panel drawn by `views.settings`: write the settings file (and reload), close it"),
     ("notify", "{text}: a notification inside the window"),
-    ("notify.system", "{title, text, chat?, sound?: bool}: a macOS notification banner; clicking it brings the window up on `chat`"),
-    ("dock.bounce", "bounce the Dock icon once"),
+    ("notify.system", "{title, text, subtitle?, group?, chat?, sound?: bool | name, do?}: a macOS notification banner (sound: false for none, or a sound's name); clicking it runs `do`, else the `notification.click` event (`.chat`, `.id`)"),
+    ("dock.bounce", "{critical?}: bounce the Dock icon once (critical: until the app is in front)"),
     ("sound", "{name, volume?}: play a macOS sound by name (Glass, Ping, Funk, Hero, Submarine...) or an audio file path"),
     ("open", "{url}: open a URL or app link"),
-    ("shell", "{run, env?: {NAME: value}, notify?: bool}: run a shell command on the Mac (pass user text through env, not into run); notify shows its last output line"),
-    ("settings.agent", "{request}: a local Claude Code agent reads SETTINGS.md and edits your settings to do what request says; the app reloads when it saves"),
-    ("window.move / window.zoom / app.quit", ""),
+    ("shell", "{run, env?: {NAME: value}, cwd?, host?, timeout? (secs), notify?: bool, then?}: run a shell command on the Mac, or on host's daemon (pass user text through env, not into run); notify shows its last output line; `then` runs with `.output` {code, stdout, stderr}"),
+    ("box", "{method, params?, host?, then?}: any daemon call (e.g. `exec` {cmd, cwd?, timeout_secs?}) on host (default: the machine the call belongs to); `then` runs with `.output` (its reply) and `.error`"),
+    ("http", "{url, method?, headers?, body?, timeout_secs?, then?}: an HTTP request (no shell; a JSON body is sent as JSON); `then` runs with `.output` {status, ok, headers, body}"),
+    ("after", "{ms, then}: run `then` after ms milliseconds (resolved then, against the context at that time)"),
+    ("emit", "{event, payload?}: raise an event: settings `events.<event>` handlers run with `.payload`, scripts' `ab.on(event)` get the payload"),
+    ("settings.agent", "{request}: a local Claude Code agent reads SETTINGS.md and edits your settings to do what request says; the app reloads when it saves (`settings_agent.command`)"),
+    ("window.move / window.zoom / window.minimize / window.fullscreen / window.close", "drag, zoom, minimize, toggle full screen, or close the window"),
+    ("window.resize", "{width, height} (or {w, h}): resize the window, in points"),
+    ("app.hide / app.activate / app.quit", "hide the app, bring it to the front, or quit"),
 ];
 
-/** A one-shot local Claude Code run in the settings folder; it may only read and edit files there. */
-const SETTINGS_AGENT: &str = r#"cd "$HOME/.agent-box/state/settings" && claude -p "You are customizing the a.box app for its user. Read SETTINGS.md in this folder first: it documents every setting and holds the full defaults. Then edit settings.jsonc (only that file) to do what the user asks, keeping their existing overrides. The app reloads on save; problems show up in its settings panel, so keep the file valid JSON with comments. When done, reply with one short sentence saying what you changed. The user's request: $REQUEST" --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep --settings '{"disableAllHooks": true}' 2>&1 | tail -n 1"#;
+/** A one-shot local Claude Code run in the settings folder; it may only read and edit files there
+(`settings_agent.command`: `{dir}` is the settings folder, `{claude}` designer.claude, $REQUEST the request). */
+const SETTINGS_AGENT: &str = r#"cd {dir} && {claude} -p "You are customizing the a.box app for its user. Read SETTINGS.md in this folder first: it documents every setting and holds the full defaults. Then edit settings.jsonc (only that file) to do what the user asks, keeping their existing overrides. The app reloads on save; problems show up in its settings panel, so keep the file valid JSON with comments. When done, reply with one short sentence saying what you changed. The user's request: $REQUEST" --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep --settings '{"disableAllHooks": true}' 2>&1 | tail -n 1"#;
 
 impl Workspace {
     /** The worktree listed after `target` in its list, skipping `moving`; None when `target` is last. */
@@ -153,7 +169,8 @@ impl Workspace {
         .detach();
     }
 
-    fn new_worktree(&mut self, repo: String, host: String, branch: String, cx: &mut Context<Self>) {
+    /** A worktree on `branch` in `repo` on `host`; selected when `select`, then `then` runs with `.path`. */
+    fn new_worktree(&mut self, repo: String, host: String, branch: String, select: bool, then: Option<Value>, cx: &mut Context<Self>) {
         let remote = self.remote_for_host(&host);
         self.status = self.tr("making_worktree", "Making a worktree for {branch}…", &[("branch", &branch)]);
         cx.notify();
@@ -163,8 +180,15 @@ impl Workspace {
                 match res {
                     Ok(v) => {
                         if let Some(p) = v["path"].as_str().or_else(|| v["response"]["path"].as_str()) {
-                            ws.selected = Some(p.to_string());
-                            ws.set_state("selected_worktree".into(), Value::String(p.to_string()));
+                            if select {
+                                ws.selected = Some(p.to_string());
+                                ws.set_state("selected_worktree".into(), Value::String(p.to_string()));
+                            }
+                            if let Some(then) = &then {
+                                let c = with(&ws.context(), vec![("path".into(), to_val(&Value::String(p.to_string())))]);
+                                let a = ws.exprs.resolve_action(then, &c);
+                                ws.pending_actions.push(a);
+                            }
                         }
                         ws.status = ws.tr("connected", "Connected", &[]);
                     }
@@ -183,8 +207,13 @@ impl Workspace {
     fn project_settings(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.model.projects.iter().find(|p| p.repo == repo) else { return };
         let (name, letter, hue) = self.project_look(&repo, &p.name, p.hue);
-        let fields = vec![("Name".to_string(), name), ("Badge letter".to_string(), letter), ("Badge color (hue, 0–360)".to_string(), format!("{hue:.0}"))];
-        self.fields_dialog(&format!("{} settings", p.name), fields, window, cx, move |ws, vals, cx| {
+        let fields = vec![
+            (self.tr("project_field_name", "Name", &[]), name),
+            (self.tr("project_field_letter", "Badge letter", &[]), letter),
+            (self.tr("project_field_hue", "Badge color (hue, 0–360)", &[]), format!("{hue:.0}")),
+        ];
+        let title = self.tr("project_settings_title", "{name} settings", &[("name", &p.name)]);
+        self.fields_dialog(&title, fields, window, cx, move |ws, vals, cx| {
             for (key, v) in ["project_name", "project_letter", "project_hue"].iter().zip(vals) {
                 ws.set_state(format!("{key}:{repo}"), if v.trim().is_empty() { Value::Null } else { Value::String(v.trim().to_string()) });
             }
@@ -250,7 +279,10 @@ impl Workspace {
             }
             "select" => {
                 if let Some(n) = a.get("offset").and_then(Value::as_i64) {
-                    let paths: Vec<String> = self.all_worktrees().iter().map(|w| w.path.clone()).collect();
+                    let mut paths = self.sidebar_order();
+                    if paths.is_empty() {
+                        paths = self.all_worktrees().iter().map(|w| w.path.clone()).collect();
+                    }
                     if !paths.is_empty() {
                         let cur = self.selected.as_ref().and_then(|p| paths.iter().position(|x| x == p)).unwrap_or(0) as i64;
                         let next = (cur + n).rem_euclid(paths.len() as i64) as usize;
@@ -269,7 +301,9 @@ impl Workspace {
                 }
             }
             "chat.new" => {
-                self.starting = s("dir").filter(|_| s("branch").is_none());
+                // `select` (default `chat.select_new`): show the new chat once it starts.
+                let select = a.get("select").and_then(Value::as_bool).or_else(|| self.settings.get("chat.select_new").and_then(Value::as_bool)).unwrap_or(true);
+                self.starting = s("dir").filter(|_| s("branch").is_none() && select);
                 let call = Call::ChatNew {
                     name: s("name").unwrap_or_else(|| self.tr("new_chat_name", "New chat", &[])),
                     kind: s("kind").unwrap_or_else(|| {
@@ -284,7 +318,7 @@ impl Workspace {
                     model: s("model"),
                     agent: s("agent"),
                 };
-                self.start_chat(call, cx);
+                self.start_chat(call, select, cx);
             }
             "chat.send" => {
                 if let (Some(id), Some(text)) = (chat(), s("text")) {
@@ -311,9 +345,10 @@ impl Workspace {
                     self.opened.remove(&id);
                     self.active_chat.retain(|_, c| c != &id);
                     let host = self.host_of_chat(&id);
-                    if self.chat(&id).is_some_and(|c| c.host == "mac") && !self.remotes.contains_key("mac") {
+                    let local = self.local_host();
+                    if self.chat(&id).is_some_and(|c| self.is_local_host(&c.host)) && !self.remotes.contains_key(&local) {
                         self.run_local(vec!["chat".into(), "stop".into(), id], window, cx);
-                    } else if host == "mac" && self.settings.get("chat.close_on_mac").and_then(Value::as_str) != Some("stop") {
+                    } else if self.is_local_host(&host) && self.settings.get("chat.close_on_mac").and_then(Value::as_str) != Some("stop") {
                         // On the Mac, stopping only ends the turn; archiving closes super.engineering's tab
                         // (and its process). The chat stays in History.
                         self.call(Call::ChatArchive { chat_id: id }, cx);
@@ -335,16 +370,17 @@ impl Workspace {
                         self.active_chat.insert(p.clone(), id.clone());
                         self.select(p, window, cx);
                     }
+                    let no_local_daemon = !self.remotes.contains_key(&self.local_host());
                     match alive {
                         _ if elsewhere => {}
-                        Some((false, host)) if host == "mac" && !self.remotes.contains_key("mac") => {
+                        Some((false, host)) if self.is_local_host(&host) && no_local_daemon => {
                             self.run_local(vec!["chat".into(), "start".into(), id], window, cx)
                         }
                         Some((false, _)) => self.call(Call::ChatStart { chat_id: id }, cx),
                         // Not in any worktree we know yet (from history): start it on its host and
                         // select it when it shows up.
                         None => {
-                            let host = s("host").unwrap_or_else(|| "box".into());
+                            let host = s("host").unwrap_or_else(|| self.default_host());
                             self.pending_select = Some(id.clone());
                             let remote = self.remote_for_host(&host);
                             cx.spawn(async move |_, _| {
@@ -377,7 +413,10 @@ impl Workspace {
                     }
                 }
             }
-            "history.load" => self.load_history(cx),
+            "history.load" => {
+                let hosts = a.get("hosts").and_then(Value::as_array).map(|h| h.iter().filter_map(Value::as_str).map(str::to_string).collect());
+                self.load_history(hosts, a.get("limit").and_then(Value::as_u64).map(|n| n as usize), cx)
+            }
             "queue.remove" | "queue.edit" | "queue.send_now" => {
                 let index = a.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 if let Some(id) = chat() {
@@ -407,14 +446,24 @@ impl Workspace {
             "clipboard.copy" => {
                 if let Some(t) = a.get("text").map(super::render::value_text) {
                     cx.write_to_clipboard(ClipboardItem::new_string(t));
-                    let t = self.tr("copied", "Copied", &[]);
-                    self.toast(t, window, cx);
+                    if a.get("quiet").and_then(Value::as_bool) != Some(true) {
+                        let t = self.tr("copied", "Copied", &[]);
+                        self.toast(t, window, cx);
+                    }
+                }
+            }
+            "clipboard.read" => {
+                let text = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+                if let Some(then) = a.get("then") {
+                    let c = with(&self.context(), vec![("input".into(), to_val(&Value::String(text)))]);
+                    let next = self.exprs.resolve_action(then, &c);
+                    self.run_action(&next, window, cx);
                 }
             }
             "chat.fork" => {
                 if let Some(id) = chat() {
                     self.starting = self.all_worktrees().into_iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone());
-                    self.start_chat(Call::ChatFork { chat_id: id }, cx);
+                    self.start_chat(Call::ChatFork { chat_id: id }, true, cx);
                 }
             }
             "completion.accept" => {
@@ -429,7 +478,9 @@ impl Workspace {
                         let t = self.tr("stop_elsewhere", "This chat is running in super.engineering: stop it there, or take it over first", &[]);
                         self.toast(t, window, cx);
                     } else {
-                        self.call(Call::ChatKeys { chat_id: id, keys: vec!["Escape".into()] }, cx);
+                        let agent = self.chat(&id).map(|c| c.agent.clone()).unwrap_or_default();
+                        let keys = self.agent_keys(&agent, "interrupt_keys");
+                        self.call(Call::ChatKeys { chat_id: id, keys }, cx);
                     }
                 }
             }
@@ -489,8 +540,12 @@ impl Workspace {
             }
             "chat.move" => {
                 if let Some(id) = chat() {
-                    let to = s("to").unwrap_or("mac".into());
-                    self.pending_move = Some((id.clone(), to.clone()));
+                    let to = s("to").unwrap_or_else(|| self.local_host());
+                    // `follow` (default `chat.move_follow`): select the chat where it lands.
+                    let follow = a.get("follow").and_then(Value::as_bool).or_else(|| self.settings.get("chat.move_follow").and_then(Value::as_bool)).unwrap_or(true);
+                    if follow {
+                        self.pending_move = Some((id.clone(), to.clone()));
+                    }
                     let mut args = vec!["chat".into(), "move".into(), id, "--to".into(), to];
                     if let Some(scope) = s("scope") {
                         args.extend(["--scope".into(), scope]);
@@ -498,14 +553,15 @@ impl Workspace {
                     self.run_local(args, window, cx);
                 }
             }
-            "section.new" => self.new_section(s("assign"), window, cx),
+            "section.new" => self.new_section(s("name"), s("assign"), s("host"), window, cx),
             "section.rename" => {
                 if let Some(id) = s("id") {
                     match s("name") {
                         Some(n) => self.call(Call::SectionRename { id, name: n }, cx),
                         None => {
                             let current = self.model.sections.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_default();
-                            self.name_dialog("Rename section", &current, window, cx, move |ws, n, cx| {
+                            let title = self.tr("rename_section_title", "Rename section", &[]);
+                            self.name_dialog(&title, &current, window, cx, move |ws, n, cx| {
                                 ws.call(Call::SectionRename { id: id.clone(), name: n }, cx)
                             });
                         }
@@ -528,7 +584,8 @@ impl Workspace {
                         Some(l) => self.label_worktree(path, l, cx),
                         None => {
                             let current = self.worktree(&path).map(|w| w.title.clone()).unwrap_or_default();
-                            self.name_dialog("Rename worktree", &current, window, cx, move |ws, l, cx| ws.label_worktree(path.clone(), l, cx));
+                            let title = self.tr("rename_worktree_title", "Rename worktree", &[]);
+                            self.name_dialog(&title, &current, window, cx, move |ws, l, cx| ws.label_worktree(path.clone(), l, cx));
                         }
                     }
                 }
@@ -543,8 +600,11 @@ impl Workspace {
                     if !tabs.iter().any(|t| t["id"].as_str() == Some(id.as_str())) {
                         let n = tabs.len() + 1;
                         let mut tab = json!({"id": id, "label": s("label").unwrap_or_else(|| self.tr("terminal_n", "Terminal {n}", &[("n", &n.to_string())]))});
-                        if let Some(c) = s("command") {
-                            tab["command"] = Value::String(c);
+                        // Its own folder and machine instead of the worktree's.
+                        for k in ["command", "cwd", "host"] {
+                            if let Some(v) = s(k) {
+                                tab[k] = Value::String(v);
+                            }
                         }
                         tabs.push(tab);
                         self.set_state(format!("terms:{path}"), Value::Array(tabs));
@@ -614,9 +674,14 @@ impl Workspace {
                     }
                 }
             }
-            "usage.refresh" => self.refresh_usage(true, cx),
-            "nav.back" => self.navigate(-1, window, cx),
-            "nav.forward" => self.navigate(1, window, cx),
+            "usage.refresh" => self.refresh_usage(true, s("host"), cx),
+            "nav.back" | "nav.forward" => {
+                let steps = a.get("steps").and_then(Value::as_i64).unwrap_or(1).max(1);
+                let dir = if name == "nav.back" { -1 } else { 1 };
+                for _ in 0..steps {
+                    self.navigate(dir, window, cx);
+                }
+            }
             "transcript.load_earlier" => {
                 if let Some(id) = chat() {
                     self.load_earlier(&id, cx);
@@ -628,19 +693,22 @@ impl Workspace {
                         Some(b) => self.rename_branch(path, b, cx),
                         None => {
                             let current = self.worktree(&path).and_then(|w| w.branch.clone()).unwrap_or_default();
-                            self.name_dialog("Rename branch", &current, window, cx, move |ws, b, cx| ws.rename_branch(path.clone(), b, cx));
+                            let title = self.tr("rename_branch_title", "Rename branch", &[]);
+                            self.name_dialog(&title, &current, window, cx, move |ws, b, cx| ws.rename_branch(path.clone(), b, cx));
                         }
                     }
                 }
             }
             "worktree.new" => {
-                let repo = s("repo").unwrap_or_else(|| "redo".into());
-                let host = s("host").unwrap_or_else(|| "box".into());
+                let repo = s("repo").unwrap_or_else(|| self.settings.text_at("worktree.default_repo", "redo"));
+                let host = s("host").or_else(|| self.settings.get("worktree.default_host").and_then(Value::as_str).map(str::to_string)).unwrap_or_else(|| self.default_host());
+                let select = a.get("select").and_then(Value::as_bool).or_else(|| self.settings.get("worktree.select").and_then(Value::as_bool)).unwrap_or(true);
+                let then = a.get("then").cloned();
                 match s("branch") {
-                    Some(b) => self.new_worktree(repo, host, b, cx),
+                    Some(b) => self.new_worktree(repo, host, b, select, then, cx),
                     None => {
-                        let title = format!("New {repo} worktree from branch (new or existing)");
-                        self.name_dialog(&title, "", window, cx, move |ws, b, cx| ws.new_worktree(repo.clone(), host.clone(), b, cx));
+                        let title = self.tr("new_worktree_title", "New {repo} worktree from branch (new or existing)", &[("repo", &repo)]);
+                        self.name_dialog(&title, "", window, cx, move |ws, b, cx| ws.new_worktree(repo.clone(), host.clone(), b, select, then.clone(), cx));
                     }
                 }
             }
@@ -653,10 +721,12 @@ impl Workspace {
                 if let Some(path) = s("path") {
                     let remote = self.remote_for_host(&self.host_of_path(&path));
                     let call = Call::Exec { cmd: "git remote get-url origin".into(), cwd: Some(path), timeout_secs: Some(15) };
+                    // `project.remote_url_template`: the page for a remote's host and repo path.
+                    let template = self.settings.text_at("project.remote_url_template", "https://{host}/{path}");
                     cx.spawn(async move |this, cx| {
                         let res = remote.call(call).await;
                         this.update(cx, |ws, cx| {
-                            match res.ok().and_then(|v| v["stdout"].as_str().and_then(|u| web_url(u.trim()))) {
+                            match res.ok().and_then(|v| v["stdout"].as_str().and_then(|u| web_url(u.trim(), &template))) {
                                 Some(url) => cx.open_url(&url),
                                 None => ws.pending_actions.push(json!({"do": "notify", "text": ws.tr("no_remote", "This project has no origin remote", &[])})),
                             }
@@ -737,7 +807,7 @@ impl Workspace {
             }
             "prompt" => {
                 let then = a.get("then").cloned().unwrap_or(Value::Null);
-                let title = s("title").unwrap_or("Enter a value".into());
+                let title = s("title").unwrap_or_else(|| self.tr("prompt_title", "Enter a value", &[]));
                 let value = s("value").unwrap_or_default();
                 self.name_dialog(&title, &value, window, cx, move |ws, text, cx| {
                     let ctx = with(&ws.context(), vec![("input".into(), to_val(&Value::String(text)))]);
@@ -746,7 +816,28 @@ impl Workspace {
                     cx.notify();
                 });
             }
+            "form" => {
+                // Several fields at once: `then` runs with `.inputs` (in order) and `.input` (the first).
+                let then = a.get("then").cloned().unwrap_or(Value::Null);
+                let title = s("title").unwrap_or_else(|| self.tr("prompt_title", "Enter a value", &[]));
+                let fields: Vec<(String, String)> = a
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .map(|f| f.iter().map(|x| match x {
+                        Value::String(l) => (l.clone(), String::new()),
+                        o => (o.get("label").map(super::render::value_text).unwrap_or_default(), o.get("value").map(super::render::value_text).unwrap_or_default()),
+                    }).collect())
+                    .unwrap_or_default();
+                self.fields_dialog(&title, fields, window, cx, move |ws, vals, cx| {
+                    let first = vals.first().cloned().unwrap_or_default();
+                    let ctx = with(&ws.context(), vec![("inputs".into(), to_val(&json!(vals))), ("input".into(), to_val(&Value::String(first)))]);
+                    let resolved = ws.exprs.resolve_action(&then, &ctx);
+                    ws.pending_actions.push(resolved);
+                    cx.notify();
+                });
+            }
             "palette.open" => self.open_palette(window, cx),
+            "palette.move" | "palette.confirm" | "palette.close" => self.palette_action(name, a, window, cx),
             "steps.expand_all" | "steps.collapse_all" => {
                 if let Some(id) = chat() {
                     let keys: Vec<String> = self
@@ -773,7 +864,7 @@ impl Workspace {
                     }
                 }
             }
-            "app.snapshot" => self.snapshot(window, cx),
+            "app.snapshot" => self.snapshot(s("path"), a.get("then").cloned(), window, cx),
             "ui.menu" => {
                 // Run a right-click menu item without the mouse: the node by `id` (else the first whose id or
                 // tooltip contains `node`), its item by `item` (exact, else containing; submenus included).
@@ -831,9 +922,16 @@ impl Workspace {
                         Some(Value::String(l)) => options.iter().position(|o| o.eq_ignore_ascii_case(l)).map(|i| i as i64),
                         _ => None,
                     };
+                    let agent = self.chat(&id).map(|c| c.agent.clone()).unwrap_or_default();
                     match pick {
-                        Some(-1) => self.call(Call::ChatKeys { chat_id: id, keys: vec!["Escape".into()] }, cx),
-                        Some(i) if i >= 0 && (i as usize) < options.len() => self.call(Call::ChatKeys { chat_id: id, keys: vec![(i + 1).to_string()] }, cx),
+                        Some(-1) => {
+                            let keys = self.agent_keys(&agent, "cancel_keys");
+                            self.call(Call::ChatKeys { chat_id: id, keys }, cx)
+                        }
+                        Some(i) if i >= 0 && (i as usize) < options.len() => {
+                            let key = self.answer_key(&agent, i as usize + 1);
+                            self.call(Call::ChatKeys { chat_id: id, keys: vec![key] }, cx)
+                        }
                         _ => self.exprs.note(format!("chat.answer: no option {:?}; options: {}", a.get("option"), options.join(", "))),
                     }
                 }
@@ -931,6 +1029,15 @@ impl Workspace {
                 }
             }
             "settings.open" => self.open_settings(window, cx),
+            "settings.close" => {
+                self.settings_sheet = false;
+            }
+            "settings.save" => {
+                if let Some(text) = a.get("text").and_then(Value::as_str) {
+                    let _ = std::fs::write(crate::settings::path(), text);
+                    self.reload_settings(cx);
+                }
+            }
             "settings.reload" => self.reload_settings(cx),
             "settings.docs" => {
                 let _ = std::process::Command::new("open").arg(crate::settings::dir().join("SETTINGS.md")).spawn();
@@ -941,8 +1048,22 @@ impl Workspace {
             "notify.system" => {
                 self.notify_count += 1;
                 let id = format!("{}#{}", s("chat").unwrap_or_default(), self.notify_count);
+                let title = s("title").unwrap_or_else(|| self.tr("app_name", "a.box", &[]));
+                let text = s("text").unwrap_or_default();
+                // sound: true/absent (the default sound), false (none), or a sound's name.
+                let sound = match a.get("sound") {
+                    Some(Value::Bool(false)) => None,
+                    Some(Value::String(n)) if !n.is_empty() => Some(n.clone()),
+                    _ => Some(String::new()),
+                };
+                if let Some(action) = a.get("do").filter(|d| !d.is_null()) {
+                    self.notify_actions.insert(id.clone(), action.clone());
+                }
+                self.record_notice("system", &text, Some(&title));
                 #[cfg(target_os = "macos")]
-                crate::macos::notify(&id, &s("title").unwrap_or_else(|| self.tr("app_name", "a.box", &[])), &s("text").unwrap_or_default(), a.get("sound").and_then(Value::as_bool) != Some(false));
+                crate::macos::notify(&id, &title, &text, &crate::macos::NotifyOptions { sound, subtitle: s("subtitle"), group: s("group") });
+                #[cfg(not(target_os = "macos"))]
+                let _ = sound;
             }
             "sound" => {
                 #[cfg(target_os = "macos")]
@@ -952,7 +1073,7 @@ impl Workspace {
             }
             "dock.bounce" => {
                 #[cfg(target_os = "macos")]
-                crate::macos::bounce();
+                crate::macos::bounce(a.get("critical").and_then(Value::as_bool) == Some(true));
             }
             "open" => {
                 if let Some(u) = s("url") {
@@ -966,17 +1087,152 @@ impl Workspace {
                         _ => vec![],
                     };
                     let notify = a.get("notify").and_then(Value::as_bool) == Some(true);
-                    self.run_shell(cmd, env, notify, window, cx);
+                    let then = a.get("then").cloned();
+                    if then.is_none() && s("host").is_none() && s("cwd").is_none() && a.get("timeout").is_none() {
+                        self.run_shell(cmd, env, notify, window, cx);
+                    } else {
+                        if notify {
+                            let t = self.tr("working", "Working…", &[]);
+                            self.toast(t, window, cx);
+                        }
+                        let job = crate::workspace::ShellJob { run: cmd, cwd: s("cwd"), host: s("host"), timeout: a.get("timeout").and_then(Value::as_f64), env };
+                        self.start_shell(job, window, cx, move |ws, output, window, cx| {
+                            if notify {
+                                let text = output[if output["code"] == 0 { "stdout" } else { "stderr" }].as_str().unwrap_or("").trim().lines().last().map(str::to_string);
+                                let fallback = if output["code"] == 0 { ws.tr("done", "Done", &[]) } else { ws.tr("failed", "Failed", &[]) };
+                                ws.toast(text.unwrap_or(fallback), window, cx);
+                            }
+                            if let Some(then) = &then {
+                                let c = with(&ws.context(), vec![("output".into(), to_val(&output))]);
+                                let next = ws.exprs.resolve_action(then, &c);
+                                ws.run_action(&next, window, cx);
+                            }
+                        });
+                    }
+                }
+            }
+            "box" => {
+                // Any daemon call (`{method, params}`, e.g. exec) on `host` (default: where the call belongs).
+                let call = serde_json::from_value::<Call>(json!({"method": a.get("method"), "params": a.get("params").cloned().unwrap_or(json!({}))}));
+                match call {
+                    Ok(call) => {
+                        let remote = match s("host") {
+                            Some(h) => self.remote_for_host(&h),
+                            None => self.route(&call),
+                        };
+                        let then = a.get("then").cloned();
+                        cx.spawn_in(window, async move |this, cx| {
+                            let res = remote.call(call).await;
+                            this.update_in(cx, |ws, window, cx| {
+                                let (output, error) = match res {
+                                    Ok(v) => (v, Value::Null),
+                                    Err(e) => {
+                                        ws.exprs.note(format!("box: {e}"));
+                                        (Value::Null, Value::String(e.to_string()))
+                                    }
+                                };
+                                if let Some(then) = &then {
+                                    let c = with(&ws.context(), vec![("output".into(), to_val(&output)), ("error".into(), to_val(&error))]);
+                                    let next = ws.exprs.resolve_action(then, &c);
+                                    ws.run_action(&next, window, cx);
+                                }
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    }
+                    Err(e) => self.exprs.note(format!("box: unknown call: {e}")),
+                }
+            }
+            "http" => {
+                let req = Value::Object(a.clone());
+                let then = a.get("then").cloned();
+                let path = self.path_env();
+                cx.spawn_in(window, async move |this, cx| {
+                    let output = cx.background_spawn(async move { crate::script::http(&req, &path) }).await;
+                    this.update_in(cx, |ws, window, cx| {
+                        if let Some(e) = output["error"].as_str() {
+                            ws.exprs.note(format!("http: {e}"));
+                        }
+                        if let Some(then) = &then {
+                            let c = with(&ws.context(), vec![("output".into(), to_val(&output))]);
+                            let next = ws.exprs.resolve_action(then, &c);
+                            ws.run_action(&next, window, cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            "after" => {
+                let ms = a.get("ms").and_then(Value::as_f64).unwrap_or(0.).max(0.);
+                let then = a.get("then").cloned().unwrap_or(Value::Null);
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs_f64(ms / 1000.)).await;
+                    this.update_in(cx, |ws, window, cx| {
+                        let c = ws.context();
+                        let next = ws.exprs.resolve_action(&then, &c);
+                        ws.run_action(&next, window, cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            "emit" => {
+                if let Some(event) = s("event") {
+                    let payload = a.get("payload").cloned().unwrap_or(Value::Null);
+                    self.fire_event_as(&event, vec![("payload".into(), to_val(&payload))], Some(payload), window, cx);
                 }
             }
             "settings.agent" => {
                 if let Some(req) = s("request") {
-                    self.run_shell(SETTINGS_AGENT.into(), vec![("REQUEST".into(), req)], true, window, cx);
+                    let claude = crate::script::expand(&self.settings.text_at("designer.claude", "claude"));
+                    let template = self.settings.get("settings_agent.command").and_then(Value::as_str).unwrap_or(SETTINGS_AGENT).to_string();
+                    let script = template.replace("{dir}", &crate::behavior::sh_quote(&crate::settings::dir().to_string_lossy())).replace("{claude}", &crate::behavior::sh_quote(&claude));
+                    self.run_shell(script, vec![("REQUEST".into(), req)], true, window, cx);
                 }
             }
             "window.move" => window.start_window_move(),
             "window.zoom" => window.zoom_window(),
+            "window.minimize" => window.minimize_window(),
+            "window.fullscreen" => window.toggle_fullscreen(),
+            "window.resize" => {
+                let n = |k: &str, d: f32| a.get(k).and_then(Value::as_f64).map(|v| v as f32).unwrap_or(d);
+                let size = window.viewport_size();
+                window.resize(gpui::size(gpui::px(n("width", n("w", f32::from(size.width)))), gpui::px(n("height", n("h", f32::from(size.height))))));
+            }
+            "window.close" => window.remove_window(),
+            "app.hide" => cx.hide(),
+            "app.activate" => {
+                cx.activate(true);
+                window.activate_window();
+            }
             "app.quit" => cx.quit(),
+            "chat.show" => {
+                if let Some(id) = chat() {
+                    self.show_chat(&id, window, cx);
+                }
+            }
+            "focus" => self.focus_area_action(s("area").as_deref().unwrap_or("composer"), chat(), window, cx),
+            "composer.accept_suggestion" => {
+                if let Some(id) = chat() {
+                    self.ensure_composer(&id, window, cx);
+                    self.on_tab_now(&id, window, cx);
+                }
+            }
+            "chat.attach_clipboard" => {
+                if let (Some(id), Some(item)) = (chat(), cx.read_from_clipboard()) {
+                    let files = crate::workspace::attachments_from_clipboard(&item);
+                    if !files.is_empty() {
+                        self.attach(id, files, window, cx);
+                    }
+                }
+            }
+            "composer.recall" => {
+                if let Some(id) = chat() {
+                    self.recall_sent(&id, a.get("by").and_then(Value::as_i64).unwrap_or(-1), window, cx);
+                }
+            }
             "js" => {
                 let code = s("code").unwrap_or_default();
                 let mut args = a.clone();
@@ -1000,31 +1256,43 @@ impl Workspace {
     }
 }
 
-/** The browser page for a git remote: `git@host:group/repo.git` or `https://host/group/repo.git`. */
-fn web_url(remote: &str) -> Option<String> {
+/** A git remote's host and repo path: `git@host:group/repo.git`, `ssh://git@host:22/group/repo.git`, or
+`https://host/group/repo.git`. */
+fn remote_parts(remote: &str) -> Option<(String, String)> {
     let r = remote.trim().trim_end_matches(".git");
     if r.is_empty() {
         return None;
     }
     if let Some(rest) = r.strip_prefix("git@") {
         let (host, path) = rest.split_once(':')?;
-        return Some(format!("https://{host}/{path}"));
+        return Some((host.to_string(), path.to_string()));
     }
     if let Some(rest) = r.strip_prefix("ssh://") {
         let rest = rest.split_once('@').map(|x| x.1).unwrap_or(rest);
         let (host, path) = rest.split_once('/')?;
-        return Some(format!("https://{}/{path}", host.split(':').next().unwrap_or(host)));
+        return Some((host.split(':').next().unwrap_or(host).to_string(), path.to_string()));
     }
-    r.starts_with("http").then(|| r.to_string())
+    let rest = r.strip_prefix("https://").or_else(|| r.strip_prefix("http://"))?;
+    let rest = rest.split_once('@').map(|x| x.1).unwrap_or(rest);
+    let (host, path) = rest.split_once('/')?;
+    Some((host.to_string(), path.to_string()))
+}
+
+/** The browser page for a git remote, by `template` ({host}, {path}). */
+fn web_url(remote: &str, template: &str) -> Option<String> {
+    let (host, path) = remote_parts(remote)?;
+    Some(template.replace("{host}", &host).replace("{path}", &path))
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn web_urls_from_remotes() {
-        assert_eq!(super::web_url("git@gitlab.com:redo/redoapp/product/redo.git\n").as_deref(), Some("https://gitlab.com/redo/redoapp/product/redo"));
-        assert_eq!(super::web_url("ssh://git@gitlab.com:22/tj15/agent-box.git").as_deref(), Some("https://gitlab.com/tj15/agent-box"));
-        assert_eq!(super::web_url("https://gitlab.com/tj15/agent-box.git").as_deref(), Some("https://gitlab.com/tj15/agent-box"));
-        assert_eq!(super::web_url(""), None);
+        let t = "https://{host}/{path}";
+        assert_eq!(super::web_url("git@gitlab.com:redo/redoapp/product/redo.git\n", t).as_deref(), Some("https://gitlab.com/redo/redoapp/product/redo"));
+        assert_eq!(super::web_url("ssh://git@gitlab.com:22/tj15/agent-box.git", t).as_deref(), Some("https://gitlab.com/tj15/agent-box"));
+        assert_eq!(super::web_url("https://gitlab.com/tj15/agent-box.git", t).as_deref(), Some("https://gitlab.com/tj15/agent-box"));
+        assert_eq!(super::web_url("git@git.corp:team/app.git", "https://code.corp/{path}/-/tree/main").as_deref(), Some("https://code.corp/team/app/-/tree/main"));
+        assert_eq!(super::web_url("", t), None);
     }
 }

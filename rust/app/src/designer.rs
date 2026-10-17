@@ -32,9 +32,25 @@ pub fn history_dir() -> PathBuf {
     settings::dir().join("history")
 }
 
+/** Settings `designer` and the app's PATH, as of the last load (`configure`). */
+static CONFIG: std::sync::RwLock<Option<(Value, String)>> = std::sync::RwLock::new(None);
+
+pub fn configure(designer: &Value, path: &str) {
+    *CONFIG.write().unwrap() = Some((designer.clone(), path.to_string()));
+}
+
+fn config() -> (Value, String) {
+    CONFIG.read().unwrap().clone().unwrap_or_else(|| (Value::Null, "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin".into()))
+}
+
+/** Where the designer's conversations are kept: `designer.sessions_dir` (`{slug}` is the settings
+folder as Claude Code names its project folders), else Claude Code's folder for the settings folder. */
 fn sessions_dir() -> PathBuf {
     let slug: String = settings::dir().to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude/projects").join(slug)
+    match config().0.get("sessions_dir").and_then(Value::as_str).filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(crate::script::expand(&d.replace("{slug}", &slug))),
+        None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude/projects").join(slug),
+    }
 }
 
 pub fn current() -> Option<String> {
@@ -148,7 +164,7 @@ impl Designer {
         let home = std::env::var("HOME").unwrap_or_default();
         // settings `designer`: what it may touch. It runs headless, so it can't stop to ask for a permission;
         // anything not allowed here is refused outright.
-        let cfg = settings::load().map(|s| s.designer).unwrap_or_default();
+        let (cfg, path) = config();
         let list = |k: &str, d: &[&str]| -> Vec<String> {
             cfg.get(k).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_else(|| d.iter().map(|x| x.to_string()).collect())
         };
@@ -157,18 +173,20 @@ impl Designer {
         let prompt = cfg.get("prompt").and_then(|v| v.as_str()).unwrap_or(PROMPT).to_string();
         let mut cmd = Command::new(claude);
         cmd.current_dir(settings::dir())
-            .env("PATH", format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"))
+            .env("PATH", path)
             .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
             .args(["--permission-mode", &mode, "--tools"])
             .args(list("tools", &["Read", "Edit", "Write", "Glob", "Grep"]));
         for dir in list("add_dirs", &["~/.agent-box/uploads"]) {
             cmd.args(["--add-dir", &crate::script::expand(&dir)]);
         }
-        cmd
-            .args(["--append-system-prompt", &prompt])
-            // The app plays its own sounds (settings `sounds`); without this, Claude Code hooks (such as a
-            // Stop sound) fire on every designer reply too.
-            .args(["--settings", r#"{"disableAllHooks": true}"#])
+        cmd.args(["--append-system-prompt", &prompt]);
+        // The app plays its own sounds (settings `sounds`); unless `designer.hooks`, Claude Code hooks (such
+        // as a Stop sound) would fire on every designer reply too.
+        if cfg.get("hooks").and_then(|v| v.as_bool()) != Some(true) {
+            cmd.args(["--settings", r#"{"disableAllHooks": true}"#]);
+        }
+        cmd.args(list("extra_args", &[]))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());

@@ -1,3 +1,4 @@
+mod behavior;
 mod completions;
 mod designer;
 mod diff;
@@ -19,7 +20,8 @@ mod workspace;
 
 use gpui_kit::*;
 
-/** Settings `window`: title, width, height, traffic_lights {x, y}, appearance ("dark" | "light" | "system"). */
+/** Settings `window`: title, width, height, traffic_lights {x, y}, appearance ("dark" | "light" | "system"),
+remember_frame, activate_on_start. */
 fn window_setting(key: &str) -> Option<serde_json::Value> {
     settings::load().ok().and_then(|s| s.get(&format!("window.{key}")).cloned())
 }
@@ -35,7 +37,7 @@ fn open_main(cx: &mut App) {
             appears_transparent: true,
             traffic_light_position: Some(point(px(light("x", 20.)), px(light("y", 15.)))),
         }),
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(num("width", 1500.)), px(num("height", 940.))), cx))),
+        window_bounds: Some(remembered_frame().unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(num("width", 1500.)), px(num("height", 940.))), cx)))),
         // The app drags and zooms the window itself (window.move / window.zoom on its header rows); left to AppKit,
         // a double click anywhere in the titlebar strip zooms, buttons included. window.native_titlebar: true
         // hands the strip back to AppKit.
@@ -44,7 +46,24 @@ fn open_main(cx: &mut App) {
     };
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| workspace::Workspace::new(window, cx)))
         .expect("open the main window");
-    cx.activate(true);
+    if window_setting("activate_on_start").and_then(|v| v.as_bool()) != Some(false) {
+        cx.activate(true);
+    }
+}
+
+/** Where the window was when it last moved or resized (`window.remember_frame`, on by default). */
+fn remembered_frame() -> Option<WindowBounds> {
+    if window_setting("remember_frame").and_then(|v| v.as_bool()) == Some(false) {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(settings::dir().join("window.json")).ok()?).ok()?;
+    let n = |k: &str| v.get(k).and_then(|x| x.as_f64()).map(|x| x as f32);
+    let (w, h) = (n("width")?, n("height")?);
+    if w < 200. || h < 150. {
+        return None;
+    }
+    let b = Bounds { origin: point(px(n("x")?), px(n("y")?)), size: size(px(w), px(h)) };
+    Some(if v.get("fullscreen").and_then(|x| x.as_bool()) == Some(true) { WindowBounds::Fullscreen(b) } else { WindowBounds::Windowed(b) })
 }
 
 /** The built-in icon set, plus `icons/NAME.svg` from the settings folder (which wins) and a few brand marks it lacks. */
@@ -93,17 +112,11 @@ fn main() {
     app.run(|cx: &mut App| {
         gpui_kit::init(cx);
         // The component kit's light or dark look (the app's own colors are `theme`).
-        let mode = match window_setting("appearance").as_ref().and_then(|v| v.as_str()) {
-            Some("light") => gpui_kit::component::ThemeMode::Light,
-            Some("system") => match cx.window_appearance() {
-                WindowAppearance::Light | WindowAppearance::VibrantLight => gpui_kit::component::ThemeMode::Light,
-                _ => gpui_kit::component::ThemeMode::Dark,
-            },
-            _ => gpui_kit::component::ThemeMode::Dark,
-        };
-        gpui_kit::component::Theme::change(mode, None, cx);
+        let settings = settings::load().unwrap_or_default();
+        let os = cx.window_appearance();
+        workspace::apply_appearance(&settings, os, cx);
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
-        workspace::set_menu_bar(&settings::load().unwrap_or_default(), cx);
+        workspace::set_menu_bar(&settings, cx);
         open_main(cx);
     });
 }

@@ -20,58 +20,155 @@ use std::time::Duration;
 
 actions!(agent_box, [Quit, OpenSettings, Palette]);
 
-/** A settings `menu_bar` item, by its place in the list built from settings. */
+/** A settings `menu_bar` (or `dock.menu`) item, by its id (its `id`, else its place). */
 #[derive(Action, Clone, PartialEq, serde::Deserialize)]
 #[action(namespace = agent_box, no_json)]
 pub struct MenuBarItem {
-    pub index: usize,
+    pub id: String,
 }
 
 thread_local! {
-    static MENU_ACTIONS: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(vec![]) };
+    static MENU_ACTIONS: std::cell::RefCell<HashMap<String, Value>> = std::cell::RefCell::new(HashMap::new());
+    /** Shortcuts already bound to menu items (bindings can't be taken back one by one). */
+    static MENU_KEYS: std::cell::RefCell<HashSet<(String, String)>> = std::cell::RefCell::new(HashSet::new());
 }
 
-/** The macOS menu bar: the a.box menu (Settings, Command Palette, settings `menu_bar.app` items, Quit),
-then each of `menu_bar.menus` ({name, items: [{label, do} | {separator: true}]}). */
-pub fn set_menu_bar(settings: &Settings, cx: &mut App) {
-    let mut actions: Vec<Value> = vec![];
-    let items_of = |list: Option<&Value>, actions: &mut Vec<Value>| -> Vec<MenuItem> {
-        list.and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .map(|it| {
-                        if it.get("separator").and_then(Value::as_bool) == Some(true) {
-                            MenuItem::separator()
-                        } else {
-                            actions.push(it.get("do").cloned().unwrap_or(Value::Null));
-                            let label = it.get("label").and_then(Value::as_str).unwrap_or("").to_string();
-                            MenuItem::action(label, MenuBarItem { index: actions.len() - 1 })
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
+/** The a.box menu when settings give no `menu_bar.app_menu`: Settings, Command Palette, `menu_bar.app`, Quit. */
+fn default_app_menu() -> Value {
+    json!([
+        {"id": "settings", "label": "{{ .settings.strings.menu_settings // \"Settings…\" }}", "do": "settings.open"},
+        {"id": "palette", "label": "{{ .settings.strings.menu_palette // \"Command Palette\" }}", "do": "palette.open"},
+        {"splice": "app"},
+        {"separator": true},
+        {"id": "quit", "label": "{{ .settings.strings.menu_quit // \"Quit {app}\" }}", "do": "app.quit"}
+    ])
+}
+
+/** Settings `menu_bar` with each item's `if`, `label`, `checked`, `disabled` and `shortcut` worked out
+against the context: `[{name, items}]`, the a.box menu first. `do` stays as written (it runs at click time). */
+pub(crate) fn resolve_menus(settings: &Settings, exprs: &crate::ui::expr::Exprs, ctx: &Val) -> Value {
     let app_name = settings.text("app_name", "a.box");
-    let mut app_items = vec![
-        MenuItem::action(settings.text("menu_settings", "Settings…"), OpenSettings),
-        MenuItem::action(settings.text("menu_palette", "Command Palette"), Palette),
-    ];
-    let extra = items_of(settings.get("menu_bar.app"), &mut actions);
-    if !extra.is_empty() {
-        app_items.push(MenuItem::separator());
-        app_items.extend(extra);
+    fn items(list: &[Value], settings: &Settings, exprs: &crate::ui::expr::Exprs, ctx: &Val, app_name: &str, path: &str) -> Vec<Value> {
+        let mut out = vec![];
+        for (i, it) in list.iter().enumerate() {
+            if let Some(name) = it.get("splice").and_then(Value::as_str) {
+                let extra = settings.get(&format!("menu_bar.{name}")).and_then(Value::as_array).cloned().unwrap_or_default();
+                let extra = items(&extra, settings, exprs, ctx, app_name, &format!("{path}{name}."));
+                if !extra.is_empty() {
+                    out.push(json!({"separator": true}));
+                    out.extend(extra);
+                }
+                continue;
+            }
+            if it.get("separator").and_then(Value::as_bool) == Some(true) {
+                out.push(json!({"separator": true}));
+                continue;
+            }
+            if let Some(cond) = it.get("if").and_then(Value::as_str) {
+                if !exprs.truthy(cond, ctx) {
+                    continue;
+                }
+            }
+            let flag = |k: &str| match it.get(k) {
+                Some(Value::Bool(b)) => *b,
+                Some(Value::String(code)) => exprs.truthy(code, ctx),
+                _ => false,
+            };
+            let label = value_text(&exprs.resolve(it.get("label").unwrap_or(&Value::Null), ctx)).replace("{app}", app_name);
+            let id = it.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("{path}{i}"));
+            let mut item = json!({"id": id, "label": label, "checked": flag("checked"), "disabled": flag("disabled"), "shortcut": it.get("shortcut"), "do": it.get("do")});
+            if let Some(sub) = it.get("items").and_then(Value::as_array) {
+                item["items"] = Value::Array(items(sub, settings, exprs, ctx, app_name, &format!("{id}.")));
+            }
+            out.push(item);
+        }
+        out
     }
-    app_items.push(MenuItem::separator());
-    app_items.push(MenuItem::action(settings.text("menu_quit", "Quit {app}").replace("{app}", &app_name), Quit));
-    let mut menus = vec![Menu { name: app_name.into(), items: app_items, disabled: false }];
-    for m in settings.get("menu_bar.menus").and_then(Value::as_array).cloned().unwrap_or_default() {
-        let name = m.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-        let items = items_of(m.get("items"), &mut actions);
-        menus.push(Menu { name: name.into(), items, disabled: false });
+    let app_menu = settings.get("menu_bar.app_menu").and_then(Value::as_array).cloned().unwrap_or_else(|| default_app_menu().as_array().cloned().unwrap_or_default());
+    let mut menus = vec![json!({"name": app_name, "items": items(&app_menu, settings, exprs, ctx, &app_name, "app.")})];
+    for (m, menu) in settings.get("menu_bar.menus").and_then(Value::as_array).cloned().unwrap_or_default().iter().enumerate() {
+        let name = value_text(&exprs.resolve(menu.get("name").unwrap_or(&Value::Null), ctx));
+        let list = menu.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+        menus.push(json!({"name": name, "items": items(&list, settings, exprs, ctx, &app_name, &format!("menu{m}."))}));
     }
+    Value::Array(menus)
+}
+
+/** Menu items for resolved entries; each item's `do` is remembered under its id, and its `shortcut` bound to it. */
+fn menu_items(list: &[Value], actions: &mut HashMap<String, Value>, cx: &mut App) -> Vec<MenuItem> {
+    list.iter()
+        .map(|it| {
+            if it.get("separator").and_then(Value::as_bool) == Some(true) {
+                return MenuItem::separator();
+            }
+            let label = it["label"].as_str().unwrap_or("").to_string();
+            if let Some(sub) = it.get("items").and_then(Value::as_array) {
+                return MenuItem::submenu(Menu { name: label.into(), items: menu_items(sub, actions, cx), disabled: it["disabled"] == true });
+            }
+            let id = it["id"].as_str().unwrap_or("").to_string();
+            let item = match it["do"].as_str() {
+                // These keep working while no window is open.
+                Some("app.quit") => MenuItem::action(label, Quit),
+                Some("settings.open") => MenuItem::action(label, OpenSettings),
+                Some("palette.open") => MenuItem::action(label, Palette),
+                _ => {
+                    actions.insert(id.clone(), it["do"].clone());
+                    if let Some(key) = it["shortcut"].as_str().filter(|k| !k.is_empty()) {
+                        let fresh = MENU_KEYS.with(|k| k.borrow_mut().insert((key.to_string(), id.clone())));
+                        if fresh {
+                            cx.bind_keys([KeyBinding::new(key, MenuBarItem { id: id.clone() }, None)]);
+                        }
+                    }
+                    MenuItem::action(label, MenuBarItem { id })
+                }
+            };
+            item.checked(it["checked"] == true).disabled(it["disabled"] == true)
+        })
+        .collect()
+}
+
+fn build_menu_bar(settings: &Settings, spec: &Value, cx: &mut App) {
+    let mut actions = HashMap::new();
+    let menus: Vec<Menu> = spec
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|m| Menu { name: m["name"].as_str().unwrap_or("").to_string().into(), items: menu_items(m["items"].as_array().map(Vec::as_slice).unwrap_or(&[]), &mut actions, cx), disabled: false })
+        .collect();
+    // `dock.menu`: items for the Dock icon's right-click menu, like menu_bar items.
+    let dock = settings.dock.get("menu").and_then(Value::as_array).cloned().unwrap_or_default();
+    let dock_items = menu_items(&dock.iter().enumerate().map(|(i, it)| {
+        let mut it = it.clone();
+        if it.get("id").is_none() && it.get("separator").is_none() {
+            it["id"] = json!(format!("dock.{i}"));
+        }
+        it
+    }).collect::<Vec<_>>(), &mut actions, cx);
     MENU_ACTIONS.with(|a| *a.borrow_mut() = actions);
     cx.set_menus(menus);
+    cx.set_dock_menu(dock_items);
+}
+
+/** The menu bar before the window exists (its templates see only `.settings`). */
+pub fn set_menu_bar(settings: &Settings, cx: &mut App) {
+    let exprs = crate::ui::expr::Exprs::default();
+    let ctx = to_val(&json!({"settings": settings.raw}));
+    let spec = resolve_menus(settings, &exprs, &ctx);
+    build_menu_bar(settings, &spec, cx);
+}
+
+/** The component kit's light or dark look from settings `window.appearance` ("dark" | "light" | "system",
+which follows the OS). */
+pub fn apply_appearance(settings: &Settings, os: WindowAppearance, cx: &mut App) {
+    let mode = match settings.get("window.appearance").and_then(Value::as_str) {
+        Some("light") => gpui_kit::component::ThemeMode::Light,
+        Some("system") => match os {
+            WindowAppearance::Light | WindowAppearance::VibrantLight => gpui_kit::component::ThemeMode::Light,
+            _ => gpui_kit::component::ThemeMode::Dark,
+        },
+        _ => gpui_kit::component::ThemeMode::Dark,
+    };
+    gpui_kit::component::Theme::change(mode, None, cx);
 }
 
 pub struct Drag {
@@ -84,12 +181,39 @@ pub struct Drag {
     pub max: f32,
 }
 
-/** The machine the app runs on (its daemon is local); every other host is reached over ssh. */
-pub(crate) const LOCAL_HOST: &str = "mac";
+/** A connection the app keeps: what it was started with, and what closes it. */
+pub(crate) struct HostConn {
+    spec: crate::behavior::HostSpec,
+    path: String,
+    _guard: RemoteGuard,
+    _listen: Task<()>,
+}
+
+/** A process a script spawned (`ab.spawn`): its stdin and how to end it. */
+struct Proc {
+    stdin: Option<std::process::ChildStdin>,
+    pid: u32,
+}
+
+/** What scripts added at runtime (`ab.patch`, `ab.key`, `ab.command`), applied over the settings until
+they reload. */
+#[derive(Default)]
+struct ScriptOverlay {
+    patches: Vec<Value>,
+    keys: Vec<Value>,
+    commands: Vec<Value>,
+}
+
+/** The palette while it's drawn from settings (`views.palette`): the highlighted entry (what's typed is
+state `palette_query`). */
+#[derive(Default, Clone)]
+pub(crate) struct PaletteView {
+    pub(crate) selected: usize,
+}
 
 pub struct Workspace {
-    _remote_guards: Vec<RemoteGuard>,
-    /** One daemon connection per host: "box" over ssh, "mac" run locally. */
+    /** One daemon connection per host (settings `hosts.<name>.connection`, `connection`, `local`). */
+    conns: HashMap<String, HostConn>,
     pub(crate) remotes: HashMap<String, Remote>,
     /** Each host's latest model; `model` is them merged (this Mac's first). */
     pub(crate) models: HashMap<String, Model>,
@@ -120,8 +244,8 @@ pub struct Workspace {
     just_sent: HashMap<String, std::time::Instant>,
     /** Where you've been, browser-style: (worktree, chat) visits and the one showing now. */
     nav: Vec<(String, Option<String>)>,
-    /** Recent in-window notifications: (unix time, text). */
-    pub(crate) notices: Vec<(f64, String)>,
+    /** Recent notices of every kind (in-window, banners, sounds): {at, kind, text, title?}. */
+    pub(crate) notices: Vec<Value>,
     /** Recent hook events from every daemon (for inspect.json). */
     pub(crate) hooks: Vec<Value>,
     /** The open text dialog (rename, new worktree, project settings, prompt), for agents. */
@@ -224,8 +348,39 @@ pub struct Workspace {
     pub(crate) ctx_rev: u64,
     ctx_cache: Option<(u64, std::time::Instant, std::rc::Rc<str>)>,
     pub(crate) focused: bool,
-    pending_events: Vec<String>,
+    /** Events waiting for a window to run in: (name, extra context fields). */
+    pending_events: Vec<(String, Map<String, Value>)>,
+    /** Agents' requests (run.json, run.d, relayed): run in order, each with its result written. */
+    pending_requests: Vec<(crate::behavior::Request, Option<String>)>,
     pub(crate) pending_script: Vec<Value>,
+    /** Banners' own click actions (`notify.system {do}`), by notification id. */
+    pub(crate) notify_actions: HashMap<String, Value>,
+    overlay: ScriptOverlay,
+    /** The settings (and their warnings) before the overlay, while there is one. */
+    settings_base: Option<(Value, Vec<String>)>,
+    procs: HashMap<u64, Proc>,
+    fs_watchers: HashMap<u64, notify::RecommendedWatcher>,
+    pub(crate) window_size: (f32, f32),
+    /** Each composer's text as of the last change, for `.composers`. */
+    composer_texts: HashMap<String, String>,
+    /** Where `composer.recall` is in each chat's sent messages (0: the newest). */
+    recall: HashMap<String, usize>,
+    pub(crate) palette_view: Option<PaletteView>,
+    /** `views.settings` is drawing the settings panel. */
+    pub(crate) settings_sheet: bool,
+    /** Things whose change fires an event, as last seen. */
+    seen_focus: Option<bool>,
+    seen_select: Option<(String, Option<String>)>,
+    seen_usage_level: Option<String>,
+    /** The menu bar and badge as last built, so they're rebuilt only when what they show changes. */
+    menu_sig: u64,
+    shown_rev: u64,
+    /** Settings to apply to the window at the next chance (a reload has no window at hand). */
+    window_dirty: bool,
+    hosts_dirty: bool,
+    /** `.settings` and `.app.layout`, rebuilt only when settings or a frame changes them. */
+    settings_val: Val,
+    layout_val: std::cell::RefCell<Option<(u64, Val)>>,
     pub(crate) notify_count: u64,
     badge: Option<String>,
     dock_icon: Option<Vec<u8>>,
@@ -246,31 +401,14 @@ impl Workspace {
         };
         crate::ui::docs::write_reference();
         crate::transcript::set_options(&settings.chat);
-        let retry = Duration::from_secs(settings.connection.retry_seconds);
-        let mut conns = vec![("box".to_string(), settings.connection.ssh_host.clone(), settings.connection.daemon.clone())];
-        if settings.local.enabled && !settings.local.daemon.is_empty() {
-            conns.insert(0, ("mac".to_string(), String::new(), settings.local.daemon.clone()));
-        }
-        let (mut remotes, mut guards, mut listeners) = (HashMap::new(), vec![], vec![]);
-        for (host, ssh, daemon) in conns {
-            let (r, incoming, guard) = Remote::start(ssh, daemon, retry, settings.connection.ssh_options.clone());
-            remotes.insert(host.clone(), r);
-            guards.push(guard);
-            listeners.push(cx.spawn_in(window, async move |this, cx| {
-                while let Ok(msg) = incoming.recv_async().await {
-                    if this.update_in(cx, |ws, window, cx| ws.on_incoming(&host, msg, window, cx)).is_err() {
-                        break;
-                    }
-                }
-            }));
-        }
-        let remote = remotes.get("box").cloned().expect("the box connection");
+        set_upload_options(&settings);
+        crate::designer::configure(&settings.designer, &crate::behavior::path_env(&settings.strings("app.path", DEFAULT_PATH), &std::env::var("HOME").unwrap_or_default()));
         let watch = Self::watch_settings(window, cx);
         // Usage and plan limits: refreshed every `usage.refresh_secs`.
         let usage_loop = cx.spawn(async move |this, cx| loop {
             let every = this.update(cx, |ws, cx| {
-                ws.refresh_usage(false, cx);
-                ws.settings.num("usage.refresh_secs", 120.).max(15.)
+                ws.refresh_usage(false, None, cx);
+                ws.settings.num("usage.refresh_secs", 120.).max(ws.settings.num("usage.min_refresh_secs", 15.))
             });
             let Ok(every) = every else { break };
             cx.background_executor().timer(Duration::from_secs_f64(every)).await;
@@ -278,47 +416,50 @@ impl Workspace {
         // `app.auto_update`: pull a.box's main from its remote and rebuild what changed (the daemon, the app);
         // a new app build restarts the app. So a change pushed from the box ships to the Mac on its own.
         let update_loop = cx.spawn(async move |this, cx| loop {
-            let every = this.update(cx, |ws, _| (ws.settings.get("app.auto_update").and_then(Value::as_bool) != Some(false)).then(|| ws.settings.num("app.update_check_secs", 60.).max(15.)));
-            let Ok(every) = every else { break };
-            cx.background_executor().timer(Duration::from_secs_f64(every.unwrap_or(300.))).await;
-            if every.is_none() {
+            let plan = this.update(cx, |ws, _| {
+                let on = ws.settings.get("app.auto_update").and_then(Value::as_bool) != Some(false);
+                let every = if on { ws.settings.num("app.update_check_secs", 60.).max(ws.settings.num("app.min_update_check_secs", 15.)) } else { ws.settings.num("app.update_off_check_secs", 300.) };
+                (on, every, ws.settings.get("app.update_command").and_then(Value::as_str).unwrap_or(UPDATE_SCRIPT).to_string(), ws.path_env(), settings::source_dir().to_string_lossy().into_owned())
+            });
+            let Ok((on, every, script, path, source)) = plan else { break };
+            cx.background_executor().timer(Duration::from_secs_f64(every.max(1.))).await;
+            if !on {
                 continue;
             }
-            let out = cx.background_spawn(async move { std::process::Command::new("/bin/sh").arg("-c").arg(UPDATE_SCRIPT).output() }).await;
+            let out = cx.background_spawn(async move { std::process::Command::new("/bin/sh").arg("-c").arg(script).env("PATH", path).env("AGENT_BOX_SOURCE", source).output() }).await;
             let text = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
             if !text.starts_with("updated") {
                 continue;
             }
             let app = text.split_whitespace().any(|w| w == "app");
-            let ok = this.update(cx, |ws, cx| {
+            let restart = this.update(cx, |ws, cx| {
                 ws.log_action(&json!({"do": "app.updated", "what": text}));
+                let mut extra = Map::new();
+                extra.insert("what".into(), Value::String(text.clone()));
+                extra.insert("restarting".into(), Value::Bool(app));
+                ws.pending_events.push(("app.updated".into(), extra));
+                cx.notify();
                 if app {
                     ws.save_drafts(cx);
                 }
+                ws.settings.get("app.restart_command").and_then(Value::as_str).unwrap_or(RESTART_COMMAND).to_string()
             });
-            if ok.is_err() {
-                break;
-            }
+            let Ok(restart) = restart else { break };
             if app {
-                let _ = std::process::Command::new("/bin/sh").arg("-c").arg("sleep 1; open \"$HOME/Applications/a.box.app\"").spawn();
+                let _ = std::process::Command::new("/bin/sh").arg("-c").arg(restart).spawn();
                 let _ = this.update(cx, |_, cx| cx.quit());
                 break;
             }
         });
-        let env_every = settings.connection.env_push_seconds;
-        let env_push = cx.spawn(async move |_, cx| loop {
-            if env_every == 0 {
-                break;
+        let env_push = cx.spawn(async move |this, cx| loop {
+            let plan = this.update(cx, |ws, _| (ws.settings.connection.env_push_seconds, ws.env_push_command(), ws.path_env()));
+            let Ok((every, command, path)) = plan else { break };
+            if every == 0 {
+                cx.background_executor().timer(Duration::from_secs(60)).await;
+                continue;
             }
-            let home = std::env::var("HOME").unwrap_or_default();
-            let _ = cx
-                .background_spawn(async move {
-                    std::process::Command::new(format!("{home}/dev/agent-box/bin/env-push"))
-                        .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
-                        .output()
-                })
-                .await;
-            cx.background_executor().timer(Duration::from_secs(env_every)).await;
+            let _ = cx.background_spawn(async move { std::process::Command::new("/bin/sh").arg("-c").arg(command).env("PATH", path).output() }).await;
+            cx.background_executor().timer(Duration::from_secs(every)).await;
         });
         let (designer_tx, designer_rx) = flume::unbounded();
         let designer_listen = cx.spawn(async move |this, cx| {
@@ -332,8 +473,7 @@ impl Workspace {
         let clicks = crate::macos::init().map(|rx| {
             cx.spawn_in(window, async move |this, cx| {
                 while let Ok(id) = rx.recv_async().await {
-                    let chat = id.split('#').next().unwrap_or("").to_string();
-                    if this.update_in(cx, |ws, window, cx| ws.open_chat_from_notification(&chat, window, cx)).is_err() {
+                    if this.update_in(cx, |ws, window, cx| ws.on_notification_click(&id, window, cx)).is_err() {
                         break;
                     }
                 }
@@ -346,9 +486,10 @@ impl Workspace {
         let user_state = load_state();
         let mut state = settings.state.clone();
         state.extend(user_state.clone());
+        let connecting = settings.text("connecting", "Connecting to the box…");
         let ws = Self {
-            _remote_guards: guards,
-            remotes,
+            conns: HashMap::new(),
+            remotes: HashMap::new(),
             models: HashMap::new(),
             host_up: HashMap::new(),
             project_hosts: vec![],
@@ -377,11 +518,13 @@ impl Workspace {
             view_handle: None,
             placeholders: HashMap::new(),
             queue_sent: HashMap::new(),
+            settings_val: Val::Null,
+            layout_val: Default::default(),
             settings,
             settings_error,
-            remote,
+            remote: Remote::detached(),
             connected: false,
-            status: "Connecting to the box…".into(),
+            status: connecting,
             model: Model::default(),
             selected: None,
             active_chat: HashMap::new(),
@@ -446,8 +589,26 @@ impl Workspace {
             ctx_rev: 0,
             ctx_cache: None,
             focused: true,
-            pending_events: vec![],
+            pending_events: vec![("app.start".into(), Map::new())],
+            pending_requests: vec![],
             pending_script: vec![],
+            notify_actions: HashMap::new(),
+            overlay: Default::default(),
+            settings_base: None,
+            procs: HashMap::new(),
+            fs_watchers: HashMap::new(),
+            window_size: (0., 0.),
+            composer_texts: HashMap::new(),
+            recall: HashMap::new(),
+            palette_view: None,
+            settings_sheet: false,
+            seen_focus: None,
+            seen_select: None,
+            seen_usage_level: None,
+            menu_sig: 0,
+            shown_rev: u64::MAX,
+            window_dirty: false,
+            hosts_dirty: false,
             notify_count: 0,
             badge: None,
             dock_icon: None,
@@ -455,45 +616,186 @@ impl Workspace {
             diff_geom: Default::default(),
             diff_scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
-            _tasks: [watch, env_push, designer_listen, usage_loop, update_loop].into_iter().chain(listeners).chain(clicks).collect(),
+            _tasks: [watch, env_push, designer_listen, usage_loop, update_loop].into_iter().chain(clicks).collect(),
             _subscriptions: vec![],
         };
         let mut ws = ws;
+        ws.settings_val = ws.settings_context();
+        ws.sync_hosts(window, cx);
         ws.configure_motion();
         ws.load_scripts();
         ws.update_dock_icon();
+        ws.watch_window(window, cx);
         ws
+    }
+
+    /** Connects to every host settings name, and drops connections they no longer do (settings
+    `hosts.<name>.connection`, `connection`, `local`). Changing a host's connection reconnects it. */
+    pub(crate) fn sync_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.path_env();
+        let specs = crate::behavior::host_specs(&self.settings.raw);
+        let wanted: HashSet<String> = specs.iter().map(|s| s.name.clone()).collect();
+        let gone: Vec<String> = self.conns.keys().filter(|h| !wanted.contains(*h)).cloned().collect();
+        for h in gone {
+            self.conns.remove(&h);
+            self.remotes.remove(&h);
+            self.host_up.remove(&h);
+            self.models.remove(&h);
+        }
+        for spec in specs {
+            if self.conns.get(&spec.name).is_some_and(|c| c.spec == spec && c.path == path) {
+                continue;
+            }
+            let host = spec.name.clone();
+            let (r, incoming, guard) = Remote::start(spec.clone(), path.clone());
+            let name = host.clone();
+            let listen = cx.spawn_in(window, async move |this, cx| {
+                while let Ok(msg) = incoming.recv_async().await {
+                    if this.update_in(cx, |ws, window, cx| ws.on_incoming(&name, msg, window, cx)).is_err() {
+                        break;
+                    }
+                }
+            });
+            self.host_up.insert(host.clone(), false);
+            self.remotes.insert(host.clone(), r);
+            self.conns.insert(host, HostConn { spec, path: path.clone(), _guard: guard, _listen: listen });
+        }
+        let default = self.default_host();
+        self.remote = self.remotes.get(&default).or_else(|| self.remotes.values().next()).cloned().unwrap_or_else(Remote::detached);
+        self.connected = self.host_up.values().any(|u| *u);
+        self.merge_models();
+    }
+
+    /** Window-level behavior from settings `window`: focus and blur events, the remembered frame,
+    following the system's appearance, and what closing the window does. */
+    fn watch_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let activation = cx.observe_window_activation(window, |ws, window, cx| {
+            let now = window.is_window_active();
+            if ws.seen_focus != Some(now) {
+                ws.seen_focus = Some(now);
+                ws.focused = now;
+                ws.ctx_rev += 1;
+                ws.pending_events.push((if now { "app.focus" } else { "app.blur" }.into(), Map::new()));
+                cx.notify();
+            }
+        });
+        let bounds = cx.observe_window_bounds(window, |ws, window, _| {
+            if ws.settings.get("window.remember_frame").and_then(Value::as_bool) == Some(false) {
+                return;
+            }
+            let b = window.bounds();
+            let frame = json!({"x": f32::from(b.origin.x), "y": f32::from(b.origin.y), "width": f32::from(b.size.width), "height": f32::from(b.size.height), "fullscreen": window.is_fullscreen()});
+            let _ = std::fs::write(settings::dir().join("window.json"), frame.to_string());
+        });
+        let appearance = cx.observe_window_appearance(window, |ws, window, cx| {
+            if ws.settings.get("window.appearance").and_then(Value::as_str) == Some("system") {
+                apply_appearance(&ws.settings, window.appearance(), cx);
+                ws.ctx_rev += 1;
+                cx.notify();
+            }
+        });
+        self._subscriptions.extend([activation, bounds, appearance]);
+        let view = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            let what = view.upgrade().map(|v| v.read(cx).settings.text_at("window.on_close", "close")).unwrap_or_else(|| "close".into());
+            match what.as_str() {
+                "hide" => {
+                    cx.hide();
+                    false
+                }
+                "quit" => {
+                    cx.quit();
+                    true
+                }
+                "keep" => false,
+                _ => true,
+            }
+        });
+    }
+
+    /** Settings `window` again after a reload: the title and the component kit's appearance. */
+    fn apply_window_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self.settings.text_at("window.title", "a.box");
+        window.set_window_title(&title);
+        apply_appearance(&self.settings, window.appearance(), cx);
     }
 
     /** (Re)starts the scripts: a fresh JS context, so edits take effect at once and old timers stop. */
     pub(crate) fn load_scripts(&mut self) {
         self.script_timers.clear();
-        self.script_data.clear();
+        self.procs.drain().for_each(|(_, p)| kill_pid(p.pid));
+        self.fs_watchers.clear();
+        // `scripts_options.keep_data`: what scripts published (`.data`) stays until they publish it again.
+        if self.settings.get("scripts_options.keep_data").and_then(Value::as_bool) == Some(false) {
+            self.script_data.clear();
+        }
+        let had_overlay = !self.overlay.patches.is_empty() || !self.overlay.keys.is_empty() || !self.overlay.commands.is_empty();
+        self.overlay = ScriptOverlay::default();
+        if had_overlay {
+            self.apply_overlay();
+        }
         self.scripts = crate::script::Scripts::load(&self.settings.scripts);
         self.pending_script.push(json!({"type": "event", "name": "start", "payload": null}));
     }
 
-    /** Runs queued script messages, events, and actions now, so the app keeps working while its window
-    is hidden and not rendering (agents drive it then too). */
+    /** The settings with what scripts added at runtime on top (`ab.patch`, `ab.key`, `ab.command`). */
+    fn apply_overlay(&mut self) {
+        let base = self.settings_base.get_or_insert_with(|| (self.settings.raw.clone(), self.settings.warnings.clone())).clone();
+        let mut raw = base.0;
+        let mut warnings = crate::ui::patch::apply(&mut raw, &self.overlay.patches);
+        if let Some(Value::Array(k)) = raw.get_mut("keys") {
+            k.extend(self.overlay.keys.iter().cloned());
+        }
+        if let Some(Value::Array(c)) = raw.get_mut("commands") {
+            c.extend(self.overlay.commands.iter().cloned());
+        }
+        match settings::from_raw(raw) {
+            Ok(mut s) => {
+                let mut w = base.1;
+                w.extend(warnings.drain(..).map(|x| format!("ab.patch: {x}")));
+                s.warnings = w;
+                self.settings = s;
+                self.settings_val = self.settings_context();
+                self.ctx_rev += 1;
+                self.pending_motion = true;
+            }
+            Err(e) => self.exprs.note(format!("ab.patch: {e:#}")),
+        }
+    }
+
+    /** Runs queued script messages, events, requests, and actions now, so the app keeps working while its
+    window is hidden and not rendering (agents drive it then too). */
     pub(crate) fn flush(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_script.is_empty() && self.pending_events.is_empty() && self.pending_actions.is_empty() {
+        if std::mem::take(&mut self.hosts_dirty) {
+            self.sync_hosts(window, cx);
+        }
+        if std::mem::take(&mut self.window_dirty) {
+            self.apply_window_settings(window, cx);
+        }
+        let idle = |ws: &Self| ws.pending_script.is_empty() && ws.pending_events.is_empty() && ws.pending_actions.is_empty() && ws.pending_requests.is_empty();
+        if idle(self) {
             return;
         }
         for _ in 0..8 {
-            if self.pending_script.is_empty() && self.pending_events.is_empty() && self.pending_actions.is_empty() {
+            if idle(self) {
                 break;
             }
             for m in std::mem::take(&mut self.pending_script) {
                 self.script_deliver(m, window, cx);
             }
-            for e in std::mem::take(&mut self.pending_events) {
-                self.fire_event(&e, vec![], window, cx);
+            for (e, extra) in std::mem::take(&mut self.pending_events) {
+                let extra = extra.into_iter().map(|(k, v)| (k, to_val(&v))).collect();
+                self.fire_event(&e, extra, window, cx);
+            }
+            for (req, from) in std::mem::take(&mut self.pending_requests) {
+                self.run_request(req, from, window, cx);
             }
             for a in std::mem::take(&mut self.pending_actions) {
                 self.run_action(&a, window, cx);
             }
         }
         let ctx = self.context();
+        self.refresh_shown(&ctx, cx);
         self.inspect_at = None;
         self.write_inspect(&ctx, window, cx);
     }
@@ -505,7 +807,12 @@ impl Workspace {
                 return text.clone();
             }
         }
-        let text: std::rc::Rc<str> = std::rc::Rc::from(crate::ui::expr::to_json(&self.context()).to_string());
+        let mut ctx = crate::ui::expr::to_json(&self.context());
+        // Where every node is drawn is big and changes every frame; scripts get it from ab.inspect.
+        if let Some(Value::Object(app)) = ctx.get_mut("app") {
+            app.remove("layout");
+        }
+        let text: std::rc::Rc<str> = std::rc::Rc::from(ctx.to_string());
         self.ctx_cache = Some((self.ctx_rev, std::time::Instant::now(), text.clone()));
         text
     }
@@ -546,25 +853,15 @@ impl Workspace {
                 self.script_timers.remove(&id);
             }
             "shell" => {
-                let cmd = m["cmd"].as_str().unwrap_or("").to_string();
-                let home = std::env::var("HOME").unwrap_or_default();
-                cx.spawn_in(window, async move |this, cx| {
-                    let out = cx
-                        .background_spawn(async move {
-                            std::process::Command::new("/bin/sh")
-                                .arg("-c")
-                                .arg(cmd)
-                                .env("PATH", format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"))
-                                .output()
-                        })
-                        .await;
-                    let result = match out {
-                        Ok(o) => json!({"code": o.status.code(), "stdout": String::from_utf8_lossy(&o.stdout), "stderr": String::from_utf8_lossy(&o.stderr)}),
-                        Err(e) => json!({"code": -1, "stdout": "", "stderr": e.to_string()}),
-                    };
-                    this.update_in(cx, |ws, window, cx| ws.script_deliver(json!({"type": "reply", "id": id, "result": result}), window, cx)).ok();
-                })
-                .detach();
+                let env: Vec<(String, String)> = m["env"].as_object().map(|e| e.iter().map(|(k, v)| (k.clone(), crate::ui::render::value_text(v))).collect()).unwrap_or_default();
+                let job = ShellJob {
+                    run: m["cmd"].as_str().unwrap_or("").to_string(),
+                    cwd: m["cwd"].as_str().map(str::to_string),
+                    host: m["host"].as_str().map(str::to_string),
+                    timeout: m["timeout"].as_f64(),
+                    env,
+                };
+                self.start_shell(job, window, cx, move |ws, result, window, cx| ws.script_deliver(json!({"type": "reply", "id": id, "result": result}), window, cx));
             }
             "box" => {
                 let call = serde_json::from_value::<Call>(json!({"method": m["method"], "params": m["params"]}));
@@ -590,13 +887,29 @@ impl Workspace {
                 if let Some(parent) = std::path::Path::new(&path).parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                let _ = std::fs::write(path, m["text"].as_str().unwrap_or(""));
+                let error = std::fs::write(&path, m["text"].as_str().unwrap_or("")).err().map(|e| format!("{path}: {e}"));
+                if let Some(e) = &error {
+                    self.exprs.note(format!("ab.write: {e}"));
+                }
+                self.pending_script.push(json!({"type": "reply", "id": id, "result": error.is_none(), "error": error}));
             }
             "emit" => {
                 let name = m["event"].as_str().unwrap_or("").to_string();
                 let payload = to_val(&m["payload"]);
-                self.fire_event(&name, vec![("payload".into(), payload)], window, cx);
-                self.pending_script.push(json!({"type": "event", "name": name, "payload": m["payload"]}));
+                self.fire_event_as(&name, vec![("payload".into(), payload)], Some(m["payload"].clone()), window, cx);
+            }
+            "call" => {
+                let name = m["name"].as_str().unwrap_or("").to_string();
+                self.script_call(&name, m["args"].clone(), id, window, cx);
+            }
+            "patch" => {
+                self.overlay.patches.extend(m["ops"].as_array().cloned().unwrap_or_default());
+                self.apply_overlay();
+            }
+            "key" | "command" => {
+                let item = m[m["type"].as_str().unwrap_or("")].clone();
+                if m["type"] == "key" { self.overlay.keys.push(item) } else { self.overlay.commands.push(item) }
+                self.apply_overlay();
             }
             "log" | "error" => {
                 use std::io::Write as _;
@@ -610,8 +923,217 @@ impl Workspace {
                     let _ = writeln!(f, "{text}");
                 }
             }
-            _ => {}
+            other => self.exprs.note(format!("script: unknown message type `{other}`")),
         }
+    }
+
+    pub(crate) fn script_timer_ids(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self.script_timers.keys().copied().collect();
+        ids.sort();
+        ids
+    }
+
+    pub(crate) fn script_proc_ids(&self) -> Vec<Value> {
+        self.procs.iter().map(|(id, p)| json!({"id": id, "pid": p.pid})).collect()
+    }
+
+    /** `ab.call(name, args)`: the abilities scripts reach by name (see `script::CALLS`); the answer goes
+    back as a reply to `id`. */
+    fn script_call(&mut self, name: &str, args: Value, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let reply = |ws: &mut Workspace, result: Value, error: Option<String>| ws.pending_script.push(json!({"type": "reply", "id": id, "result": result, "error": error}));
+        match name {
+            "http" => {
+                let path = self.path_env();
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = cx.background_spawn(async move { crate::script::http(&args, &path) }).await;
+                    let error = result["error"].as_str().map(str::to_string);
+                    this.update_in(cx, |ws, window, cx| ws.script_deliver(json!({"type": "reply", "id": id, "result": result, "error": error}), window, cx)).ok();
+                })
+                .detach();
+            }
+            "clipboard.read" => {
+                let text = cx.read_from_clipboard().and_then(|c| c.text());
+                reply(self, json!({"text": text}), None);
+            }
+            "clipboard.write" => {
+                cx.write_to_clipboard(ClipboardItem::new_string(crate::ui::render::value_text(&args["text"])));
+                reply(self, Value::Bool(true), None);
+            }
+            "inspect" => {
+                let v = self.inspect_doc(window, cx);
+                reply(self, v, None);
+            }
+            "fs.watch" => {
+                use notify::{RecursiveMode, Watcher};
+                let watch_id = args["watch"].as_u64().unwrap_or(id);
+                let path = crate::script::expand(args["path"].as_str().unwrap_or(""));
+                let (tx, rx) = flume::unbounded::<Vec<String>>();
+                let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    if let Ok(ev) = res {
+                        let _ = tx.send(ev.paths.iter().map(|p| p.to_string_lossy().into_owned()).collect());
+                    }
+                });
+                match watcher.and_then(|mut w| w.watch(std::path::Path::new(&path), RecursiveMode::Recursive).map(|_| w)) {
+                    Ok(w) => {
+                        self.fs_watchers.insert(watch_id, w);
+                        cx.spawn_in(window, async move |this, cx| {
+                            while let Ok(paths) = rx.recv_async().await {
+                                let msg = json!({"type": "proc", "proc": watch_id, "stream": "change", "data": paths});
+                                if this.update_in(cx, |ws, window, cx| ws.script_deliver(msg, window, cx)).is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                        .detach();
+                        reply(self, Value::Bool(true), None);
+                    }
+                    Err(e) => reply(self, Value::Null, Some(format!("fs.watch {path}: {e}"))),
+                }
+            }
+            "proc.spawn" => self.spawn_proc(args, id, window, cx),
+            "proc.write" => {
+                let proc_id = args["proc"].as_u64().unwrap_or(0);
+                let data = crate::ui::render::value_text(&args["data"]);
+                let ok = self.procs.get_mut(&proc_id).and_then(|p| p.stdin.as_mut()).map(|s| { use std::io::Write as _; s.write_all(data.as_bytes()).and_then(|_| s.flush()) });
+                match ok {
+                    Some(Ok(())) => reply(self, Value::Bool(true), None),
+                    Some(Err(e)) => reply(self, Value::Null, Some(e.to_string())),
+                    None => reply(self, Value::Null, Some(format!("no process {proc_id}"))),
+                }
+            }
+            "proc.kill" => {
+                let proc_id = args["proc"].as_u64().unwrap_or(0);
+                match self.procs.get(&proc_id).map(|p| p.pid) {
+                    Some(pid) => {
+                        kill_pid(pid);
+                        reply(self, Value::Bool(true), None)
+                    }
+                    None => reply(self, Value::Null, Some(format!("no process {proc_id}"))),
+                }
+            }
+            other => match crate::script::pure_call(other, &args) {
+                Some(Ok(v)) => reply(self, v, None),
+                Some(Err(e)) => reply(self, Value::Null, Some(e)),
+                None => {
+                    self.exprs.note(format!("ab.call: unknown call `{other}`"));
+                    reply(self, Value::Null, Some(format!("unknown call `{other}`")));
+                }
+            },
+        }
+    }
+
+    /** `ab.spawn`: a local process whose stdout and stderr lines (and exit code) go to the script as
+    they come. A list `cmd` runs directly; a string runs in /bin/sh. */
+    fn spawn_proc(&mut self, args: Value, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        use std::io::BufRead as _;
+        use std::process::Stdio;
+        let proc_id = args["proc"].as_u64().unwrap_or(id);
+        let mut cmd = match &args["cmd"] {
+            Value::Array(a) if !a.is_empty() => {
+                let parts: Vec<String> = a.iter().map(crate::ui::render::value_text).collect();
+                let mut c = std::process::Command::new(&parts[0]);
+                c.args(&parts[1..]);
+                c
+            }
+            other => {
+                let mut c = std::process::Command::new("/bin/sh");
+                c.arg("-c").arg(crate::ui::render::value_text(other));
+                c
+            }
+        };
+        cmd.env("PATH", self.path_env());
+        if let Some(cwd) = args["cwd"].as_str() {
+            cmd.current_dir(crate::script::expand(cwd));
+        }
+        if let Some(env) = args["env"].as_object() {
+            cmd.envs(env.iter().map(|(k, v)| (k.clone(), crate::ui::render::value_text(v))));
+        }
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.pending_script.push(json!({"type": "reply", "id": id, "result": null, "error": e.to_string()}));
+                self.pending_script.push(json!({"type": "proc", "proc": proc_id, "exit": -1}));
+                return;
+            }
+        };
+        let mut stdin = child.stdin.take();
+        if let (Some(text), Some(s)) = (args["stdin"].as_str(), stdin.as_mut()) {
+            use std::io::Write as _;
+            let _ = s.write_all(text.as_bytes());
+        }
+        let (tx, rx) = flume::unbounded::<Value>();
+        let mut readers = vec![];
+        for (stream, pipe) in [("stdout", child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>)), ("stderr", child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>))] {
+            let (Some(pipe), tx) = (pipe, tx.clone()) else { continue };
+            readers.push(std::thread::spawn(move || {
+                for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                    let _ = tx.send(json!({"type": "proc", "proc": proc_id, "stream": stream, "data": line}));
+                }
+            }));
+        }
+        let pid = child.id();
+        std::thread::spawn(move || {
+            let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+            // `exit` comes after the last line.
+            for r in readers {
+                let _ = r.join();
+            }
+            let _ = tx.send(json!({"type": "proc", "proc": proc_id, "exit": code}));
+        });
+        self.procs.insert(proc_id, Proc { stdin, pid });
+        self.pending_script.push(json!({"type": "reply", "id": id, "result": {"pid": pid}, "error": null}));
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(msg) = rx.recv_async().await {
+                let done = msg.get("exit").is_some();
+                let alive = this.update_in(cx, |ws, window, cx| {
+                    // Scripts that reloaded since don't hear from their old processes.
+                    let known = if done { ws.procs.remove(&proc_id).is_some() } else { ws.procs.contains_key(&proc_id) };
+                    if known {
+                        ws.script_deliver(msg, window, cx)
+                    }
+                });
+                if alive.is_err() || done {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /** A shell command on the Mac, or with `host` set to another machine, on its daemon (bash -lc there);
+    `done` gets `{code, stdout, stderr}`. */
+    pub(crate) fn start_shell(&mut self, job: ShellJob, window: &mut Window, cx: &mut Context<Self>, done: impl FnOnce(&mut Workspace, Value, &mut Window, &mut Context<Workspace>) + 'static) {
+        let remote_host = job.host.clone().filter(|h| !self.is_local_host(h));
+        if let Some(host) = remote_host {
+            let exports: String = job.env.iter().map(|(k, v)| format!("export {k}={}; ", crate::behavior::sh_quote(v))).collect();
+            let call = Call::Exec { cmd: format!("{exports}{}", job.run), cwd: job.cwd.clone(), timeout_secs: job.timeout.map(|t| t.ceil() as u64) };
+            let remote = self.remote_for_host(&host);
+            cx.spawn_in(window, async move |this, cx| {
+                let result = match remote.call(call).await {
+                    Ok(v) => json!({"code": v["code"], "stdout": v["stdout"], "stderr": v["stderr"]}),
+                    Err(e) => json!({"code": -1, "stdout": "", "stderr": e.to_string()}),
+                };
+                this.update_in(cx, |ws, window, cx| done(ws, result, window, cx)).ok();
+            })
+            .detach();
+            return;
+        }
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(&job.run).envs(job.env.clone()).env("PATH", self.path_env());
+        if let Some(cwd) = &job.cwd {
+            cmd.current_dir(crate::script::expand(cwd));
+        }
+        let timeout = job.timeout.map(Duration::from_secs_f64);
+        cx.spawn_in(window, async move |this, cx| {
+            let out = cx.background_spawn(async move { crate::script::run_output(cmd, None, timeout) }).await;
+            let result = match out {
+                Ok(o) => json!({"code": o.status.code(), "stdout": String::from_utf8_lossy(&o.stdout), "stderr": String::from_utf8_lossy(&o.stderr)}),
+                Err(e) => json!({"code": -1, "stdout": "", "stderr": e.to_string()}),
+            };
+            this.update_in(cx, |ws, window, cx| done(ws, result, window, cx)).ok();
+        })
+        .detach();
     }
 
     fn configure_motion(&self) {
@@ -632,7 +1154,7 @@ impl Workspace {
             }
             Out::Done { error } => {
                 self.designer.working = false;
-                self.pending_events.push("designer.finished".into());
+                self.pending_events.push(("designer.finished".into(), Map::new()));
                 if let Some(text) = error {
                     let from = t.lines;
                     t.append(from, &[json!({"type": "system", "level": "error", "content": text})]);
@@ -700,7 +1222,7 @@ impl Workspace {
                         let _ = tx.send(false);
                     } else if p.extension().is_some_and(|e| e == "js") && p.parent().is_some_and(|d| d.ends_with("scripts")) {
                         let _ = tx.send(false);
-                    } else if p.file_name().and_then(|n| n.to_str()) == Some("run.json") {
+                    } else if p.file_name().and_then(|n| n.to_str()) == Some("run.json") || (p.parent().is_some_and(|d| d.ends_with("run.d")) && p.extension().is_some_and(|e| e == "json")) {
                         let _ = tx.send(true);
                     }
                 }
@@ -718,6 +1240,14 @@ impl Workspace {
             let scripts = crate::script::scripts_dir();
             let _ = std::fs::create_dir_all(&scripts);
             let _ = watcher.watch(&scripts, RecursiveMode::NonRecursive);
+            let inbox = dir.join("run.d");
+            let _ = std::fs::create_dir_all(&inbox);
+            let _ = watcher.watch(&inbox, RecursiveMode::NonRecursive);
+            // Requests written while the app wasn't running.
+            let _ = this.update_in(cx, |ws, window, cx| {
+                ws.run_inbox(cx);
+                ws.flush(window, cx);
+            });
             while let Ok(first) = rx.recv_async().await {
                 let wait = this.update(cx, |ws, _| ws.settings.num("settings_options.reload_debounce_ms", 80.)).unwrap_or(80.);
                 cx.background_executor().timer(Duration::from_millis(wait as u64)).await;
@@ -743,16 +1273,68 @@ impl Workspace {
         })
     }
 
-    /** `run.json` in the settings folder: actions written there run once, then the file is removed. */
+    /** Agents' requests in the settings folder: `run.json`, and each `run.d/<id>.json` (oldest first).
+    Each runs once and its file is removed; a request with an id gets `results/<id>.json`. */
     fn run_inbox(&mut self, cx: &mut Context<Self>) {
-        let p = settings::dir().join("run.json");
-        let Ok(text) = std::fs::read_to_string(&p) else { return };
-        let _ = std::fs::remove_file(&p);
-        match serde_json_lenient::from_str::<Value>(&text) {
-            Ok(v) => self.pending_actions.push(v),
-            Err(e) => self.exprs.note(format!("run.json: {e}")),
+        let dir = settings::dir();
+        let mut files: Vec<(std::path::PathBuf, Option<String>)> = vec![];
+        let p = dir.join("run.json");
+        if p.exists() {
+            files.push((p, None));
+        }
+        let mut queued: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(dir.join("run.d"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json") && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+            .map(|p| (std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p))
+            .collect();
+        queued.sort();
+        for (_, p) in queued {
+            let id = p.file_stem().map(|s| s.to_string_lossy().into_owned());
+            files.push((p, id));
+        }
+        for (p, id) in files {
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            let _ = std::fs::remove_file(&p);
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            match serde_json_lenient::from_str::<Value>(&text) {
+                Ok(v) => self.pending_requests.push((crate::behavior::parse_request(id.as_deref(), v), None)),
+                Err(e) => {
+                    self.exprs.note(format!("{name}: {e}"));
+                    if let Some(id) = id {
+                        write_result(&id, &json!({"ok": false, "error": format!("{name}: {e}"), "errors": [], "value": null}));
+                    }
+                }
+            }
         }
         cx.notify();
+    }
+
+    /** Runs an agent's request; with an id, writes what happened to `results/<id>.json` (on the machine
+    it came from): `{ok, error, errors, value}` (value: its `read` expression after the action). */
+    fn run_request(&mut self, req: crate::behavior::Request, from: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let prior = self.exprs.capture.borrow_mut().replace(vec![]);
+        self.run_action(&req.action, window, cx);
+        let errors = std::mem::replace(&mut *self.exprs.capture.borrow_mut(), prior).unwrap_or_default();
+        let Some(id) = req.id.as_deref().and_then(crate::behavior::safe_id) else { return };
+        let value = req.read.as_deref().map(|code| crate::ui::expr::to_json(&self.exprs.first(code, &self.context()))).unwrap_or(Value::Null);
+        let result = json!({"id": id, "ok": errors.is_empty(), "error": errors.first(), "errors": errors, "value": value});
+        self.deliver_result(&id, &result, from);
+    }
+
+    fn deliver_result(&self, id: &str, result: &Value, from: Option<String>) {
+        match from.filter(|h| !self.is_local_host(h)) {
+            None => write_result(id, result),
+            Some(host) => {
+                // Back on the machine whose agent asked, where its `abx do --wait` reads it.
+                use base64::Engine as _;
+                let data = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec_pretty(result).unwrap_or_default());
+                let cmd = format!("d=\"$HOME/.agent-box/state/settings/results\"; mkdir -p \"$d\" && printf %s {} | base64 -d > \"$d/.{id}.json\" && mv \"$d/.{id}.json\" \"$d/{id}.json\"", crate::behavior::sh_quote(&data));
+                self.remote_for_host(&host).send(Call::Exec { cmd, cwd: None, timeout_secs: Some(15) });
+            }
+        }
     }
 
     pub(crate) fn reload_settings(&mut self, cx: &mut Context<Self>) {
@@ -762,8 +1344,17 @@ impl Workspace {
                 self.state = s.state.clone();
                 self.state.extend(self.user_state.clone());
                 self.settings = s;
+                self.settings_base = None;
+                self.settings_val = self.settings_context();
                 crate::transcript::set_options(&self.settings.chat);
-                set_menu_bar(&self.settings, cx);
+                set_upload_options(&self.settings);
+                crate::designer::configure(&self.settings.designer, &self.path_env());
+                self.configure_usage();
+                self.menu_sig = 0;
+                self.shown_rev = u64::MAX;
+                self.hosts_dirty = true;
+                self.window_dirty = true;
+                self.pending_events.push(("settings.reloaded".into(), Map::new()));
                 self.settings_error = None;
                 self.exprs = Exprs::default();
                 self.configure_motion();
@@ -772,8 +1363,6 @@ impl Workspace {
                     l.state.remeasure();
                 }
                 self.pending_motion = true;
-                let ctx = self.context();
-                self.update_badge(&ctx);
                 crate::logo::clear_cache();
                 self.update_dock_icon();
                 let ts = self.settings.terminal.clone();
@@ -791,32 +1380,73 @@ impl Workspace {
         cx.notify();
     }
 
-    /** Runs `events` from settings for chat state changes: chat.waiting (now needs you), chat.finished
-    (working to idle), chat.stopped. The chat is `.chat` in the action's context. */
+    /** Runs `events` from settings for chat state changes, named by `events_options.transitions`
+    (chat.waiting, chat.finished, chat.stopped by default) plus chat.state for any change. The chat is
+    `.chat`, its old state `.from`. */
     fn fire_chat_events(&mut self, before: &HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) {
+        let rules = self.settings.get("events_options.transitions").cloned();
         let mut fired = vec![];
         for c in &self.model.chats {
             let Some(old) = before.get(&c.id) else { continue };
             if old != &c.state {
-                // Any change, for settings `events` that want more than the three below: `.from` and `.chat.state`.
-                fired.push(("chat.state", c.clone(), old.clone()));
+                fired.push(("chat.state".to_string(), c.clone(), old.clone()));
             }
-            let event = match (old.as_str(), c.state.as_str()) {
-                (o, "waiting") if o != "waiting" => "chat.waiting",
-                ("working", "idle") => "chat.finished",
-                ("working" | "waiting" | "idle", "stopped") => "chat.stopped",
-                _ => continue,
-            };
-            fired.push((event, c.clone(), old.clone()));
+            for event in crate::behavior::transition_events(rules.as_ref(), old, &c.state) {
+                fired.push((event, c.clone(), old.clone()));
+            }
         }
         for (event, chat, from) in fired {
-            self.fire_event(event, vec![("chat".into(), to_val(&self.chat_json(&chat))), ("from".into(), to_val(&Value::String(from)))], window, cx);
+            self.fire_event(&event, vec![("chat".into(), to_val(&self.chat_json(&chat))), ("from".into(), to_val(&Value::String(from)))], window, cx);
         }
     }
 
-    fn open_chat_from_notification(&mut self, chat: &str, window: &mut Window, cx: &mut Context<Self>) {
-        window.activate_window();
-        cx.activate(true);
+    /** What appeared, went, or changed in a host's new model: chat.added / chat.removed (`.chat`),
+    worktree.added / worktree.removed (`.worktree`), worktree.mr (its merge request or checks changed;
+    `.worktree`, `.from`). */
+    fn model_events(&mut self, old: &Model, host: &str) {
+        let new = self.models.get(host).cloned().unwrap_or_default();
+        let ext = |pairs: Vec<(&str, Value)>| -> Map<String, Value> { pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
+        let mut events = vec![];
+        for c in new.chats.iter().filter(|c| !old.chats.iter().any(|o| o.id == c.id)) {
+            events.push(("chat.added", ext(vec![("chat", self.chat_json(c)), ("host", json!(host))])));
+        }
+        for c in old.chats.iter().filter(|o| !new.chats.iter().any(|c| c.id == o.id)) {
+            events.push(("chat.removed", ext(vec![("chat", serde_json::to_value(c).unwrap_or_default()), ("host", json!(host))])));
+        }
+        let wts = |m: &Model| -> Vec<Worktree> { m.projects.iter().flat_map(|p| p.items.iter()).chain(m.sections.iter().flat_map(|s| s.items.iter())).cloned().collect() };
+        let (before, after) = (wts(old), wts(&new));
+        for w in &after {
+            match before.iter().find(|o| o.path == w.path) {
+                None => events.push(("worktree.added", ext(vec![("worktree", serde_json::to_value(w).unwrap_or_default()), ("host", json!(host))]))),
+                Some(o) if o.mr != w.mr => events.push(("worktree.mr", ext(vec![("worktree", serde_json::to_value(w).unwrap_or_default()), ("from", serde_json::to_value(&o.mr).unwrap_or_default()), ("host", json!(host))]))),
+                _ => {}
+            }
+        }
+        for o in before.iter().filter(|o| !after.iter().any(|w| w.path == o.path)) {
+            events.push(("worktree.removed", ext(vec![("worktree", serde_json::to_value(o).unwrap_or_default()), ("host", json!(host))])));
+        }
+        self.pending_events.extend(events.into_iter().map(|(e, x)| (e.to_string(), x)));
+    }
+
+    /** A banner was clicked: its own `do` (notify.system), else the `notification.click` event with the
+    chat it was about as `.chat` and the banner's id as `.id`. */
+    fn on_notification_click(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let chat_id = id.split('#').next().unwrap_or("").to_string();
+        let chat = self.chat(&chat_id).map(|c| self.chat_json(c)).unwrap_or_else(|| json!({"id": chat_id}));
+        let extra = vec![("chat".into(), to_val(&chat)), ("id".into(), to_val(&json!(id)))];
+        match self.notify_actions.remove(id) {
+            Some(action) => {
+                let ctx = crate::ui::expr::with(&self.context(), extra);
+                let action = self.exprs.resolve_action(&action, &ctx);
+                self.run_action(&action, window, cx);
+            }
+            None => self.fire_event("notification.click", extra, window, cx),
+        }
+        cx.notify();
+    }
+
+    /** Shows a chat wherever it is: selects its worktree with it as the active tab (the designer opens its panel). */
+    pub(crate) fn show_chat(&mut self, chat: &str, window: &mut Window, cx: &mut Context<Self>) {
         if chat == crate::designer::CHAT_ID {
             self.set_state("designer_open".into(), Value::Bool(true));
         } else if let Some(path) = self.all_worktrees().iter().find(|w| w.chat_ids.iter().any(|c| c == chat)).map(|w| w.path.clone()) {
@@ -846,34 +1476,51 @@ impl Workspace {
     }
 
     pub(crate) fn fire_event(&mut self, event: &str, extra: Vec<(String, Val)>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.scripts.is_some() && event != "model" {
-            let payload: Map<String, Value> = extra.iter().map(|(k, v)| (k.clone(), crate::ui::expr::to_json(v))).collect();
+        self.fire_event_as(event, extra, None, window, cx)
+    }
+
+    /** Runs an event: scripts' `ab.on` handlers get `script_payload` (else the extra fields as an object),
+    its sound plays, and every handler in settings `events.<event>` (one `{if, do}` or a list) whose `if`
+    holds runs with the extra fields in its context. */
+    pub(crate) fn fire_event_as(&mut self, event: &str, extra: Vec<(String, Val)>, script_payload: Option<Value>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scripts.is_some() {
+            let payload = script_payload.unwrap_or_else(|| Value::Object(extra.iter().map(|(k, v)| (k.clone(), crate::ui::expr::to_json(v))).collect()));
             self.pending_script.push(json!({"type": "event", "name": event, "payload": payload}));
         }
         self.play_event_sound(event, &extra);
         let Some(spec) = self.settings.events.get(event).cloned() else { return };
         let ctx = crate::ui::expr::with(&self.context(), extra);
-        if let Some(cond) = spec.get("if").and_then(Value::as_str) {
-            if !self.exprs.truthy(cond, &ctx) {
-                return;
+        for h in crate::behavior::handlers(&spec) {
+            let (cond, action) = crate::behavior::handler_parts(&h);
+            if cond.is_some_and(|c| !self.exprs.truthy(c, &ctx)) {
+                continue;
             }
+            let action = self.exprs.resolve_action(action, &ctx);
+            self.run_action(&action, window, cx);
         }
-        let action = self.exprs.resolve_action(spec.get("do").unwrap_or(&Value::Null), &ctx);
-        self.run_action(&action, window, cx);
     }
 
-    /** `sounds` from settings: a sound per event (a finished turn that ends in a question plays
-    `chat.question`), whether or not the window is focused unless `when` is "unfocused". */
-    fn play_event_sound(&self, event: &str, extra: &[(String, Val)]) {
+    /** `sounds` from settings: a sound per event (a turn ending in a question plays `chat.question`
+    instead, for the events in `sounds.question_event`), focused or not unless `when` is "unfocused". */
+    fn play_event_sound(&mut self, event: &str, extra: &[(String, Val)]) {
         let sounds = &self.settings.sounds;
         if sounds.get("enabled") == Some(&Value::Bool(false)) || (sounds.get("when").and_then(Value::as_str) == Some("unfocused") && self.focused) {
             return;
         }
-        let asks = event == "chat.finished" && extra.iter().any(|(k, v)| k == "chat" && crate::ui::expr::to_json(v).get("asks") == Some(&Value::Bool(true)));
+        let swaps = match sounds.get("question_event") {
+            None => event == "chat.finished",
+            Some(Value::String(e)) => e == event,
+            Some(Value::Array(a)) => a.iter().any(|e| e.as_str() == Some(event)),
+            Some(_) => false,
+        };
+        let asks = swaps && extra.iter().any(|(k, v)| k == "chat" && crate::ui::expr::to_json(v).get("asks") == Some(&Value::Bool(true)));
         let key = if asks { "chat.question" } else { event };
-        if let Some(name) = sounds.get(key).and_then(Value::as_str) {
+        if let Some(name) = sounds.get(key).and_then(Value::as_str).map(str::to_string) {
+            let volume = sounds.get("volume").and_then(Value::as_f64).unwrap_or(1.) as f32;
+            self.record_notice("sound", &name, None);
             #[cfg(target_os = "macos")]
-            crate::macos::play_sound(name, sounds.get("volume").and_then(Value::as_f64).unwrap_or(1.) as f32);
+            crate::macos::play_sound(&name, volume);
+            let _ = volume;
         }
     }
 
@@ -923,6 +1570,7 @@ impl Workspace {
                 self.status = self.tr("connected", "Connected", &[]);
                 self.watching.clear();
                 self.configure_host(host);
+                self.pending_events.push(("host.connected".into(), [("host".to_string(), json!(host))].into_iter().collect()));
                 let remote = self.remote_for_host(host);
                 cx.spawn(async move |_, _| {
                     let _ = remote.call(Call::Hello { client: "agent-box-app".into() }).await;
@@ -931,20 +1579,28 @@ impl Workspace {
                 .detach();
             }
             Incoming::Disconnected(why) => {
-                self.host_up.insert(host.to_string(), false);
+                let was_up = self.host_up.insert(host.to_string(), false) == Some(true);
                 self.connected = self.host_up.values().any(|u| *u);
                 self.status = self.tr("reconnecting", "Reconnecting to {host}… ({why})", &[("host", host), ("why", &why)]);
                 self.terminals.retain(|_, t| t.read(cx).host != host);
                 self.term_by_id.retain(|(h, _), _| h != host);
+                // Once per drop, not on every retry while it stays down (`.app.host_errors` says why).
+                if was_up {
+                    self.pending_events.push(("host.disconnected".into(), [("host".to_string(), json!(host)), ("why".to_string(), json!(why))].into_iter().collect()));
+                }
             }
             Incoming::Event(Event::Model(m)) => {
                 let before: HashMap<String, String> = self.model.chats.iter().map(|c| (c.id.clone(), c.state.clone())).collect();
-                self.models.insert(host.to_string(), m);
+                let old = self.models.insert(host.to_string(), m);
                 self.merge_models();
+                if let Some(old) = old {
+                    self.model_events(&old, host);
+                }
                 if !before.is_empty() {
                     self.fire_chat_events(&before, window, cx);
                     self.flush_queue();
                 }
+                self.pending_events.push(("model".into(), [("host".to_string(), json!(host))].into_iter().collect()));
                 let ctx = self.context();
                 self.update_badge(&ctx);
                 self.pending_motion = true;
@@ -975,12 +1631,25 @@ impl Workspace {
                         .and_then(Value::as_str)
                         .filter(|p| self.worktree(p).is_some())
                         .map(str::to_string)
+                        .or_else(|| self.sidebar_order().into_iter().next())
                         .or_else(|| self.all_worktrees().first().map(|w| w.path.clone()));
                 }
                 self.sync_selection(window, cx);
             }
             Incoming::Event(Event::Transcript { chat_id, from, entries }) => {
-                self.transcripts.entry(chat_id.clone()).or_insert_with(|| crate::transcript::Transcript::for_chat(&chat_id)).append(from, &entries);
+                let t = self.transcripts.entry(chat_id.clone()).or_insert_with(|| crate::transcript::Transcript::for_chat(&chat_id));
+                let had = t.items.len();
+                t.append(from, &entries);
+                // New messages as they arrive (not loads of older ones): `.chat`, `.message {kind, text}`.
+                let new: Vec<Value> = t.items.iter().skip(had).filter_map(|i| match i {
+                    Item::Assistant { text } => Some(json!({"kind": "assistant", "text": text})),
+                    Item::User { text } => Some(json!({"kind": "user", "text": text})),
+                    _ => None,
+                }).collect();
+                let chat = if new.is_empty() { Value::Null } else { self.chat(&chat_id).map(|c| self.chat_json(c)).unwrap_or_else(|| json!({"id": chat_id})) };
+                for message in new {
+                    self.pending_events.push(("chat.message".into(), [("chat".to_string(), chat.clone()), ("message".to_string(), message)].into_iter().collect()));
+                }
             }
             Incoming::Event(Event::TermOutput { term_id, data }) => {
                 if let Some(t) = self.term_by_id.get(&(host.to_string(), term_id)).cloned() {
@@ -990,15 +1659,27 @@ impl Workspace {
             }
             Incoming::Event(Event::AppAction { action }) => {
                 self.log_action(&json!({"from": host, "action": "relayed"}));
-                self.run_action(&action, window, cx);
+                let req = crate::behavior::parse_request(None, action);
+                match crate::behavior::remote_allowed(self.settings.get("inspect.remote_actions"), &req.action) {
+                    Ok(()) => self.pending_requests.push((req, Some(host.to_string()))),
+                    Err(why) => {
+                        self.exprs.note(format!("relayed action from {host} refused: {why}"));
+                        if let Some(id) = req.id.as_deref().and_then(crate::behavior::safe_id) {
+                            let result = json!({"id": id, "ok": false, "error": format!("refused: {why}"), "errors": [], "value": null});
+                            self.deliver_result(&id, &result, Some(host.to_string()));
+                        }
+                    }
+                }
             }
             Incoming::Event(Event::Hook(e)) => {
                 let keep = self.settings.num("inspect.hook_events", 50.) as usize;
-                self.hooks.push(json!({"host": host, "seq": e.seq, "at": e.at, "event": e.event, "session_id": e.session_id}));
+                let hook = json!({"host": host, "seq": e.seq, "at": e.at, "event": e.event, "session_id": e.session_id});
+                self.hooks.push(hook.clone());
                 if self.hooks.len() > keep {
                     let extra = self.hooks.len() - keep;
                     self.hooks.drain(..extra);
                 }
+                self.pending_events.push(("hook".into(), [("hook".to_string(), hook)].into_iter().collect()));
             }
             Incoming::Event(_) => {}
         }
@@ -1010,7 +1691,8 @@ impl Workspace {
     fn merge_models(&mut self) {
         let mut hosts: Vec<&String> = self.models.keys().collect();
         // `sidebar.host_order`: whose worktrees come first in a merged project.
-        let order: Vec<String> = self.settings.get("sidebar.host_order").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_else(|| vec!["mac".into(), "box".into()]);
+        let order: Vec<String> = self.settings.get("sidebar.host_order").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_else(|| vec![self.local_host(), self.default_host()]);
+        let default_host = self.default_host();
         hosts.sort_by_key(|h| order.iter().position(|x| x == *h).unwrap_or(order.len()));
         let mut merged = Model { host: "all".into(), ..Default::default() };
         let (mut project_hosts, mut section_hosts): (Vec<Vec<String>>, HashMap<String, String>) = (vec![], HashMap::new());
@@ -1019,7 +1701,7 @@ impl Workspace {
         let by_host = self.state.get("sidebar_projects").and_then(Value::as_str) == Some("by_host");
         for h in hosts {
             let m = &self.models[h];
-            if h == "box" {
+            if *h == default_host {
                 merged.ssh_host = m.ssh_host.clone();
             }
             merged.last_seq = merged.last_seq.max(m.last_seq);
@@ -1057,11 +1739,16 @@ impl Workspace {
         self.section_hosts = section_hosts;
     }
 
-    /** Asks every connected host for its past chats; `.history` holds them newest first. */
-    pub(crate) fn load_history(&mut self, cx: &mut Context<Self>) {
+    /** Asks every connected host (or those in `hosts`) for its past chats; `.history` holds them newest first. */
+    pub(crate) fn load_history(&mut self, hosts: Option<Vec<String>>, limit: Option<usize>, cx: &mut Context<Self>) {
         self.history_loading = true;
-        let remotes: Vec<(String, Remote)> = self.remotes.iter().filter(|(h, _)| self.host_up.get(*h) == Some(&true)).map(|(h, r)| (h.clone(), r.clone())).collect();
-        let limit = self.settings.num("history.limit", 300.) as usize;
+        let remotes: Vec<(String, Remote)> = self
+            .remotes
+            .iter()
+            .filter(|(h, _)| self.host_up.get(*h) == Some(&true) && hosts.as_ref().is_none_or(|l| l.contains(h)))
+            .map(|(h, r)| (h.clone(), r.clone()))
+            .collect();
+        let limit = limit.unwrap_or(self.settings.num("history.limit", 300.) as usize);
         let age_fmt = self.age_format();
         cx.spawn(async move |this, cx| {
             let mut all: Vec<Value> = vec![];
@@ -1095,8 +1782,53 @@ impl Workspace {
         self.remotes.get(host).cloned().unwrap_or_else(|| self.remote.clone())
     }
 
+    /** The machine the app runs on (`app.local_host`): its daemon runs here, not over ssh. */
+    pub(crate) fn local_host(&self) -> String {
+        crate::behavior::host_name(&self.settings.raw, "local_host", "mac")
+    }
+
+    /** Where things go when nothing says (`app.default_host`): new worktrees, unknown chats, calls. */
+    pub(crate) fn default_host(&self) -> String {
+        crate::behavior::host_name(&self.settings.raw, "default_host", "box")
+    }
+
+    pub(crate) fn is_local_host(&self, host: &str) -> bool {
+        host == self.local_host() || self.conns.get(host).is_some_and(|c| c.spec.ssh_host.is_empty())
+    }
+
+    /** The ssh host a machine is reached at ("" for this one). */
+    pub(crate) fn ssh_host_of(&self, host: &str) -> String {
+        match self.conns.get(host) {
+            Some(c) => c.spec.ssh_host.clone(),
+            None if self.is_local_host(host) => String::new(),
+            None => self.settings.connection.ssh_host.clone(),
+        }
+    }
+
+    /** `PATH` for everything the app runs (settings `app.path`). */
+    pub(crate) fn path_env(&self) -> String {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let list = self.settings.strings("app.path", DEFAULT_PATH);
+        crate::behavior::path_env(&list, &home)
+    }
+
+    /** The folder of a.box's scripts (`app.bin_dir`, else `bin` in `app.source_dir`). */
+    pub(crate) fn bin_dir(&self) -> std::path::PathBuf {
+        match self.settings.get("app.bin_dir").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            Some(d) => crate::script::expand(d).into(),
+            None => settings::source_dir().join("bin"),
+        }
+    }
+
+    fn env_push_command(&self) -> String {
+        match self.settings.get("connection.env_push_command").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            Some(c) => c.replace("{bin}", &self.bin_dir().to_string_lossy()),
+            None => crate::behavior::sh_quote(&self.bin_dir().join("env-push").to_string_lossy()),
+        }
+    }
+
     pub(crate) fn host_of_path(&self, path: &str) -> String {
-        self.worktree(path).map(|w| w.host.clone()).unwrap_or_else(|| "box".into())
+        self.worktree(path).map(|w| w.host.clone()).unwrap_or_else(|| self.default_host())
     }
 
     /** A chat's daemon: the host whose worktree holds it, else the chat's own host if connected. */
@@ -1104,7 +1836,7 @@ impl Workspace {
         if let Some(w) = self.all_worktrees().into_iter().find(|w| w.chat_ids.iter().any(|c| c == id)) {
             return w.host.clone();
         }
-        self.chat(id).map(|c| c.host.clone()).filter(|h| self.remotes.contains_key(h)).unwrap_or_else(|| "box".into())
+        self.chat(id).map(|c| c.host.clone()).filter(|h| self.remotes.contains_key(h)).unwrap_or_else(|| self.default_host())
     }
 
     /** The daemon a call belongs to, from the chat, worktree, or section it names. */
@@ -1120,13 +1852,13 @@ impl Workspace {
             | Call::ChatKeys { chat_id, .. } => self.host_of_chat(chat_id),
             Call::ChatNew { dir: Some(d), .. } => self.host_of_path(d),
             Call::SectionRename { id, .. } | Call::SectionDelete { id } | Call::SectionMove { id, .. } => {
-                self.section_hosts.get(id).cloned().unwrap_or_else(|| "box".into())
+                self.section_hosts.get(id).cloned().unwrap_or_else(|| self.default_host())
             }
             Call::SectionAssign { path, .. } | Call::WorktreeDelete { path } | Call::WorktreeMove { path, .. } | Call::WorktreeLabel { path, .. } | Call::WorktreeRenameBranch { path, .. } | Call::WorktreeDiff { path, .. } => {
                 self.host_of_path(path)
             }
             Call::TermOpen { cwd: Some(c), .. } => self.host_of_path(c),
-            _ => "box".into(),
+            _ => self.default_host(),
         };
         self.remote_for_host(&host)
     }
@@ -1147,7 +1879,7 @@ impl Workspace {
     pub(crate) fn term_tabs(&self, path: &str) -> Vec<Value> {
         match self.state.get(&format!("terms:{path}")).and_then(Value::as_array) {
             Some(t) if !t.is_empty() => t.clone(),
-            _ => vec![json!({"id": "1", "label": "Terminal"})],
+            _ => vec![json!({"id": "1", "label": self.tr("terminal", "Terminal", &[])})],
         }
     }
 
@@ -1176,9 +1908,11 @@ impl Workspace {
         }
         let tab = self.term_tabs(path).into_iter().find(|t| t["id"].as_str() == Some(id.as_str()))?;
         let command = tab.get("command").and_then(Value::as_str).map(str::to_string);
-        let (remote, ts) = (self.remote_for_host(&w.host), self.settings.terminal.clone());
-        let host = w.host.clone();
-        let view = cx.new(|cx| TerminalView::shell(remote, host, None, Some(w.path.clone()), Some(id.clone()), command, &ts, cx));
+        // A tab may name its own folder and machine (`terminal.new {cwd, host}`).
+        let host = tab.get("host").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| w.host.clone());
+        let cwd = tab.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| w.path.clone());
+        let (remote, ts) = (self.remote_for_host(&host), self.settings.terminal.clone());
+        let view = cx.new(|cx| TerminalView::shell(remote, host, None, Some(cwd), Some(id.clone()), command, &ts, cx));
         self.terminals.insert(key, view.clone());
         Some(view)
     }
@@ -1218,15 +1952,29 @@ impl Workspace {
         self.selected.as_deref().and_then(|p| self.worktree(p))
     }
 
+    /** The selected worktree's active chat: the one chosen there, else its first open tab, else by
+    `chat.open_on_select`: "recent" (the one with the newest activity), "first" (the first tab), or none. */
     pub(crate) fn current_chat(&self) -> Option<&Chat> {
         let w = self.current_worktree()?;
         let chats = self.chats_of(w);
         let active = self.active_chat.get(&w.path);
-        let recent = self.settings.chat.get("open_on_select").and_then(Value::as_str) == Some("recent");
+        let fallback = || match self.settings.chat.get("open_on_select").and_then(Value::as_str) {
+            Some("recent") => chats.iter().max_by(|a, b| a.last_activity.unwrap_or(0.).total_cmp(&b.last_activity.unwrap_or(0.))).copied(),
+            Some("first") => chats.first().copied(),
+            _ => None,
+        };
         active
             .and_then(|id| chats.iter().find(|c| &c.id == id && !self.closed.contains(&c.id)).copied())
             .or_else(|| chats.iter().find(|c| self.chat_open(c)).copied())
-            .or_else(|| if recent { chats.first().copied() } else { None })
+            .or_else(fallback)
+    }
+
+    /** The worktrees in the order the sidebar lists them (`sidebar.select_order`, a jq expression giving
+    paths), for `select {offset}` and picking a worktree when the selected one goes. */
+    pub(crate) fn sidebar_order(&self) -> Vec<String> {
+        let code = self.settings.text_at("sidebar.select_order", "[.projects[].items[].path] + [.sections[] | select(.collapsed | not) | .items[].path]");
+        let v = crate::ui::expr::to_json(&self.exprs.first(&code, &self.context()));
+        v.as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
     }
 
     /** Everything expressions can read, rebuilt each frame: model, state, theme, selection, app. */
@@ -1257,8 +2005,8 @@ impl Workspace {
                 let gaps = self.drop_gaps(&shown);
                 let primary = p.items.iter().find(|w| w.is_primary).or(p.items.first());
                 json!({"name": name, "repo": p.repo, "hue": hue, "letter": letter,
-                       "hosts": self.project_hosts.get(i).cloned().unwrap_or_else(|| vec!["box".into()]),
-                       "host": self.project_hosts.get(i).and_then(|h| h.first().cloned()).unwrap_or_else(|| "box".into()),
+                       "hosts": self.project_hosts.get(i).cloned().unwrap_or_else(|| vec![self.default_host()]),
+                       "host": self.project_hosts.get(i).and_then(|h| h.first().cloned()).unwrap_or_else(|| self.default_host()),
                        "show_external": show_external, "show_primary": show_primary,
                        "external_count": p.items.iter().filter(|w| w.external).count(),
                        "hidden_count": p.items.iter().chain(self.model.sections.iter().flat_map(|s| s.items.iter())).filter(|w| w.repo == p.repo && self.flag(&format!("hidden:{}", w.path))).count(),
@@ -1281,7 +2029,7 @@ impl Workspace {
                 let (gap, gap_end) = &section_gap;
                 json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
                        "drop_gap": gap.as_deref() == Some(s.id.as_str()), "drop_gap_end": gap_end.as_deref() == Some(s.id.as_str()),
-                       "host": self.section_hosts.get(&s.id).cloned().unwrap_or_else(|| "box".into()),
+                       "host": self.section_hosts.get(&s.id).cloned().unwrap_or_else(|| self.default_host()),
                        "items": shown.into_iter().map(|w| self.row_json(w, json!({"id": s.id, "name": s.name}), &gaps)).collect::<Vec<_>>()})
             })
             .collect();
@@ -1318,13 +2066,16 @@ impl Workspace {
         let tabs: Vec<(String, String)> = self.current_worktree().map(|w| self.chats_of(w).into_iter().filter(|c| self.chat_open(c)).map(|c| (usage_id(c), c.name.clone())).collect()).unwrap_or_default();
         let current_usage_id = self.current_chat().map(usage_id);
         let usage = self.usage.context(current_usage_id.as_deref(), self.current_worktree().map(|w| (w.host.as_str(), w.path.as_str())), &tabs, &self.usage_providers(), &self.meter_options());
-        to_val(&json!({
+        let transcript = self.current_chat().and_then(|c| self.transcripts.get(&c.id)).map(|t| self.transcript_json(t)).unwrap_or_default();
+        let host_errors: Map<String, Value> = self.remotes.iter().map(|(h, r)| (h.clone(), json!(r.stderr()))).filter(|(_, v)| v.as_array().is_some_and(|a| !a.is_empty())).collect();
+        let ctx = to_val(&json!({
             "projects": projects,
             "sections": sections,
             "worktrees": worktrees,
             "chats": self.model.chats.iter().chain(self.sub_chats.iter().map(|(_, c)| c)).map(|c| self.chat_json(c)).collect::<Vec<_>>(),
             "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here, "diff": selected_diff,
-                         "terminals": terminals, "background": background, "move": self.move_plan()},
+                         "terminals": terminals, "background": background, "move": self.move_plan(), "transcript": transcript},
+            "composers": self.composer_texts,
             "state": self.state,
             "theme": self.settings.theme,
             "hosts": self.settings.hosts,
@@ -1340,11 +2091,25 @@ impl Workspace {
                 "history_loading": self.history_loading,
                 "connected": self.connected,
                 "removed_projects": removed,
-                "notifications": self.notices.iter().map(|(at, text)| json!({"at": at, "text": text})).collect::<Vec<_>>(),
-                "dialog": self.dialog.as_ref().map(|d| json!({"title": d.title, "fields": d.inputs.iter().map(|(l, _)| l.to_string()).collect::<Vec<_>>()})),
+                "notifications": self.notices,
+                "window": {"width": self.window_size.0, "height": self.window_size.1},
+                "hooks": self.hooks,
+                "host_errors": host_errors,
+                "local_host": self.local_host(),
+                "default_host": self.default_host(),
+                "script_actions": self.scripts.as_ref().map(|s| s.actions.clone()).unwrap_or_default(),
+                "palette": self.palette_view.as_ref().map(|p| self.palette_json(p)),
+                "settings_sheet": self.settings_sheet.then(|| json!({
+                    "path": settings::path(), "docs": settings::dir().join("SETTINGS.md"),
+                    "text": std::fs::read_to_string(settings::path()).unwrap_or_default(),
+                    "error": self.settings_error,
+                })),
+                "dialog": self.dialog.as_ref().map(|d| json!({"title": d.title, "fields": d.labels, "view": d.view,
+                    "values": d.view.then(|| (0..d.labels.len()).map(|i| self.state.get(&format!("dialog_field:{i}")).map(crate::ui::render::value_text).unwrap_or_default()).collect::<Vec<_>>())})),
                 "palette_open": self.palette_open,
                 "focus_area": self.focus_now,
-                "nav": {"back": self.can_navigate(-1), "forward": self.can_navigate(1)},
+                "nav": {"back": self.can_navigate(-1), "forward": self.can_navigate(1), "at": self.nav_at,
+                        "visits": self.nav.iter().map(|(w, c)| json!({"worktree": w, "chat": c})).collect::<Vec<_>>()},
                 "dragging": self.dragging,
                 "drop": self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone, "kind": h.kind})),
                 "drag": self.drag_item.borrow().as_ref().map(|(k, v)| json!({"kind": k, "value": v, "into": into.as_ref().map(|x| &x.1), "into_key": into.as_ref().map(|x| &x.0)})),
@@ -1368,7 +2133,61 @@ impl Workspace {
                     v
                 }).collect::<Vec<_>>(),
             },
-        }))
+        }));
+        let layout = self.layout_context();
+        let ctx = crate::ui::expr::with(&ctx, vec![("settings".into(), self.settings_val.clone())]);
+        match &ctx {
+            Val::Obj(_) => {
+                let app = crate::ui::expr::with(&crate::ui::expr::first_field(&ctx, "app"), vec![("layout".into(), layout)]);
+                crate::ui::expr::with(&ctx, vec![("app".into(), app)])
+            }
+            _ => ctx,
+        }
+    }
+
+    /** `.settings`: the merged settings without the bulky parts the rest of the context already shows or
+    doesn't need (views, components, theme, patch). */
+    fn settings_context(&self) -> Val {
+        let mut v = self.settings.raw.clone();
+        if let Value::Object(o) = &mut v {
+            for k in ["views", "components", "theme", "patch"] {
+                o.remove(k);
+            }
+        }
+        to_val(&v)
+    }
+
+    /** `.app.layout`: where each node with an id was drawn last frame, `{id: {x, y, w, h}}`. */
+    fn layout_context(&self) -> Val {
+        if let Some((gen, v)) = self.layout_val.borrow().as_ref() {
+            if *gen == self.render_generation {
+                return v.clone();
+            }
+        }
+        let bounds: Map<String, Value> = self.motion.borrow().bounds.iter().map(|(k, b)| (k.clone(), json!({"x": b[0], "y": b[1], "w": b[2], "h": b[3]}))).collect();
+        let v = to_val(&Value::Object(bounds));
+        *self.layout_val.borrow_mut() = Some((self.render_generation, v.clone()));
+        v
+    }
+
+    /** A chat's newest transcript items for `.selected.transcript` (`inspect.transcript_items` of them,
+    text cut at `inspect.transcript_chars`): `{kind, text, tool, summary, is_error}`. */
+    fn transcript_json(&self, t: &Transcript) -> Vec<Value> {
+        let n = self.settings.num("inspect.transcript_items", 20.) as usize;
+        let chars = self.settings.num("inspect.transcript_chars", 2000.) as usize;
+        let cut = |s: &str| s.chars().take(chars).collect::<String>();
+        let start = t.items.len().saturating_sub(n);
+        t.items[start..]
+            .iter()
+            .map(|i| match i {
+                Item::User { text } => json!({"kind": "user", "text": cut(text)}),
+                Item::Assistant { text } => json!({"kind": "assistant", "text": cut(text)}),
+                Item::Thinking { text } => json!({"kind": "thinking", "text": cut(text)}),
+                Item::Notice { text } => json!({"kind": "notice", "text": cut(text)}),
+                Item::Image { .. } => json!({"kind": "image"}),
+                Item::Tool { name, summary, result, is_error, .. } => json!({"kind": "tool", "tool": name, "summary": summary, "text": result.as_deref().map(cut), "is_error": is_error, "done": result.is_some()}),
+            })
+            .collect()
     }
 
     fn flag(&self, key: &str) -> bool {
@@ -1550,7 +2369,9 @@ impl Workspace {
             }
             self.ensure_composer(&chat.id, window, cx);
         }
-        if !self.terminals.contains_key(&w.path) && self.connected {
+        // `terminal.open_on_select`: false leaves the terminal until it's shown (a `terminal` node draws it).
+        let eager = self.settings.get("terminal.open_on_select").and_then(Value::as_bool) != Some(false);
+        if eager && !self.terminals.contains_key(&w.path) && self.connected {
             let remote = self.remote_for_host(&w.host);
             let ts = self.settings.terminal.clone();
             let path = w.path.clone();
@@ -1578,13 +2399,23 @@ impl Workspace {
         self._subscriptions.push(cx.subscribe_in(&state, window, move |ws, _, ev: &InputEvent, window, cx| {
             match ev {
                 InputEvent::PressEnter { secondary, shift } => {
-                    if ws.completion.as_ref().is_some_and(|c| c.0 == id) && !*shift {
+                    let enter_accepts = ws.settings.get("chat.completion_builtin_keys").and_then(|k| k.get("enter")).map_or(true, |v| v == "accept");
+                    if ws.completion.as_ref().is_some_and(|c| c.0 == id) && !*shift && enter_accepts {
                         ws.accept_completion(None, window, cx);
                     } else if (*secondary && cmd_enter_sends) || (enter_sends && !*shift && !*secondary) {
                         ws.send_composer(&id, window, cx);
                     }
                 }
-                InputEvent::Change => ws.update_completion(&id, cx),
+                InputEvent::Change => {
+                    if let Some(c) = ws.composers.get(&id) {
+                        let text = c.read(cx).value().to_string();
+                        if ws.composer_texts.get(&id) != Some(&text) {
+                            ws.composer_texts.insert(id.clone(), text);
+                            ws.ctx_rev += 1;
+                        }
+                    }
+                    ws.update_completion(&id, cx)
+                }
                 _ => {}
             }
         }));
@@ -1607,7 +2438,9 @@ impl Workspace {
         let before = self.completion.as_ref().map(|c| (c.0.clone(), c.2.len()));
         self.completion = found.and_then(|(trigger, query)| {
             let w = self.all_worktrees().into_iter().find(|w| w.chat_ids.iter().any(|c| c == chat)).cloned();
-            let local = w.as_ref().filter(|w| w.host != "mac").map(|w| format!("~/dev/{}", w.project));
+            // Skills of a worktree on another machine come from this Mac's checkout of its repo (`chat.local_repo_path`).
+            let template = self.settings.text_at("chat.local_repo_path", "~/dev/{project}");
+            let local = w.as_ref().filter(|w| !self.is_local_host(&w.host)).map(|w| template.replace("{project}", &w.project).replace("{repo}", &w.repo));
             let all = crate::completions::entries(&self.settings, w.as_ref().map(|w| w.path.as_str()), local.as_deref());
             let items = crate::completions::filter(&all, &query, self.settings.num("chat.completion_limit", 12.) as usize);
             let keep = self.completion.as_ref().filter(|c| c.0 == chat).map(|c| c.3).unwrap_or(0);
@@ -1637,7 +2470,55 @@ impl Workspace {
         cx.notify();
     }
 
-    /** Tab: takes the highlighted completion, or fills in Claude Code's suggestion when the box is empty. */
+    /** A key the message box binds itself (up, down, escape, tab, enter, shift-enter, cmd-enter), before
+    the box acts on it: with the completion list open, `chat.completion_builtin_keys` says what it does
+    there (next, prev, accept, close, or null to leave it to the box); otherwise `chat.composer_keys`
+    {send, newline, suggestion} can take it. Unclaimed keys do what the box does. */
+    fn composer_builtin_key(&mut self, chat: &str, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion.as_ref().is_some_and(|x| x.0 == chat) {
+            let builtin = self.settings.get("chat.completion_builtin_keys").cloned().unwrap_or_else(|| json!({"up": "prev", "down": "next", "enter": "accept", "tab": "accept", "escape": "close"}));
+            let what = builtin.get(key).and_then(Value::as_str).map(str::to_string);
+            let handled = match what.as_deref() {
+                Some("next") => {
+                    self.move_completion(1, cx);
+                    true
+                }
+                Some("prev") => {
+                    self.move_completion(-1, cx);
+                    true
+                }
+                Some("accept") => {
+                    self.accept_completion(None, window, cx);
+                    true
+                }
+                Some("close") => {
+                    self.completion = None;
+                    self.ctx_rev += 1;
+                    cx.notify();
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                cx.stop_propagation();
+                return;
+            }
+        }
+        let has = |group: &str, default: &[&str]| self.settings.strings(&format!("chat.composer_keys.{group}"), default).iter().any(|k| k == key);
+        if has("send", &[]) {
+            self.send_composer(chat, window, cx);
+            cx.stop_propagation();
+        } else if has("newline", &[]) {
+            if let Some(c) = self.composers.get(chat).cloned() {
+                c.update(cx, |s, cx| s.insert("\n", window, cx));
+            }
+            cx.stop_propagation();
+        } else if has("suggestion", &["tab"]) {
+            self.on_tab(chat, window, cx);
+        }
+    }
+
+    /** Fills in Claude Code's suggestion when the box is empty (Tab by default), or takes the highlighted completion. */
     fn on_tab(&mut self, chat: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.completion.as_ref().is_some_and(|x| x.0 == chat) {
             self.accept_completion(None, window, cx);
@@ -1651,6 +2532,68 @@ impl Workspace {
                 window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
                 cx.stop_propagation();
             }
+        }
+    }
+
+    /** Takes Claude Code's suggestion into the composer now, empty or not (`composer.accept_suggestion`). */
+    pub(crate) fn on_tab_now(&mut self, chat: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let suggestion = self.chat(chat).and_then(|c| c.suggestion.clone());
+        if let (Some(text), Some(state)) = (suggestion, self.composers.get(chat).cloned()) {
+            state.update(cx, |s, cx| {
+                s.set_value(text, window, cx);
+                s.focus(window, cx);
+            });
+            window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
+        }
+    }
+
+    /** `focus {area, chat?}`: put typing in a chat's composer ("composer", default the selected chat's) or
+    the selected worktree's terminal ("terminal"); "none" takes focus off both. */
+    pub(crate) fn focus_area_action(&mut self, area: &str, chat: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        match area {
+            "terminal" => {
+                let Some(path) = self.selected.clone() else { return };
+                self.sync_selection(window, cx);
+                let id = self.term_active(&path);
+                if let Some(t) = self.terminals.get(&Self::term_key(&path, &id)).cloned() {
+                    let h = t.read(cx).focus_handle(cx);
+                    h.focus(window, cx);
+                }
+            }
+            "none" => self.focus.focus(window, cx),
+            _ => {
+                let Some(id) = chat else { return };
+                self.ensure_composer(&id, window, cx);
+                if let Some(c) = self.composers.get(&id).cloned() {
+                    c.update(cx, |s, cx| s.focus(window, cx));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /** `composer.recall {by}`: steps through the chat's sent messages into its composer (-1: older,
+    1: newer; past the newest leaves it empty). */
+    pub(crate) fn recall_sent(&mut self, chat: &str, by: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let sent: Vec<String> = self.transcripts.get(chat).map(|t| t.items.iter().rev().filter_map(|i| if let Item::User { text } = i { Some(text.clone()) } else { None }).collect()).unwrap_or_default();
+        let at = crate::behavior::recall_step(sent.len(), self.recall.get(chat).copied(), by);
+        let text = match at {
+            Some(i) => {
+                self.recall.insert(chat.to_string(), i);
+                sent[i].clone()
+            }
+            None => {
+                self.recall.remove(chat);
+                String::new()
+            }
+        };
+        self.ensure_composer(chat, window, cx);
+        if let Some(c) = self.composers.get(chat).cloned() {
+            c.update(cx, |s, cx| {
+                s.set_value(text, window, cx);
+                s.focus(window, cx);
+            });
+            window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
         }
     }
 
@@ -1745,18 +2688,24 @@ impl Workspace {
         t
     }
 
-    /** An in-window notification, kept in `.app.notifications` (the newest `notifications.keep`) for agents. */
-    pub(crate) fn toast(&mut self, text: impl Into<String>, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_kit::component::WindowExt as _;
-        let text: String = text.into();
+    /** Keeps a notice in `.app.notifications` (the newest `notifications.keep`) for agents: `kind` is
+    "toast", "system" (a banner) or "sound". */
+    pub(crate) fn record_notice(&mut self, kind: &str, text: &str, title: Option<&str>) {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
-        self.notices.push((now, text.clone()));
+        self.notices.push(json!({"at": now, "kind": kind, "text": text, "title": title}));
         let keep = self.settings.num("notifications.keep", 20.) as usize;
         if self.notices.len() > keep {
             let extra = self.notices.len() - keep;
             self.notices.drain(..extra);
         }
         self.ctx_rev += 1;
+    }
+
+    /** An in-window notification, kept in `.app.notifications` too. */
+    pub(crate) fn toast(&mut self, text: impl Into<String>, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        let text: String = text.into();
+        self.record_notice("toast", &text, None);
         if self.settings.get("notifications.show").and_then(Value::as_bool) != Some(false) {
             let autohide = self.settings.get("notifications.autohide").and_then(Value::as_bool) != Some(false);
             window.push_notification(gpui_kit::component::notification::Notification::new().message(text).autohide(autohide), cx);
@@ -1859,8 +2808,6 @@ impl Workspace {
         false
     }
 
-    /** Fetches every connected machine's token usage, reloads the plan's limits (refreshing them from
-    Claude Code's endpoint when stale or `force`), and models.dev rates once a day. */
     /** The gauge's mode: state `usage_meter` (the popover's picker) over settings `usage.meter`. */
     fn meter_options(&self) -> crate::usage::MeterOptions {
         let mode = self.state.get("usage_meter").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| self.settings.text("usage.meter", "smart"));
@@ -1893,7 +2840,8 @@ impl Workspace {
     /** Records a press for the innermost node that sees it (the first to call this for that event). */
     pub(crate) fn note_press(&mut self, id: &str, at: Point<Pixels>, count: usize) {
         let now = std::time::Instant::now();
-        if self.press.as_ref().is_some_and(|(_, t, p)| *p == at && now.duration_since(*t) < std::time::Duration::from_millis(50)) {
+        let dedupe = self.press_dedupe();
+        if self.press.as_ref().is_some_and(|(_, t, p)| *p == at && now.duration_since(*t) < dedupe) {
             return;
         }
         self.press = Some((id.to_string(), now, at));
@@ -1922,9 +2870,14 @@ impl Workspace {
             }
         }
         match &self.press {
-            Some((who, t, p)) if *p == at && t.elapsed() < std::time::Duration::from_millis(50) => who == id,
+            Some((who, t, p)) if *p == at && t.elapsed() < self.press_dedupe() => who == id,
             _ => true,
         }
+    }
+
+    /** How long one press counts as the same press for every node it lands on (`input.press_dedupe_ms`). */
+    fn press_dedupe(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.settings.num("input.press_dedupe_ms", 50.).max(0.) as u64)
     }
 
     pub(crate) fn first_press_is(&self, id: &str) -> bool {
@@ -1943,7 +2896,9 @@ impl Workspace {
         self.settings.get("usage.providers").and_then(Value::as_object).map(|m| m.iter().filter(|(_, v)| v.is_object()).map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
     }
 
-    pub(crate) fn refresh_usage(&mut self, force: bool, cx: &mut Context<Self>) {
+    /** Fetches every connected machine's token usage (or only `only`'s), reloads the plans' limits
+    (refreshing them when stale or `force`), and models.dev rates once a day. */
+    pub(crate) fn refresh_usage(&mut self, force: bool, only: Option<String>, cx: &mut Context<Self>) {
         let rates_path = settings::dir().join("usage-rates.json");
         let usage_providers = self.usage_providers();
         // models.dev tables to fetch: each provider's `rates` (its own id when unset).
@@ -1995,24 +2950,38 @@ impl Workspace {
             })
             .detach();
         }
-        // Plans read from a file (Claude Code's status line keeps ~/.claude/oauth-usage-cache.json fresh): when
-        // it's older than the provider's `plan_max_age_secs` (or on Refresh), run its `plan_command`.
-        for p in usage_providers.values() {
-            if p["plan"].as_str() != Some("claude_oauth") {
-                continue;
-            }
-            let file = p["plan_file"].as_str().unwrap_or("~/.claude/oauth-usage-cache.json").to_string();
-            self.usage.load_plan(&file);
-            let plan_age = self.usage.plan_updated.map(|t| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|n| n.as_secs_f64() - t).unwrap_or(0.)).unwrap_or(f64::MAX);
-            let max_age = p["plan_max_age_secs"].as_f64().unwrap_or_else(|| self.settings.num("usage.plan_max_age_secs", 300.));
-            if !(force || plan_age > max_age) {
-                continue;
-            }
-            let script = p["plan_command"].as_str().or(self.settings.get("usage.plan_command").and_then(Value::as_str)).unwrap_or(PLAN_COMMAND).to_string();
+        self.configure_usage();
+        // Plans read from a file (Claude Code's status line keeps ~/.claude/oauth-usage-cache.json fresh; a
+        // `{source: "file", path, jq}` plan names its own): when it's older than the provider's
+        // `plan_max_age_secs` (or on Refresh), run its `plan_command` (a file plan's `command`), if any.
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
+        for (id, p) in &usage_providers {
+            let (file, jq, command, updated) = match (p["plan"].as_str(), p["plan"]["source"].as_str()) {
+                (Some("claude_oauth"), _) => {
+                    let file = p["plan_file"].as_str().unwrap_or("~/.claude/oauth-usage-cache.json").to_string();
+                    self.usage.load_plan(&file);
+                    let command = p["plan_command"].as_str().or(self.settings.get("usage.plan_command").and_then(Value::as_str)).unwrap_or(PLAN_COMMAND).to_string();
+                    (file, None, Some(command), self.usage.plan_updated)
+                }
+                (_, Some("file")) => {
+                    let file = p["plan"]["path"].as_str().unwrap_or("").to_string();
+                    let jq = p["plan"]["jq"].as_str().unwrap_or(".").to_string();
+                    self.usage.load_file_plan(id, &file, &jq, &self.exprs);
+                    let updated = self.usage.file_plans.get(id).and_then(|p| p.1);
+                    (file, Some(jq), p["plan"]["command"].as_str().map(str::to_string), updated)
+                }
+                _ => continue,
+            };
+            let max_age = p["plan"]["max_age_secs"].as_f64().or(p["plan_max_age_secs"].as_f64()).unwrap_or_else(|| self.settings.num("usage.plan_max_age_secs", 300.));
+            let Some(script) = command.filter(|_| force || updated.map_or(f64::MAX, |t| now - t) > max_age) else { continue };
+            let (id, path) = (id.clone(), self.path_env());
             cx.spawn(async move |this, cx| {
-                let _ = cx.background_spawn(async move { std::process::Command::new("/bin/sh").arg("-c").arg(script).output() }).await;
+                let _ = cx.background_spawn(async move { std::process::Command::new("/bin/sh").arg("-c").arg(script).env("PATH", path).output() }).await;
                 this.update(cx, |ws, cx| {
-                    ws.usage.load_plan(&file);
+                    match &jq {
+                        None => ws.usage.load_plan(&file),
+                        Some(jq) => ws.usage.load_file_plan(&id, &file, jq, &ws.exprs),
+                    }
                     ws.ctx_rev += 1;
                     cx.notify();
                 })
@@ -2020,7 +2989,12 @@ impl Workspace {
             })
             .detach();
         }
-        let hosts: Vec<(String, Remote)> = self.remotes.iter().filter(|(h, _)| self.host_up.get(*h) == Some(&true)).map(|(h, r)| (h.clone(), r.clone())).collect();
+        let hosts: Vec<(String, Remote)> = self
+            .remotes
+            .iter()
+            .filter(|(h, _)| self.host_up.get(*h) == Some(&true) && only.as_ref().is_none_or(|o| o == *h))
+            .map(|(h, r)| (h.clone(), r.clone()))
+            .collect();
         if hosts.is_empty() {
             return;
         }
@@ -2044,6 +3018,13 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /** What `usage` reads from settings: which host is this machine, rate fallbacks, strings. */
+    fn configure_usage(&mut self) {
+        self.usage.local_host = self.local_host();
+        self.usage.rate_fallbacks = self.settings.get("usage.rate_fallbacks").and_then(Value::as_object).cloned().unwrap_or_default();
+        self.usage.strings = self.settings.get("strings").cloned().unwrap_or(Value::Null);
     }
 
     /** A subagent tab is working while its parent still lists it as running. */
@@ -2122,6 +3103,7 @@ impl Workspace {
             self.send_chat(id, text);
         }
         self.jump_to_latest(id);
+        self.recall.remove(id);
         state.update(cx, |s, cx| s.set_value("", window, cx));
         cx.notify();
     }
@@ -2143,7 +3125,8 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn start_chat(&mut self, call: Call, cx: &mut Context<Self>) {
+    /** Starts a chat (new or forked); with `select`, shows it once it appears. */
+    pub(crate) fn start_chat(&mut self, call: Call, select: bool, cx: &mut Context<Self>) {
         let remote = self.route(&call);
         self.status = self.tr("starting_chat", "Starting a chat…", &[]);
         cx.spawn(async move |this, cx| {
@@ -2151,7 +3134,7 @@ impl Workspace {
             this.update(cx, |ws, cx| {
                 match res {
                     Ok(v) => {
-                        if let Some(id) = v["stdout"].as_str().and_then(|o| o.split_whitespace().next()) {
+                        if let Some(id) = v["stdout"].as_str().and_then(|o| o.split_whitespace().next()).filter(|_| select) {
                             ws.pending_select = Some(id.to_string());
                         }
                         ws.status = ws.tr("connected", "Connected", &[]);
@@ -2192,6 +3175,17 @@ impl Workspace {
     ) {
         use gpui_kit::component::input::{Input, InputState};
         use gpui_kit::component::WindowExt as _;
+        let labels: Vec<String> = fields.iter().map(|(l, _)| l.clone()).collect();
+        // `views.dialog` draws text dialogs from settings: the fields are state `dialog_field:N`.
+        if self.settings.views.contains_key("dialog") {
+            for (i, (_, v)) in fields.iter().enumerate() {
+                self.state.insert(format!("dialog_field:{i}"), Value::String(v.clone()));
+            }
+            let done: std::rc::Rc<dyn Fn(&mut Workspace, Vec<String>, &mut Context<Workspace>)> = std::rc::Rc::new(done);
+            self.dialog = Some(OpenDialog { title: title.to_string(), labels, inputs: vec![], need_first, done, view: true });
+            self.ctx_rev += 1;
+            return;
+        }
         let inputs: Vec<(SharedString, Entity<InputState>)> =
             fields.into_iter().map(|(label, value)| (label.into(), cx.new(|cx| InputState::new(window, cx).default_value(value)))).collect();
         let view = cx.entity();
@@ -2239,7 +3233,7 @@ impl Workspace {
             )
         });
         let done: std::rc::Rc<dyn Fn(&mut Workspace, Vec<String>, &mut Context<Workspace>)> = done;
-        self.dialog = Some(OpenDialog { title: title_text, inputs, need_first, done });
+        self.dialog = Some(OpenDialog { title: title_text, labels, inputs, need_first, done, view: false });
         if let Some(f) = focus {
             f.update(cx, |s, cx| s.focus(window, cx));
         }
@@ -2262,25 +3256,53 @@ impl Workspace {
     pub(crate) fn submit_dialog(&mut self, values: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::WindowExt as _;
         let Some(d) = self.dialog.as_ref() else { return };
-        if let Some(values) = values {
-            for ((_, input), v) in d.inputs.iter().zip(values) {
-                input.update(cx, |s, cx| s.set_value(v, window, cx));
+        let vals: Vec<String> = if d.view {
+            let n = d.labels.len();
+            let field = |ws: &Self, i: usize| ws.state.get(&format!("dialog_field:{i}")).map(crate::ui::render::value_text).unwrap_or_default();
+            match values {
+                Some(v) => v.into_iter().map(|x| x.trim().to_string()).chain(std::iter::repeat(String::new())).take(n).collect(),
+                None => (0..n).map(|i| field(self, i).trim().to_string()).collect(),
             }
-        }
-        let vals: Vec<String> = d.inputs.iter().map(|(_, i)| i.read(cx).value().trim().to_string()).collect();
+        } else {
+            if let Some(values) = values {
+                for ((_, input), v) in d.inputs.iter().zip(values) {
+                    input.update(cx, |s, cx| s.set_value(v, window, cx));
+                }
+            }
+            d.inputs.iter().map(|(_, i)| i.read(cx).value().trim().to_string()).collect()
+        };
+        let d = self.dialog.as_ref().expect("checked above");
         if d.need_first && vals.first().is_none_or(|v| v.is_empty()) {
             return;
         }
-        let done = d.done.clone();
+        let (done, view, n) = (d.done.clone(), d.view, d.labels.len());
         self.dialog = None;
+        if view {
+            self.clear_dialog_fields(n);
+        }
         done(self, vals, cx);
-        window.close_dialog(cx);
+        if !view {
+            window.close_dialog(cx);
+        }
+    }
+
+    fn clear_dialog_fields(&mut self, n: usize) {
+        for i in 0..n {
+            self.state.remove(&format!("dialog_field:{i}"));
+            self.user_state.remove(&format!("dialog_field:{i}"));
+        }
+        self.save_state();
+        self.ctx_rev += 1;
     }
 
     pub(crate) fn cancel_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::WindowExt as _;
-        if self.dialog.take().is_some() {
-            window.close_dialog(cx);
+        if let Some(d) = self.dialog.take() {
+            if d.view {
+                self.clear_dialog_fields(d.labels.len());
+            } else {
+                window.close_dialog(cx);
+            }
         }
     }
 
@@ -2301,16 +3323,24 @@ impl Workspace {
 
     /** The open dialog for inspect.json: title and each field's label and current text. */
     pub(crate) fn dialog_json(&self, cx: &App) -> Value {
-        self.dialog.as_ref().map(|d| json!({
-            "title": d.title,
-            "fields": d.inputs.iter().map(|(l, i)| json!({"label": l.to_string(), "value": i.read(cx).value().to_string()})).collect::<Vec<_>>(),
-        })).unwrap_or(Value::Null)
+        self.dialog.as_ref().map(|d| {
+            let value = |i: usize| match d.inputs.get(i) {
+                Some((_, input)) => input.read(cx).value().to_string(),
+                None => self.state.get(&format!("dialog_field:{i}")).map(crate::ui::render::value_text).unwrap_or_default(),
+            };
+            json!({
+                "title": d.title,
+                "fields": d.labels.iter().enumerate().map(|(i, l)| json!({"label": l, "value": value(i)})).collect::<Vec<_>>(),
+            })
+        }).unwrap_or(Value::Null)
     }
 
-    pub(crate) fn new_section(&mut self, assign: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let title = self.tr("new_section_title", "New section", &[]);
-        self.name_dialog(&title, "", window, cx, move |ws, name, cx| {
-            let remote = assign.as_deref().map(|p| ws.remote_for_host(&ws.host_of_path(p))).unwrap_or_else(|| ws.remote.clone());
+    /** A new section named `name` (asks when it's missing) on `host` (default: the worktree's, else the
+    default host's), and moves `assign` into it. */
+    pub(crate) fn new_section(&mut self, name: Option<String>, assign: Option<String>, host: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let create = move |ws: &mut Workspace, name: String, cx: &mut Context<Workspace>| {
+            let host = host.clone().or_else(|| assign.as_deref().map(|p| ws.host_of_path(p))).unwrap_or_else(|| ws.default_host());
+            let remote = ws.remote_for_host(&host);
             let assign = assign.clone();
             cx.spawn(async move |_, _| {
                 // The new section's id comes back with it, so the worktree moves in right away.
@@ -2322,12 +3352,18 @@ impl Workspace {
                 }
             })
             .detach();
-        });
+        };
+        match name.filter(|n| !n.trim().is_empty()) {
+            Some(n) => create(self, n, cx),
+            None => {
+                let title = self.tr("new_section_title", "New section", &[]);
+                self.name_dialog(&title, "", window, cx, move |ws, name, cx| create(ws, name, cx));
+            }
+        }
     }
 
     pub(crate) fn run_local(&mut self, args: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let mut cmd = std::process::Command::new(format!("{home}/dev/agent-box/bin/{}", args[0]));
+        let mut cmd = std::process::Command::new(self.bin_dir().join(&args[0]));
         cmd.args(&args[1..]);
         self.run_command(cmd, true, window, cx);
     }
@@ -2340,8 +3376,7 @@ impl Workspace {
 
     /** Runs a Mac command off the UI thread with a usable PATH; `notify` shows its last output line. */
     fn run_command(&mut self, mut cmd: std::process::Command, notify: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let home = std::env::var("HOME").unwrap_or_default();
-        cmd.env("PATH", format!("{home}/.local/bin:{home}/.cargo/bin:{home}/dev/redo-monorepo-worktrees/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"));
+        cmd.env("PATH", self.path_env());
         if notify {
             let t = self.tr("working", "Working…", &[]);
             self.toast(t, window, cx);
@@ -2365,7 +3400,8 @@ impl Workspace {
     }
 
     /** The command palette's entries: settings `commands` (with `if` applied), then one per worktree
-    (`palette.worktrees`, labeled by `palette.worktree_label`). */
+    (`palette.worktrees`, labeled by `palette.worktree_label`: a template with the worktree as `.w`, or
+    `{title}`, `{branch}`, `{project}` placeholders). */
     pub(crate) fn palette_entries(&self) -> Vec<(String, Value)> {
         let ctx = self.context();
         let mut entries: Vec<(String, Value)> = vec![];
@@ -2381,7 +3417,12 @@ impl Workspace {
         if self.settings.get("palette.worktrees").and_then(Value::as_bool) != Some(false) {
             let fmt = self.settings.get("palette.worktree_label").and_then(Value::as_str).unwrap_or("Go to {title}").to_string();
             for w in self.all_worktrees() {
-                let label = fmt.replace("{title}", &w.title).replace("{branch}", w.branch.as_deref().unwrap_or("")).replace("{project}", &w.project);
+                let label = if fmt.contains("{{") {
+                    let c = crate::ui::expr::with(&ctx, vec![("w".into(), to_val(&self.worktree_json(w, Value::Null)))]);
+                    value_text(&self.exprs.resolve(&Value::String(fmt.clone()), &c))
+                } else {
+                    fmt.replace("{title}", &w.title).replace("{branch}", w.branch.as_deref().unwrap_or("")).replace("{project}", &w.project)
+                };
                 entries.push((label, json!({"do": "select", "worktree": w.path})));
             }
         }
@@ -2405,9 +3446,80 @@ impl Workspace {
         }
     }
 
+    /** The palette's entries that match what's typed (state `palette_query`), for `views.palette`. */
+    pub(crate) fn palette_matches(&self) -> Vec<(usize, String, Value)> {
+        let q = self.state.get("palette_query").map(value_text).unwrap_or_default().to_lowercase();
+        self.palette_entries().into_iter().enumerate().filter(|(_, (l, _))| q.is_empty() || l.to_lowercase().contains(&q)).map(|(i, (l, a))| (i, l, a)).collect()
+    }
+
+    /** `.app.palette` while `views.palette` draws it: `{query, selected, entries: [{index, label, selected}]}`. */
+    fn palette_json(&self, p: &PaletteView) -> Value {
+        let matches = self.palette_matches();
+        let sel = p.selected.min(matches.len().saturating_sub(1));
+        json!({
+            "query": self.state.get("palette_query").map(value_text).unwrap_or_default(),
+            "selected": sel,
+            "entries": matches.iter().enumerate().map(|(k, (i, l, _))| json!({"index": i, "label": l, "selected": k == sel})).collect::<Vec<_>>(),
+        })
+    }
+
+    /** `palette.move {by}`, `palette.confirm {index?}` (an entry's `index`, default the highlighted one), `palette.close`. */
+    pub(crate) fn palette_action(&mut self, name: &str, a: &Map<String, Value>, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        match name {
+            "palette.move" => {
+                let n = self.palette_matches().len().max(1) as i64;
+                if let Some(p) = self.palette_view.as_mut() {
+                    p.selected = ((p.selected as i64 + a.get("by").and_then(Value::as_i64).unwrap_or(1)).rem_euclid(n)) as usize;
+                }
+            }
+            "palette.confirm" => {
+                let pick = match a.get("index").and_then(Value::as_u64) {
+                    Some(i) => self.palette_entries().get(i as usize).map(|(_, a)| a.clone()),
+                    None => {
+                        let sel = self.palette_view.as_ref().map(|p| p.selected).unwrap_or(0);
+                        let m = self.palette_matches();
+                        m.get(sel.min(m.len().saturating_sub(1))).map(|(_, _, a)| a.clone())
+                    }
+                };
+                self.close_palette(window, cx);
+                if let Some(action) = pick {
+                    self.pending_actions.push(action);
+                }
+            }
+            _ => {
+                if self.palette_view.is_some() {
+                    self.close_palette(window, cx);
+                } else if self.palette_open {
+                    self.palette_open = false;
+                    window.close_dialog(cx);
+                }
+            }
+        }
+        self.ctx_rev += 1;
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.palette_view = None;
+        self.palette_open = false;
+        self.state.remove("palette_query");
+        self.user_state.remove("palette_query");
+        self.ctx_rev += 1;
+    }
+
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::command::{Command, CommandItem, CommandState};
         use gpui_kit::component::WindowExt as _;
+        // `views.palette` draws the palette from settings instead (`.app.palette`, palette.* actions).
+        if self.settings.views.contains_key("palette") {
+            self.state.insert("palette_query".into(), Value::String(String::new()));
+            self.palette_view = Some(PaletteView::default());
+            self.palette_open = true;
+            self.ctx_rev += 1;
+            cx.notify();
+            return;
+        }
         let entries = self.palette_entries();
         let placeholder: SharedString = self.settings.get("palette.placeholder").and_then(Value::as_str).unwrap_or("Type a command or a worktree…").to_string().into();
         let state = cx.new(|cx| CommandState::new(window, cx));
@@ -2443,6 +3555,13 @@ impl Workspace {
         use gpui_kit::component::input::{Editor, EditorState};
         use gpui_kit::component::{Placement, WindowExt as _};
         crate::ui::docs::write_reference();
+        // `views.settings` draws the panel from settings instead (`.app.settings_sheet`, settings.save / settings.close).
+        if self.settings.views.contains_key("settings") {
+            self.settings_sheet = true;
+            self.ctx_rev += 1;
+            cx.notify();
+            return;
+        }
         let text = std::fs::read_to_string(settings::path()).unwrap_or_else(|_| "{\n}\n".into());
         let editor = cx.new(|cx| EditorState::new(window, cx).language("json").default_value(text));
         let view = cx.entity();
@@ -2472,10 +3591,10 @@ impl Workspace {
                     h_flex()
                         .gap_2()
                         .justify_end()
-                        .child(gpui_kit::component::button::Button::new("docs").label("Reference").on_click(move |_, _, _| {
+                        .child(gpui_kit::component::button::Button::new("docs").label(ws.tr("settings_reference", "Reference", &[])).on_click(move |_, _, _| {
                             let _ = std::process::Command::new("open").arg(&docs).spawn();
                         }))
-                        .child(gpui_kit::component::button::Button::new("save-settings").label("Save").on_click(move |_, _, cx| {
+                        .child(gpui_kit::component::button::Button::new("save-settings").label(ws.tr("settings_save", "Save", &[])).on_click(move |_, _, cx| {
                             let text = editor.read(cx).value().to_string();
                             let _ = std::fs::write(settings::path(), text);
                             view.update(cx, |ws, cx| ws.reload_settings(cx));
@@ -2520,15 +3639,16 @@ impl Workspace {
         // Files dropped anywhere on the transcript attach to its chat, whether or not the overlay that
         // names the chat has rendered yet.
         let (drop_view, drop_chat) = (cx.entity().downgrade(), chat_id.to_string());
+        let drop_attaches = self.settings.chat.get("drop_on_transcript").and_then(Value::as_bool) != Some(false);
         div()
             .id(SharedString::from(format!("transcript-drop:{chat_id}")))
             .relative()
             .size_full()
-            .on_drop(move |paths: &ExternalPaths, window, cx| {
+            .when(drop_attaches, |d| d.on_drop(move |paths: &ExternalPaths, window, cx| {
                 let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
                 let chat = drop_chat.clone();
                 let _ = drop_view.update(cx, |ws, cx| ws.attach(chat, files, window, cx));
-            })
+            }))
             .child(rows)
             .when(shift_holds, |d| d.child(crate::ui::trace_view::shift_scroll_layer(None, 1.)))
             .children(jump)
@@ -2744,7 +3864,11 @@ impl Workspace {
         }
         let view = cx.entity().downgrade();
         let (paste_view, paste_chat) = (view.clone(), chat.clone());
+        let paste_attaches = self.settings.chat.get("paste_attach").and_then(Value::as_bool) != Some(false);
         let textarea = Textarea::new(&c).appearance(false).on_paste(move |item, window, cx| {
+            if !paste_attaches {
+                return false;
+            }
             let files = attachments_from_clipboard(item);
             if files.is_empty() {
                 return false;
@@ -2763,54 +3887,33 @@ impl Workspace {
                 // The input binds these keys to its own actions, so take them while a list is open.
                 .capture_action({
                     let (v, c) = (key_view.clone(), key_chat.clone());
-                    move |_: &gpui_kit::component::input::MoveUp, _, cx| {
-                        let _ = v.update(cx, |ws, cx| {
-                            if ws.completion.as_ref().is_some_and(|x| x.0 == c) {
-                                ws.move_completion(-1, cx);
-                                cx.stop_propagation();
-                            }
-                        });
+                    move |_: &gpui_kit::component::input::MoveUp, window, cx| {
+                        let _ = v.update(cx, |ws, cx| ws.composer_builtin_key(&c, "up", window, cx));
                     }
                 })
                 .capture_action({
                     let (v, c) = (key_view.clone(), key_chat.clone());
-                    move |_: &gpui_kit::component::input::MoveDown, _, cx| {
-                        let _ = v.update(cx, |ws, cx| {
-                            if ws.completion.as_ref().is_some_and(|x| x.0 == c) {
-                                ws.move_completion(1, cx);
-                                cx.stop_propagation();
-                            }
-                        });
+                    move |_: &gpui_kit::component::input::MoveDown, window, cx| {
+                        let _ = v.update(cx, |ws, cx| ws.composer_builtin_key(&c, "down", window, cx));
                     }
                 })
                 .capture_action({
                     let (v, c) = (key_view.clone(), key_chat.clone());
-                    move |_: &gpui_kit::component::input::Escape, _, cx| {
-                        let _ = v.update(cx, |ws, cx| {
-                            if ws.completion.as_ref().is_some_and(|x| x.0 == c) {
-                                ws.completion = None;
-                                ws.ctx_rev += 1;
-                                cx.notify();
-                                cx.stop_propagation();
-                            }
-                        });
+                    move |_: &gpui_kit::component::input::Escape, window, cx| {
+                        let _ = v.update(cx, |ws, cx| ws.composer_builtin_key(&c, "escape", window, cx));
                     }
                 })
                 .capture_action({
                     let (v, c) = (key_view.clone(), key_chat.clone());
                     move |e: &gpui_kit::component::input::Enter, window, cx| {
-                        let _ = v.update(cx, |ws, cx| {
-                            if !e.shift && !e.secondary && ws.completion.as_ref().is_some_and(|x| x.0 == c) {
-                                ws.accept_completion(None, window, cx);
-                                cx.stop_propagation();
-                            }
-                        });
+                        let key = if e.secondary { "cmd-enter" } else if e.shift { "shift-enter" } else { "enter" };
+                        let _ = v.update(cx, |ws, cx| ws.composer_builtin_key(&c, key, window, cx));
                     }
                 })
                 .capture_action({
                     let (v, c) = (key_view.clone(), key_chat.clone());
                     move |_: &gpui_kit::component::input::IndentInline, window, cx| {
-                        let _ = v.update(cx, |ws, cx| ws.on_tab(&c, window, cx));
+                        let _ = v.update(cx, |ws, cx| ws.composer_builtin_key(&c, "tab", window, cx));
                     }
                 })
                 .flex()
@@ -2876,11 +3979,11 @@ impl Workspace {
         let cancel = self.tr("waiting_cancel", "Cancel", &[]);
         for (i, label) in options.iter().enumerate().chain(std::iter::once((usize::MAX, &cancel))) {
             let id = chat.id.clone();
-            let key = if i == usize::MAX { "Escape".to_string() } else { (i + 1).to_string() };
+            let keys = if i == usize::MAX { self.agent_keys(&chat.agent, "cancel_keys") } else { vec![self.answer_key(&chat.agent, i + 1)] };
             row = row.child(
                 style::apply(div().id(SharedString::from(format!("opt:{}:{i}", chat.id))).cursor_pointer(), &st("waiting_option"), theme)
                     .child(label.clone())
-                    .on_click(cx.listener(move |ws, _, _, cx| ws.call(Call::ChatKeys { chat_id: id.clone(), keys: vec![key.clone()] }, cx))),
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.call(Call::ChatKeys { chat_id: id.clone(), keys: keys.clone() }, cx))),
             );
         }
         style::apply(v_flex().gap(px(10.)), &st("waiting"), theme)
@@ -2888,6 +3991,17 @@ impl Workspace {
             .children(questions.into_iter().map(|q| div().child(q)))
             .child(row)
             .into_any_element()
+    }
+
+    /** The keys an agent takes to stop (`interrupt_keys`) or cancel a question (`cancel_keys`), from
+    settings `daemon.agents.<agent>` (default Escape). */
+    pub(crate) fn agent_keys(&self, agent: &str, kind: &str) -> Vec<String> {
+        crate::behavior::agent_keys(self.settings.get("daemon.agents").unwrap_or(&Value::Null), agent, kind)
+    }
+
+    /** The key that picks a waiting question's option `n` (1-based): `daemon.agents.<agent>.answer_key`. */
+    pub(crate) fn answer_key(&self, agent: &str, n: usize) -> String {
+        crate::behavior::answer_key(self.settings.get("daemon.agents").unwrap_or(&Value::Null), agent, n)
     }
 
     /** Where typing goes now: "terminal", "composer", "input" (another text field), or "" (none). */
@@ -2935,18 +4049,21 @@ impl Workspace {
                 return;
             }
         }
-        // A key's `not_in` (["terminal", "composer", "input"]) leaves it to whatever has focus there.
-        let found = self.settings.keys.iter().rev().find(|k| {
-            k.get("key").and_then(Value::as_str) == Some(pressed.as_str())
-                && !k.get("not_in").and_then(Value::as_array).is_some_and(|l| l.iter().any(|x| x.as_str() == Some(area)))
-        }).cloned();
+        // The last key for this combo whose `if` holds; a key's `not_in` (["terminal", "composer", "input"])
+        // leaves it to whatever has focus there.
+        let candidates: Vec<Value> = self
+            .settings
+            .keys
+            .iter()
+            .filter(|k| k.get("key").and_then(Value::as_str) == Some(pressed.as_str()) && !k.get("not_in").and_then(Value::as_array).is_some_and(|l| l.iter().any(|x| x.as_str() == Some(area))))
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let ctx = self.context();
+        let found = candidates.into_iter().rev().find(|k| k.get("if").and_then(Value::as_str).is_none_or(|cond| self.exprs.truthy(cond, &ctx)));
         if let Some(k) = found {
-            let ctx = self.context();
-            if let Some(cond) = k.get("if").and_then(Value::as_str) {
-                if !self.exprs.truthy(cond, &ctx) {
-                    return;
-                }
-            }
             let action = self.exprs.resolve_action(k.get("do").unwrap_or(&Value::Null), &ctx);
             self.run_action(&action, window, cx);
             cx.stop_propagation();
@@ -2959,6 +4076,7 @@ impl Render for Workspace {
         let started = std::time::Instant::now();
         self.register_terminals(cx);
         let t = std::time::Instant::now();
+        self.note_selection();
         self.flush(window, cx);
         self.track_nav();
         self.save_queue();
@@ -2985,10 +4103,15 @@ impl Render for Workspace {
         }
         {
             use gpui_kit::component::WindowExt as _;
-            // A dialog closed by Escape or a click outside is gone from the state too.
-            if (self.dialog.is_some() || self.palette_open) && !window.has_active_dialog(cx) {
-                self.dialog = None;
-                self.palette_open = false;
+            // A dialog closed by Escape or a click outside is gone from the state too (ones drawn from
+            // settings views close by action).
+            let builtin_dialog = self.dialog.as_ref().is_some_and(|d| !d.view);
+            let builtin_palette = self.palette_open && self.palette_view.is_none();
+            if (builtin_dialog || builtin_palette) && !window.has_active_dialog(cx) {
+                if builtin_dialog {
+                    self.dialog = None;
+                }
+                self.palette_open = self.palette_view.is_some();
                 self.ctx_rev += 1;
             }
         }
@@ -3013,12 +4136,33 @@ impl Render for Workspace {
             *self.drag_note.borrow_mut() = into;
         }
         self.focused = window.is_window_active();
+        let size = window.viewport_size();
+        let size = (f32::from(size.width), f32::from(size.height));
+        if size != self.window_size {
+            self.window_size = size;
+            self.ctx_rev += 1;
+        }
+        let texts: Vec<(String, String)> = self.composers.iter().map(|(k, c)| (k.clone(), c.read(cx).value().to_string())).collect();
+        for (k, v) in texts {
+            if self.composer_texts.get(&k) != Some(&v) {
+                self.composer_texts.insert(k, v);
+                self.ctx_rev += 1;
+            }
+        }
         let t = std::time::Instant::now();
         let ctx = self.context();
         self.perf.borrow_mut().spans.insert("context", t.elapsed().as_secs_f32() * 1000.);
+        self.refresh_shown(&ctx, cx);
         self.view_handle = Some(cx.entity().downgrade());
         let t = std::time::Instant::now();
         let body = self.render_view("main", &ctx, window, cx);
+        // Panels drawn from settings views instead of the built-in ones, over everything.
+        let shown: Vec<&str> = [("palette", self.palette_view.is_some()), ("dialog", self.dialog.as_ref().is_some_and(|d| d.view)), ("settings", self.settings_sheet)]
+            .into_iter()
+            .filter(|(name, on)| *on && self.settings.views.contains_key(*name))
+            .map(|(name, _)| name)
+            .collect();
+        let overlays: Vec<AnyElement> = shown.into_iter().map(|name| div().absolute().inset_0().child(self.render_view(name, &ctx, window, cx)).into_any_element()).collect();
         self.perf.borrow_mut().spans.insert("tree", t.elapsed().as_secs_f32() * 1000.);
         let t = std::time::Instant::now();
         self.write_inspect(&ctx, window, cx);
@@ -3043,12 +4187,13 @@ impl Render for Workspace {
             .on_key_down(cx.listener(Self::type_to_focus))
             .on_action(cx.listener(|ws, _: &OpenSettings, w, cx| ws.open_settings(w, cx)))
             .on_action(cx.listener(|ws, _: &Palette, w, cx| ws.open_palette(w, cx)))
-            .on_action(cx.listener(|ws, item: &MenuBarItem, w, cx| {
-                if let Some(action) = MENU_ACTIONS.with(|a| a.borrow().get(item.index).cloned()) {
+            .on_action(cx.listener(|ws, item: &MenuBarItem, w, cx| match MENU_ACTIONS.with(|a| a.borrow().get(&item.id).cloned()) {
+                Some(action) => {
                     let ctx = ws.context();
                     let action = ws.exprs.resolve_action(&action, &ctx);
                     ws.run_action(&action, w, cx);
                 }
+                None => cx.propagate(),
             }))
             .on_mouse_move(cx.listener(|ws, e: &MouseMoveEvent, _, cx| {
                 if let Some(d) = &ws.drag {
@@ -3072,6 +4217,7 @@ impl Render for Workspace {
             .relative()
             .children(self.background_layer())
             .child(body)
+            .children(overlays)
             .child(frame_end)
     }
 }
@@ -3089,6 +4235,12 @@ impl Workspace {
         }
         let Some(text) = e.keystroke.key_char.clone().filter(|t| !t.chars().any(char::is_control)) else { return };
         let Some(chat) = self.current_chat().map(|c| c.id.clone()) else { return };
+        // Settings `events.type_to_focus` decides where the typing goes (`.text`), when it's there.
+        if self.settings.events.contains_key("type_to_focus") {
+            self.fire_event("type_to_focus", vec![("text".into(), to_val(&Value::String(text)))], window, cx);
+            cx.stop_propagation();
+            return;
+        }
         self.ensure_composer(&chat, window, cx);
         let Some(state) = self.composers.get(&chat).cloned() else { return };
         state.update(cx, |s, cx| {
@@ -3097,6 +4249,78 @@ impl Workspace {
         });
         self.update_completion(&chat, cx);
         cx.stop_propagation();
+    }
+}
+
+impl Workspace {
+    /** Fires `select` when the selected worktree or its active chat changed (`.worktree`, `.chat`: path and id). */
+    fn note_selection(&mut self) {
+        let Some(path) = self.selected.clone() else { return };
+        let now = (path, self.current_chat().map(|c| c.id.clone()));
+        if self.seen_select.as_ref() != Some(&now) {
+            let first = self.seen_select.is_none();
+            self.seen_select = Some(now.clone());
+            if !first {
+                self.pending_events.push(("select".into(), [("worktree".to_string(), json!(now.0)), ("chat".to_string(), json!(now.1))].into_iter().collect()));
+            }
+        }
+    }
+
+    /** What follows the context but lives outside the window: the Dock badge, the menu bar, and the usage
+    gauge's level (`usage.level` fires when it changes). Rebuilt only when the context changed. */
+    pub(crate) fn refresh_shown(&mut self, ctx: &Val, cx: &mut Context<Self>) {
+        if self.shown_rev == self.ctx_rev {
+            return;
+        }
+        self.shown_rev = self.ctx_rev;
+        self.update_badge(ctx);
+        self.refresh_menu_bar(ctx, cx);
+        let level = crate::ui::expr::to_json(&self.exprs.first(".usage.plan.meter.level // null", ctx)).as_str().map(str::to_string);
+        if level != self.seen_usage_level {
+            let from = std::mem::replace(&mut self.seen_usage_level, level.clone());
+            if from.is_some() || level.is_some() {
+                self.pending_events.push(("usage.level".into(), [("level".to_string(), json!(level)), ("from".to_string(), json!(from))].into_iter().collect()));
+                cx.notify();
+            }
+        }
+    }
+
+    /** Builds the menu bar from settings `menu_bar` against the context, when what it shows changed. */
+    fn refresh_menu_bar(&mut self, ctx: &Val, cx: &mut Context<Self>) {
+        let spec = resolve_menus(&self.settings, &self.exprs, ctx);
+        let sig = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            spec.to_string().hash(&mut h);
+            h.finish()
+        };
+        if sig != self.menu_sig {
+            self.menu_sig = sig;
+            build_menu_bar(&self.settings, &spec, cx);
+        }
+    }
+}
+
+/** A shell command for `shell` and `ab.shell`: on the Mac, or on `host`'s daemon. */
+pub(crate) struct ShellJob {
+    pub(crate) run: String,
+    pub(crate) cwd: Option<String>,
+    pub(crate) host: Option<String>,
+    pub(crate) timeout: Option<f64>,
+    pub(crate) env: Vec<(String, String)>,
+}
+
+fn kill_pid(pid: u32) {
+    let _ = std::process::Command::new("/bin/kill").arg(pid.to_string()).status();
+}
+
+/** `results/<id>.json` in the settings folder, written whole (agents poll for it). */
+fn write_result(id: &str, result: &Value) {
+    let dir = settings::dir().join("results");
+    let _ = std::fs::create_dir_all(&dir);
+    let tmp = dir.join(format!(".{id}.json"));
+    if std::fs::write(&tmp, serde_json::to_string_pretty(result).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(tmp, dir.join(format!("{id}.json")));
     }
 }
 
@@ -3147,9 +4371,13 @@ impl TranscriptList {
 
 pub(crate) struct OpenDialog {
     pub(crate) title: String,
+    pub(crate) labels: Vec<String>,
+    /** The built-in dialog's fields; empty when `views.dialog` draws it. */
     pub(crate) inputs: Vec<(SharedString, Entity<gpui_kit::component::input::InputState>)>,
     need_first: bool,
     done: std::rc::Rc<dyn Fn(&mut Workspace, Vec<String>, &mut Context<Workspace>)>,
+    /** Drawn by `views.dialog` from settings (its fields are state `dialog_field:N`). */
+    pub(crate) view: bool,
 }
 
 pub(crate) struct TranscriptList {
@@ -3169,7 +4397,7 @@ pub enum Attachment {
     Path(std::path::PathBuf),
 }
 
-fn attachments_from_clipboard(item: &ClipboardItem) -> Vec<Attachment> {
+pub(crate) fn attachments_from_clipboard(item: &ClipboardItem) -> Vec<Attachment> {
     item.entries()
         .iter()
         .flat_map(|e| match e {
@@ -3193,8 +4421,39 @@ fn image_ext(f: ImageFormat) -> &'static str {
     }
 }
 
+/** Settings `uploads` (where pasted and dropped files are copied, here and on the other machine) and the
+ssh options and PATH for the copy, kept where the upload functions (which run off the UI thread) see them. */
+struct UploadOptions {
+    dir: String,
+    remote_dir: String,
+    ssh_options: Vec<String>,
+    path: String,
+}
+
+static UPLOADS: std::sync::RwLock<Option<UploadOptions>> = std::sync::RwLock::new(None);
+
+fn set_upload_options(settings: &Settings) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = crate::behavior::path_env(&settings.strings("app.path", DEFAULT_PATH), &home);
+    let o = UploadOptions {
+        dir: settings.text_at("uploads.dir", "~/.agent-box/uploads"),
+        remote_dir: settings.text_at("uploads.remote_dir", "~/.agent-box/uploads"),
+        ssh_options: settings.connection.ssh_options.clone(),
+        path,
+    };
+    *UPLOADS.write().unwrap() = Some(o);
+}
+
+fn upload_options<T>(f: impl FnOnce(&UploadOptions) -> T) -> T {
+    let g = UPLOADS.read().unwrap();
+    match g.as_ref() {
+        Some(o) => f(o),
+        None => f(&UploadOptions { dir: "~/.agent-box/uploads".into(), remote_dir: "~/.agent-box/uploads".into(), ssh_options: vec![], path: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin".into() }),
+    }
+}
+
 fn uploads_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agent-box/uploads")
+    upload_options(|o| std::path::PathBuf::from(crate::script::expand(&o.dir)))
 }
 
 pub fn write_upload(bytes: &[u8], ext: &str) -> Result<std::path::PathBuf, String> {
@@ -3222,18 +4481,23 @@ pub fn stage_one(path: &std::path::Path, host: Option<&str>) -> Result<String, S
     };
     let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let Some(host) = host else { return Ok(local.to_string_lossy().into_owned()) };
-    let home = std::env::var("HOME").unwrap_or_default();
+    let (remote_dir, ssh_options, path) = upload_options(|o| (o.remote_dir.clone(), o.ssh_options.clone(), o.path.clone()));
+    // The remote folder is written relative to its home ("~/x" -> "$HOME/x") so the agent gets a full path back.
+    let rel = remote_dir.strip_prefix("~/").map(|r| format!("$HOME/{r}")).unwrap_or_else(|| remote_dir.clone());
+    let dir = rel.trim_end_matches('/').to_string();
+    let target = format!("\"{dir}\"/{}", crate::behavior::sh_quote(&name));
     let file = std::fs::File::open(&local).map_err(|e| e.to_string())?;
     let o = std::process::Command::new("ssh")
-        .env("PATH", format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"))
-        .args([host, &format!("mkdir -p ~/.agent-box/uploads && cat > ~/.agent-box/uploads/'{name}' && printf %s \"$HOME\"")])
+        .env("PATH", path)
+        .args(&ssh_options)
+        .args([host, &format!("mkdir -p \"{dir}\" && cat > {target} && printf %s {target}")])
         .stdin(file)
         .output()
         .map_err(|e| e.to_string())?;
     if !o.status.success() {
         return Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("upload failed").to_string());
     }
-    Ok(format!("{}/.agent-box/uploads/{name}", String::from_utf8_lossy(&o.stdout).trim()))
+    Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
 /** A message's attached uploads (by their local copies) and its text with their paths removed. */
@@ -3241,8 +4505,9 @@ pub(crate) fn split_uploads(text: &str) -> (Vec<std::path::PathBuf>, String) {
     let dir = uploads_dir();
     let mut files = vec![];
     let mut words = vec![];
+    let marker = upload_options(|o| format!("/{}/", o.remote_dir.trim_start_matches("~/").trim_matches('/')));
     for w in text.split(' ') {
-        match w.split("/.agent-box/uploads/").nth(1).map(|name| dir.join(name.trim())) {
+        match w.split(marker.as_str()).nth(1).map(|name| dir.join(name.trim())) {
             Some(p) if p.exists() => files.push(p),
             _ => words.push(w),
         }
@@ -3331,12 +4596,14 @@ pub(crate) fn image_element(src: &str, fit: &str) -> Img {
     el.object_fit(fit)
 }
 
-/** Refreshes Claude Code's plan-usage cache from its OAuth endpoint (the token stays in the keychain). */
-/** One auto-update check in ~/dev/agent-box: fast-forward to origin/main when the checkout is clean, then
+/** `app.path` when unset. */
+const DEFAULT_PATH: &[&str] = &["~/.local/bin", "~/.cargo/bin", "~/.super.engineering/bin", "~/dev/redo-monorepo-worktrees/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+
+/** One auto-update check in the source checkout (`app.source_dir`, as $AGENT_BOX_SOURCE): fast-forward to origin/main when the checkout is clean, then
 rebuild and restart the daemon if its code changed and bundle the app if the app's did. Prints "updated"
 and what it rebuilt ("daemon", "app"), or nothing. */
-const UPDATE_SCRIPT: &str = r#"cd "$HOME/dev/agent-box" || exit 0
-export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+const UPDATE_SCRIPT: &str = r#"cd "${AGENT_BOX_SOURCE:-$HOME/dev/agent-box}" || exit 0
+export PATH="$HOME/.cargo/bin:$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 git fetch -q origin main 2>/dev/null || exit 0
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && exit 0
 [ "$(git branch --show-current)" = main ] || exit 0
@@ -3353,6 +4620,10 @@ if printf '%s\n' "$changed" | grep -q '^rust/app/src/\|^rust/app/Cargo\|^rust/pr
 fi
 echo "updated$what""#;
 
+/** After an update rebuilt the app: start the new build (`app.restart_command`). */
+const RESTART_COMMAND: &str = "sleep 1; open \"$HOME/Applications/a.box.app\"";
+
+/** Refreshes Claude Code's plan-usage cache from its OAuth endpoint (the token stays in the keychain). */
 const PLAN_COMMAND: &str = r#"token=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])' 2>/dev/null); [ -n "$token" ] && out=$(/usr/bin/curl -sS -m 10 https://api.anthropic.com/api/oauth/usage -H "Authorization: Bearer $token" -H "anthropic-beta: oauth-2025-04-20") && printf '%s' "$out" | grep -q '"limits"' && printf '%s' "$out" > "$HOME/.claude/oauth-usage-cache.json""#;
 
 /** A cheap fingerprint of what a transcript row shows: its items' kinds, text lengths and results. */

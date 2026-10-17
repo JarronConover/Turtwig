@@ -28,33 +28,58 @@ impl Drop for RemoteGuard {
     }
 }
 
+/** The last lines the connection's process (ssh, or the local daemon) wrote to stderr. */
+type ErrLines = Arc<Mutex<std::collections::VecDeque<String>>>;
+
+const ERR_LINES: usize = 20;
+
 #[derive(Clone)]
 pub struct Remote {
     out: flume::Sender<String>,
     pending: Pending,
     next_id: Arc<AtomicU64>,
+    errors: ErrLines,
 }
 
 impl Remote {
-    pub fn start(ssh_host: String, daemon: String, retry: Duration, ssh_options: Vec<String>) -> (Remote, flume::Receiver<Incoming>, RemoteGuard) {
+    /** Connects to `spec`'s daemon with `path` as the process's PATH, reconnecting forever. */
+    pub fn start(spec: crate::behavior::HostSpec, path: String) -> (Remote, flume::Receiver<Incoming>, RemoteGuard) {
         let alive = Arc::new(AtomicBool::new(true));
         let (out_tx, out_rx) = flume::unbounded::<String>();
         let (in_tx, in_rx) = flume::unbounded::<Incoming>();
         let pending: Pending = Arc::default();
-        let remote = Remote { out: out_tx, pending: pending.clone(), next_id: Arc::new(AtomicU64::new(1)) };
+        let errors: ErrLines = Arc::default();
+        let remote = Remote { out: out_tx, pending: pending.clone(), next_id: Arc::new(AtomicU64::new(1)), errors: errors.clone() };
         let flag = alive.clone();
         std::thread::spawn(move || loop {
             if !flag.load(Ordering::Relaxed) {
                 break;
             }
-            let err = session(&ssh_host, &daemon, &ssh_options, &out_rx, &in_tx, &pending, &flag);
+            let err = session(&spec, &path, &out_rx, &in_tx, &pending, &flag, &errors);
             for (_, waiter) in pending.lock().unwrap().drain() {
                 let _ = waiter.send(Err(anyhow!("disconnected")));
             }
-            let _ = in_tx.send(Incoming::Disconnected(err.to_string()));
-            std::thread::sleep(retry);
+            // ssh's own reason (an unknown host, a refused key) says more than "connection closed".
+            let last = errors.lock().unwrap().back().cloned();
+            let why = match last {
+                Some(l) => format!("{err}: {l}"),
+                None => err.to_string(),
+            };
+            let _ = in_tx.send(Incoming::Disconnected(why));
+            std::thread::sleep(Duration::from_secs(spec.retry_secs));
         });
         (remote, in_rx, RemoteGuard(alive))
+    }
+
+    /** A connection to nothing: every call fails (for a host with no daemon configured). */
+    pub fn detached() -> Remote {
+        let (out, _) = flume::unbounded();
+        Remote { out, pending: Arc::default(), next_id: Arc::new(AtomicU64::new(1)), errors: Arc::default() }
+    }
+
+    /** What the connection's process last wrote to stderr, oldest first. */
+    pub fn stderr(&self) -> Vec<String> {
+        self.errors.lock().unwrap().iter().cloned().collect()
     }
 
     pub async fn call(&self, call: Call) -> Result<Value> {
@@ -73,43 +98,57 @@ impl Remote {
 }
 
 fn session(
-    host: &str,
-    daemon: &str,
-    ssh_options: &[String],
+    spec: &crate::behavior::HostSpec,
+    path: &str,
     out_rx: &flume::Receiver<String>,
     in_tx: &flume::Sender<Incoming>,
     pending: &Pending,
     alive: &Arc<AtomicBool>,
+    errors: &ErrLines,
 ) -> anyhow::Error {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut cmd = if host.is_empty() {
-        let mut c = Command::new(crate::script::expand(daemon));
-        c.arg("connect").env(
-            "PATH",
-            format!("{home}/.super.engineering/bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
-        );
+    let mut cmd = if spec.ssh_host.is_empty() {
+        let mut c = Command::new(crate::script::expand(&spec.daemon));
+        c.arg("connect");
         c
     } else {
         let mut c = Command::new("/usr/bin/ssh");
-        c.arg("-T").args(ssh_options).args([host, &format!("{daemon} connect")])
-            .env("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin");
+        c.arg("-T").args(&spec.ssh_options).args([&spec.ssh_host, &format!("{} connect", spec.daemon)]);
         c
     };
     let child = cmd
+        .env("PATH", path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(e) => return e.into(),
     };
+    errors.lock().unwrap().clear();
+    if let Some(stderr) = child.stderr.take() {
+        let errors = errors.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                let mut e = errors.lock().unwrap();
+                e.push_back(line);
+                while e.len() > ERR_LINES {
+                    e.pop_front();
+                }
+            }
+        });
+    }
     let mut stdin = child.stdin.take().unwrap();
     let pid = child.id();
     let watch = alive.clone();
+    let every = Duration::from_millis(spec.watch_ms.max(50));
     std::thread::spawn(move || {
         while watch.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(every);
         }
         let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
     });

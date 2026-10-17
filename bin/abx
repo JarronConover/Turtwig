@@ -3,7 +3,10 @@
 
   abx state [PATH]        the app's live state (inspect.json); PATH like context.selected.chat.name
   abx layout [ID]         where nodes with ids are drawn (x, y, w, h); filter by id substring
-  abx do ACTION_JSON      run an action (see SETTINGS.md), e.g. abx do '{"do":"state.toggle","key":"sidebar_open"}'
+  abx do ACTION_JSON [--wait] [--read JQ] [--timeout SECS]
+                          run an action (see SETTINGS.md), e.g. abx do '{"do":"state.toggle","key":"sidebar_open"}';
+                          --wait prints its result ({ok, error, errors, value}; value: JQ against the context
+                          after it ran) and exits 1 when it failed
   abx shot [OUT.png]      capture the window, print the image path
   abx clickable [TEXT]    what can be clicked now (node id and tooltip)
   abx click ID|TEXT       click it as if by hand (exact id, else id/tooltip containing TEXT)
@@ -12,7 +15,7 @@
   abx problems            settings problems, or "No problems."
   abx settings            print the user settings file path; abx defaults: the live defaults file
 """
-import json, os, sys, time
+import json, os, platform, sys, time, uuid
 from pathlib import Path
 
 DIR = Path(os.environ.get("AGENT_BOX_SETTINGS_DIR", Path.home() / ".agent-box/state/settings"))
@@ -22,15 +25,55 @@ def state():
     return json.loads((DIR / "inspect.json").read_text())
 
 
-def run(action):
-    inbox = DIR / "run.json"
-    inbox.write_text(action)
+def run(action, wait=False, read=None, timeout=10.0):
+    """Hands an action to the app. On the Mac (where the app watches its settings folder) each request is
+    its own run.d/<id>.json; elsewhere run.json, which the daemon relays to the app. With wait, returns
+    the app's results/<id>.json."""
+    rid = uuid.uuid4().hex[:12]
+    request = {"id": rid, "action": json.loads(action) if isinstance(action, str) else action}
+    if read:
+        request["read"] = read
+    if platform.system() == "Darwin":
+        inbox = DIR / "run.d" / f"{rid}.json"
+        inbox.parent.mkdir(parents=True, exist_ok=True)
+        tmp = inbox.parent / f".{rid}.json"
+        tmp.write_text(json.dumps(request))
+        tmp.rename(inbox)
+    else:
+        inbox = DIR / "run.json"
+        # One request at a time through the relay: wait for the previous one to be picked up.
+        for _ in range(100):
+            if not inbox.exists():
+                break
+            time.sleep(0.05)
+        inbox.write_text(json.dumps(request))
     for _ in range(100):
         if not inbox.exists():
-            return True
+            break
         time.sleep(0.05)
-    print("the app didn't pick up run.json (is it running?)", file=sys.stderr)
-    return False
+    else:
+        print(f"the app didn't pick up {inbox.name} (is it running?)", file=sys.stderr)
+        return None
+    if not wait:
+        return {"ok": True}
+    result = DIR / "results" / f"{rid}.json"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if result.exists():
+            try:
+                r = json.loads(result.read_text())
+            except ValueError:
+                time.sleep(0.05)
+                continue
+            result.unlink()
+            return r
+        time.sleep(0.05)
+    print("no result from the app in time", file=sys.stderr)
+    return None
+
+
+def option(rest, name, default=None):
+    return rest[rest.index(name) + 1] if name in rest and rest.index(name) + 1 < len(rest) else default
 
 
 def main(argv):
@@ -49,7 +92,14 @@ def main(argv):
                 print(f'{n["id"]:<48} x={n["x"]:.0f} y={n["y"]:.0f} w={n["w"]:.0f} h={n["h"]:.0f}')
     elif cmd == "do":
         json.loads(rest[0])
-        return 0 if run(rest[0]) else 1
+        wait = "--wait" in rest or "--read" in rest
+        r = run(rest[0], wait=wait, read=option(rest, "--read"), timeout=float(option(rest, "--timeout", 10)))
+        if r is None:
+            return 1
+        if wait:
+            print(json.dumps(r, indent=2))
+            return 0 if r.get("ok") else 1
+        return 0
     elif cmd == "shot":
         out = Path(rest[0]) if rest else DIR / "snapshot.png"
         number = state().get("window", {}).get("number")
@@ -58,7 +108,7 @@ def main(argv):
             return 0
         shot = DIR / "snapshot.png"
         before = shot.stat().st_mtime if shot.exists() else 0
-        if not run('{"do": "app.snapshot"}'):
+        if run({"do": "app.snapshot"}) is None:
             return 1
         for _ in range(60):
             if shot.exists() and shot.stat().st_mtime > before:
@@ -76,14 +126,14 @@ def main(argv):
         target = rest[0]
         ids = [c["id"] for c in state().get("clickable", [])]
         action = {"do": "ui.click", "id": target} if target in ids else {"do": "ui.click", "label": target}
-        return 0 if run(json.dumps(action)) else 1
+        return 0 if run(action) is not None else 1
     elif cmd == "type":
         chat = rest[rest.index("--chat") + 1] if "--chat" in rest else None
         words = [w for i, w in enumerate(rest) if w not in ("--send", "--chat") and (i == 0 or rest[i - 1] != "--chat")]
         actions = [{"do": "composer.type", "text": " ".join(words), **({"chat": chat} if chat else {})}]
         if "--send" in rest:
             actions.append({"do": "composer.send", **({"chat": chat} if chat else {})})
-        return 0 if run(json.dumps(actions)) else 1
+        return 0 if run(actions) is not None else 1
     elif cmd == "log":
         lines = (DIR / "activity.log").read_text().splitlines() if (DIR / "activity.log").exists() else []
         print("\n".join(lines[-int(rest[0] if rest else 30):]))

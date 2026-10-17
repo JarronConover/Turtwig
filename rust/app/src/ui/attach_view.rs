@@ -61,21 +61,22 @@ impl Workspace {
     }
 
     pub(crate) fn attach(&mut self, chat: String, files: Vec<Attachment>, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_kit::component::WindowExt as _;
         if files.is_empty() {
             return;
         }
-        let local = chat == crate::designer::CHAT_ID || self.chat(&chat).map(|c| c.host == "mac").unwrap_or(false);
-        let host = (!local).then(|| self.settings.connection.ssh_host.clone());
+        let chat_host = self.chat(&chat).map(|c| c.host.clone());
+        let local = chat == crate::designer::CHAT_ID || chat_host.as_deref().is_some_and(|h| self.is_local_host(h));
+        let host = (!local).then(|| self.ssh_host_of(&chat_host.unwrap_or_else(|| self.default_host())));
         let what = if files.len() == 1 { self.settings.text("a_file", "a file") } else { self.settings.text("n_files", "{n} files").replace("{n}", &files.len().to_string()) };
         let note = self.settings.text("attaching", "Attaching {what} to {chat}").replace("{what}", &what).replace("{chat}", &self.chat_label(&chat));
-        window.push_notification(note, cx);
+        self.toast(note, window, cx);
         for file in files {
             let file = match file {
                 Attachment::Bytes { bytes, ext } => match crate::workspace::write_upload(&bytes, &ext) {
                     Ok(p) => Attachment::Path(p),
                     Err(e) => {
-                        window.push_notification(self.settings.text("attach_failed", "Couldn't attach: {error}").replace("{error}", &e.to_string()), cx);
+                        let t = self.settings.text("attach_failed", "Couldn't attach: {error}").replace("{error}", &e.to_string());
+                        self.toast(t, window, cx);
                         continue;
                     }
                 },

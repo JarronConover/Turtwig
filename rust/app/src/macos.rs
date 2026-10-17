@@ -89,8 +89,16 @@ pub fn init() -> Option<flume::Receiver<String>> {
     Some(rx)
 }
 
+/** A banner's extras: `sound` None for silence, "" for the default sound, else a sound's name;
+`subtitle`; `group` (banners in a group stack together). */
+pub struct NotifyOptions {
+    pub sound: Option<String>,
+    pub subtitle: Option<String>,
+    pub group: Option<String>,
+}
+
 /** Posts a banner; `id` comes back from `init`'s receiver when it's clicked. */
-pub fn notify(id: &str, title: &str, body: &str, sound: bool) {
+pub fn notify(id: &str, title: &str, body: &str, o: &NotifyOptions) {
     if !bundled() {
         return;
     }
@@ -101,8 +109,13 @@ pub fn notify(id: &str, title: &str, body: &str, sound: bool) {
             n.setTitle(Some(&NSString::from_str(title)));
             n.setInformativeText(Some(&NSString::from_str(body)));
             n.setIdentifier(Some(&NSString::from_str(id)));
-            if sound {
-                n.setSoundName(Some(unsafe { objc2_foundation::NSUserNotificationDefaultSoundName }));
+            if let Some(sub) = &o.subtitle {
+                n.setSubtitle(Some(&NSString::from_str(sub)));
+            }
+            match o.sound.as_deref() {
+                Some("") => n.setSoundName(Some(unsafe { objc2_foundation::NSUserNotificationDefaultSoundName })),
+                Some(name) => n.setSoundName(Some(&NSString::from_str(name))),
+                None => {}
             }
             NSUserNotificationCenter::defaultUserNotificationCenter().deliverNotification(&n);
         }
@@ -111,8 +124,17 @@ pub fn notify(id: &str, title: &str, body: &str, sound: bool) {
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
-    if sound {
-        content.setSound(Some(&UNNotificationSound::defaultSound()));
+    if let Some(sub) = &o.subtitle {
+        content.setSubtitle(&NSString::from_str(sub));
+    }
+    if let Some(g) = &o.group {
+        content.setThreadIdentifier(&NSString::from_str(g));
+    }
+    match o.sound.as_deref() {
+        Some("") => content.setSound(Some(&UNNotificationSound::defaultSound())),
+        // A named sound plays through the app (Notification Center only takes files in the bundle).
+        Some(name) => play_sound(name, 1.),
+        None => {}
     }
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&NSString::from_str(id), &content, None);
     let done = RcBlock::new(|err: *mut NSError| {
@@ -182,7 +204,9 @@ pub fn window_number() -> Option<i64> {
     windows.iter().find(|w| w.isVisible()).map(|w| w.windowNumber() as i64)
 }
 
-pub fn bounce() {
+/** Bounces the Dock icon once, or until the app is active when `critical`. */
+pub fn bounce(critical: bool) {
     let Some(mtm) = MainThreadMarker::new() else { return };
-    NSApplication::sharedApplication(mtm).requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+    let kind = if critical { NSRequestUserAttentionType::CriticalRequest } else { NSRequestUserAttentionType::InformationalRequest };
+    NSApplication::sharedApplication(mtm).requestUserAttention(kind);
 }

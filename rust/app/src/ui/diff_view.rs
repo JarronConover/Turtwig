@@ -277,14 +277,15 @@ impl Workspace {
 
     /** `diff.open_url` for worktrees on the box, `diff.open_url_local` for ones on this Mac. */
     fn diff_link_template(&self, path: &str) -> String {
-        let local = self.host_of_path(path) == "mac";
+        let local = self.is_local_host(&self.host_of_path(path));
         let (key, default) = if local { ("open_url_local", "cursor://file{path}:{line}") } else { ("open_url", "cursor://vscode-remote/ssh-remote+{host}{path}:{line}") };
         self.settings.diff.get(key).and_then(Value::as_str).unwrap_or(default).to_string()
     }
 
     /** `{host}` in a line link: the ssh host for box worktrees, "localhost" for the Mac's own. */
     fn diff_link_host(&self, path: &str) -> String {
-        if self.host_of_path(path) == "mac" { "localhost".into() } else { self.settings.connection.ssh_host.clone() }
+        let host = self.host_of_path(path);
+        if self.is_local_host(&host) { "localhost".into() } else { self.ssh_host_of(&host) }
     }
 
     /** The diff showing for the selected worktree (its key in `diffs`). */
