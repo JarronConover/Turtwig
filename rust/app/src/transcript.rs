@@ -32,6 +32,10 @@ pub struct Options {
     pub labels: Value,
     pub tools: Value,
     pub tool_names: Value,
+    /** `chat.background_tools`: which tools start background shells, subagents, and stop them. */
+    pub shell_tools: Vec<String>,
+    pub agent_tools: Vec<String>,
+    pub kill_tools: Vec<String>,
 }
 
 impl Default for Options {
@@ -50,6 +54,9 @@ impl Default for Options {
             labels: Value::Null,
             tools: Value::Null,
             tool_names: Value::Null,
+            shell_tools: vec!["Bash".into()],
+            agent_tools: vec!["Agent".into(), "Task".into()],
+            kill_tools: vec!["TaskStop".into(), "KillShell".into(), "KillBash".into()],
         }
     }
 }
@@ -58,7 +65,12 @@ thread_local! {
     static OPTIONS: std::cell::RefCell<Rc<Options>> = std::cell::RefCell::new(Rc::new(Options::default()));
 }
 
-/** Reads `chat.show`, `chat.labels`, `chat.tools`, `chat.tool_names`, `chat.pending`, `chat.summary_chars`. */
+fn list(v: &Value) -> Option<Vec<String>> {
+    v.as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+}
+
+/** Reads `chat.show`, `chat.labels`, `chat.tools`, `chat.tool_names`, `chat.pending`, `chat.summary_chars`,
+`chat.background_tools`. */
 pub fn set_options(chat: &Value) {
     let d = Options::default();
     let show = &chat["show"];
@@ -78,6 +90,9 @@ pub fn set_options(chat: &Value) {
         labels: chat.get("labels").cloned().unwrap_or(Value::Null),
         tools: chat.get("tools").cloned().unwrap_or(Value::Null),
         tool_names: chat.get("tool_names").cloned().unwrap_or(Value::Null),
+        shell_tools: list(&chat["background_tools"]["shell"]).unwrap_or(d.shell_tools.clone()),
+        agent_tools: list(&chat["background_tools"]["agent"]).unwrap_or(d.agent_tools.clone()),
+        kill_tools: list(&chat["background_tools"]["kill"]).unwrap_or(d.kill_tools.clone()),
     };
     OPTIONS.with(|c| *c.borrow_mut() = Rc::new(o));
 }
@@ -262,13 +277,15 @@ impl Transcript {
 
     /** Background shells and subagents started in the loaded lines that haven't finished. */
     pub fn background(&self) -> Vec<Background> {
+        let o = options();
         let mut out = vec![];
         for it in &self.items {
             let Item::Tool { id, name, summary, input, result, .. } = it else { continue };
             let bg = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
             let done = |task: &Option<String>| self.finished.contains(id) || task.as_ref().is_some_and(|t| self.finished.contains(t));
-            match name.as_str() {
-                "Bash" if bg => {
+            let kind = if o.shell_tools.contains(name) { "shell" } else if o.agent_tools.contains(name) { "agent" } else { "" };
+            match kind {
+                "shell" if bg => {
                     let Some(r) = result else { continue };
                     let task = after(r, "running in background with ID: ").map(|s| word(s).trim_end_matches('.').to_string());
                     let output = after(r, "Output is being written to: ").map(|s| word(s).trim_end_matches('.').to_string());
@@ -276,7 +293,7 @@ impl Transcript {
                         out.push(Background { kind: "shell", label: summary.clone(), tool_id: id.clone(), task_id: task, output });
                     }
                 }
-                "Agent" | "Task" => {
+                "agent" => {
                     let task = result.as_deref().and_then(|r| after(r, "agentId: ")).map(|s| word(s).to_string());
                     let launched = result.as_deref().is_some_and(|r| r.contains("agent launched") || r.contains("working in the background"));
                     let running = result.is_none() || ((bg || launched) && task.is_some());
@@ -465,7 +482,7 @@ impl Transcript {
                             let id = b["id"].as_str().unwrap_or("").to_string();
                             let name = b["name"].as_str().unwrap_or("tool").to_string();
                             let input = b["input"].clone();
-                            if matches!(name.as_str(), "TaskStop" | "KillShell" | "KillBash") {
+                            if options().kill_tools.contains(&name) {
                                 for k in ["task_id", "shell_id", "bash_id", "id"] {
                                     if let Some(v) = input.get(k).and_then(Value::as_str) {
                                         self.finished.insert(v.to_string());
@@ -579,9 +596,21 @@ impl Transcript {
     }
 }
 
+/** A tool step's one-line subject: `chat.tools.<name>.summary_field` (an input field, or a list tried in
+order) when set, else the built-in pick per tool. */
 fn summarize(name: &str, input: &Value) -> String {
     let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let short = |p: String| p.rsplit('/').next().unwrap_or(&p).to_string();
+    let o = options();
+    let field = o.tools.get(name).and_then(|t| t.get("summary_field")).cloned();
+    let chosen = match &field {
+        Some(Value::String(f)) => Some(s(f)),
+        Some(Value::Array(fs)) => fs.iter().filter_map(Value::as_str).map(&s).find(|v| !v.is_empty()),
+        _ => None,
+    };
+    if let Some(text) = chosen {
+        return text.lines().next().unwrap_or("").chars().take(o.summary_chars).collect();
+    }
     let text = match name {
         "Bash" => s("description").is_empty().then(|| s("command")).unwrap_or_else(|| s("description")),
         "Read" | "Write" | "Edit" | "NotebookEdit" => short(s("file_path")),
@@ -790,6 +819,24 @@ mod options_tests {
         assert_eq!(t.activity(), "");
         t.append(3, &[json!({"type": "user", "message": {"content": "hi"}})]);
         assert_eq!(t.activity(), "Pondering");
+        set_options(&json!({}));
+    }
+
+    #[test]
+    fn tool_summaries_and_background_tools_come_from_settings() {
+        set_options(&json!({"tools": {"Deploy": {"summary_field": ["target", "env"]}}, "background_tools": {"shell": ["Run"]}}));
+        let mut t = Transcript::default();
+        t.append(0, &[json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "d1", "name": "Deploy", "input": {"env": "prod", "note": "x"}},
+            {"type": "tool_use", "id": "r1", "name": "Run", "input": {"command": "serve", "run_in_background": true}},
+            {"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "make", "run_in_background": true}}
+        ]}}), json!({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "r1", "content": "running in background with ID: s1."},
+            {"type": "tool_result", "tool_use_id": "b1", "content": "running in background with ID: s2."}
+        ]}})]);
+        assert!(matches!(&t.items[0], Item::Tool { summary, .. } if summary == "prod"));
+        let bg = t.background();
+        assert_eq!(bg.iter().map(|b| b.task_id.clone().unwrap_or_default()).collect::<Vec<_>>(), ["s1"]);
         set_options(&json!({}));
     }
 }

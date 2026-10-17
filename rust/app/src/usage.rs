@@ -28,7 +28,61 @@ pub struct Usage {
     /** Claude Code's limits and when its cache was written. */
     pub claude_plan: Vec<Value>,
     pub plan_updated: Option<f64>,
+    /** Plans read from a file through a jq expression (`plan: {source: "file"}`): provider -> limits, when. */
+    pub file_plans: HashMap<String, (Vec<Value>, Option<f64>)>,
     pub loading: bool,
+    /** Settings this needs, set by the workspace: `app.local_host`, `usage.rate_fallbacks`, `strings`. */
+    pub local_host: String,
+    pub rate_fallbacks: Map<String, Value>,
+    pub strings: Value,
+}
+
+impl Usage {
+    /** A user-facing string from settings `strings` (else `default`), `{n}` filled in. */
+    fn text(&self, key: &str, default: &str) -> String {
+        self.strings.get(key).and_then(Value::as_str).unwrap_or(default).to_string()
+    }
+
+    fn is_local(&self, host: &str) -> bool {
+        host == if self.local_host.is_empty() { "mac" } else { self.local_host.as_str() }
+    }
+
+    /** "Session" for windows under a day, "Daily", "Weekly", else the length (`strings.usage_*`). */
+    fn window_name(&self, minutes: f64) -> String {
+        match minutes as u64 {
+            0..=1439 => self.text("usage_session", "Session"),
+            1440 => self.text("usage_daily", "Daily"),
+            10080 => self.text("usage_weekly", "Weekly"),
+            m if m % 1440 == 0 => self.text("usage_days", "{n} days").replace("{n}", &(m / 1440).to_string()),
+            m => self.text("usage_hours", "{n}h").replace("{n}", &(m / 60).to_string()),
+        }
+    }
+
+    fn ago(&self, secs: f64) -> String {
+        if secs < 60. { self.text("usage_just_now", "just now") } else { self.text("usage_ago", "{t} ago").replace("{t}", &duration_text(secs)) }
+    }
+
+    /** Reads a provider's plan from a file through `jq` (settings `plan: {source: "file", path, jq}`):
+    the expression turns the file's JSON into `[{name, kind, window_minutes, used, resets_at}]` (used in
+    percent; resets_at in unix seconds or RFC 3339). */
+    pub fn load_file_plan(&mut self, provider: &str, path: &str, jq: &str, exprs: &crate::ui::expr::Exprs) {
+        let path = crate::script::expand(path);
+        let Some(v) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return };
+        let out = crate::ui::expr::to_json(&exprs.first(jq, &crate::ui::expr::to_val(&v)));
+        let limits = out
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|l| {
+                let minutes = l["window_minutes"].as_f64().unwrap_or(0.);
+                let resets = l["resets_at"].as_f64().or_else(|| l["resets_at"].as_str().and_then(parse_rfc3339));
+                let name = l["name"].as_str().map(str::to_string).unwrap_or_else(|| self.window_name(minutes));
+                limit(provider, name, l["kind"].as_str().unwrap_or(""), minutes, l["used"].as_f64().unwrap_or(0.), resets)
+            })
+            .collect();
+        let updated = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64());
+        self.file_plans.insert(provider.to_string(), (limits, updated));
+    }
 }
 
 fn real(p: &str) -> String {
@@ -37,17 +91,6 @@ fn real(p: &str) -> String {
 
 fn now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.)
-}
-
-/** "Session" for windows under a day, "Daily", "Weekly", else the length. */
-fn window_name(minutes: f64) -> String {
-    match minutes as u64 {
-        0..=1439 => "Session".into(),
-        1440 => "Daily".into(),
-        10080 => "Weekly".into(),
-        m if m % 1440 == 0 => format!("{} days", m / 1440),
-        m => format!("{}h", m / 60),
-    }
 }
 
 fn limit(provider: &str, name: String, kind: &str, minutes: f64, used: f64, resets: Option<f64>) -> Value {
@@ -94,8 +137,10 @@ impl Usage {
         let r = |k: &str| c.get(k).and_then(Value::as_f64);
         let input = r("input")?;
         let n = |i: usize| row.get(i).and_then(Value::as_u64).unwrap_or(0) as f64;
-        let cost = n(3) * input + n(4) * r("output").unwrap_or(input * 5.) + n(5) * r("cache_write").unwrap_or(input * 1.25)
-            + n(6) * r("cache_write_1h").unwrap_or(input * 2.) + n(7) * r("cache_read").unwrap_or(input * 0.1);
+        // A rate a table lacks is the input rate times `usage.rate_fallbacks`.
+        let times = |k: &str, d: f64| self.rate_fallbacks.get(k).and_then(Value::as_f64).unwrap_or(d);
+        let cost = n(3) * input + n(4) * r("output").unwrap_or(input * times("output", 5.)) + n(5) * r("cache_write").unwrap_or(input * times("cache_write", 1.25))
+            + n(6) * r("cache_write_1h").unwrap_or(input * times("cache_write_1h", 2.)) + n(7) * r("cache_read").unwrap_or(input * times("cache_read", 0.1));
         Some(cost / 1e6)
     }
 
@@ -109,7 +154,7 @@ impl Usage {
             for s in v["sessions"].as_array().into_iter().flatten() {
                 let id = s["id"].as_str().unwrap_or("").to_string();
                 let provider = s["provider"].as_str().unwrap_or("anthropic").to_string();
-                let dir = s["dir"].as_str().map(|d| if host == "mac" { real(d) } else { d.to_string() }).unwrap_or_default();
+                let dir = s["dir"].as_str().map(|d| if self.is_local(host) { real(d) } else { d.to_string() }).unwrap_or_default();
                 let mut cost = 0.;
                 for row in s["tokens"].as_array().into_iter().flatten().filter_map(Value::as_array) {
                     match self.row_cost(overrides, &provider, row) {
@@ -148,7 +193,7 @@ impl Usage {
         let chat_cost = chat.and_then(|c| self.sessions.get(c)).map(|s| s.cost).unwrap_or(0.);
         let wt_cost: f64 = worktree
             .map(|(host, path)| {
-                let p = if host == "mac" { real(path) } else { path.to_string() };
+                let p = if self.is_local(host) { real(path) } else { path.to_string() };
                 self.sessions.values().filter(|s| s.host == host && s.dir == p).map(|s| s.cost).sum()
             })
             .unwrap_or(0.);
@@ -200,13 +245,16 @@ impl Usage {
     }
 
     /** Each provider's plan: `{provider, name, icon, color, limits, updated, updated_text}`, for those
-    with a `plan` source (`claude_oauth` or `codex_rollouts`) and numbers to show. */
+    with a `plan` source (`claude_oauth`, `codex_rollouts`, or `{source: "file"}`) and numbers to show. */
     fn plans(&self, providers: &Map<String, Value>) -> Vec<Value> {
         let mut out = vec![];
         for (id, p) in providers {
-            let (limits, updated) = match p["plan"].as_str() {
+            let source = p["plan"].as_str().or_else(|| p["plan"]["source"].as_str());
+            let (limits, updated) = match source {
                 Some("claude_oauth") => (self.claude_plan.iter().map(|l| { let mut l = l.clone(); l["provider"] = json!(id); l }).collect(), self.plan_updated),
-                Some("codex_rollouts") => self.codex_plan(id),
+                // The daemon files Codex's limits under its own provider name (`plan_provider`, default the id).
+                Some("codex_rollouts") => self.codex_plan(id, p["plan_provider"].as_str().unwrap_or(id)),
+                Some("file") => self.file_plans.get(id).cloned().unwrap_or_default(),
                 _ => continue,
             };
             if limits.is_empty() {
@@ -216,19 +264,19 @@ impl Usage {
             let limits: Vec<Value> = limits.into_iter().map(|mut l| { l["provider_name"] = json!(name); l }).collect();
             out.push(json!({
                 "provider": id, "name": name, "icon": p["icon"], "color": p["color"], "limits": limits,
-                "updated": updated, "updated_text": updated.map(|t| ago(now() - t)),
+                "updated": updated, "updated_text": updated.map(|t| self.ago(now() - t)),
             }));
         }
         out
     }
 
     /** The newest rate limits any host's Codex rollouts hold: its primary and secondary windows. */
-    fn codex_plan(&self, provider: &str) -> (Vec<Value>, Option<f64>) {
+    fn codex_plan(&self, provider: &str, filed_as: &str) -> (Vec<Value>, Option<f64>) {
         let newest = self
             .raw
             .values()
             .flat_map(|v| v["plans"].as_array().cloned().unwrap_or_default())
-            .filter(|p| p["provider"] == "openai")
+            .filter(|p| p["provider"] == filed_as)
             .max_by(|a, b| a["at"].as_str().unwrap_or("").cmp(b["at"].as_str().unwrap_or("")));
         let Some(p) = newest else { return (vec![], None) };
         let limits = ["primary", "secondary"]
@@ -236,7 +284,7 @@ impl Usage {
             .filter_map(|k| {
                 let w = p["rate_limits"].get(*k).filter(|w| w.is_object())?;
                 let minutes = w["window_minutes"].as_f64().unwrap_or(0.);
-                Some(limit(provider, window_name(minutes), k, minutes, w["used_percent"].as_f64().unwrap_or(0.), w["resets_at"].as_f64()))
+                Some(limit(provider, self.window_name(minutes), k, minutes, w["used_percent"].as_f64().unwrap_or(0.), w["resets_at"].as_f64()))
             })
             .collect();
         (limits, p["at"].as_str().and_then(parse_rfc3339))
@@ -251,7 +299,7 @@ impl Usage {
         let updated = plans.iter().filter_map(|p| p["updated"].as_f64()).reduce(f64::max);
         json!({
             "limits": limits,
-            "updated": updated, "updated_text": updated.map(|t| ago(now() - t)),
+            "updated": updated, "updated_text": updated.map(|t| self.ago(now() - t)),
             "meter_mode": o.mode, "meter": shown(&o.mode),
             "meters": { "smart": shown("smart"), "session": shown("session"), "weekly": shown("weekly") },
         })
@@ -270,8 +318,8 @@ impl Usage {
                 let kind = l["kind"].as_str().unwrap_or("");
                 let minutes = if kind == "session" { 300. } else if kind.starts_with("weekly") { 10080. } else { 0. };
                 let name = match kind {
-                    "weekly_scoped" => format!("Weekly · {}", l.pointer("/scope/model/display_name").and_then(Value::as_str).unwrap_or("model")),
-                    _ if minutes > 0. => window_name(minutes),
+                    "weekly_scoped" => self.text("usage_weekly_model", "Weekly · {model}").replace("{model}", l.pointer("/scope/model/display_name").and_then(Value::as_str).unwrap_or("model")),
+                    _ if minutes > 0. => self.window_name(minutes),
                     other => other.replace('_', " "),
                 };
                 let mut out = limit("", name, kind, minutes, l["percent"].as_f64().unwrap_or(0.), l["resets_at"].as_str().and_then(parse_rfc3339));
@@ -357,10 +405,6 @@ fn thousands(x: f64) -> String {
     format!("{}{out}.{frac}", if neg { "-" } else { "" })
 }
 
-fn ago(secs: f64) -> String {
-    if secs < 60. { "just now".into() } else { format!("{} ago", duration_text(secs)) }
-}
-
 fn duration_text(secs: f64) -> String {
     let s = secs.max(0.) as u64;
     match s {
@@ -418,8 +462,11 @@ mod tests {
         assert_eq!(kind("session"), "session");
         assert_eq!(kind("weekly"), "weekly_all");
         assert_eq!(super::meter(&limits[..1], "weekly").unwrap()["kind"], "session");
-        assert_eq!(super::window_name(300.), "Session");
-        assert_eq!(super::window_name(10080.), "Weekly");
+        let u = super::Usage::default();
+        assert_eq!(u.window_name(300.), "Session");
+        assert_eq!(u.window_name(10080.), "Weekly");
+        let u = super::Usage { strings: serde_json::json!({"usage_weekly": "Semana"}), ..Default::default() };
+        assert_eq!(u.window_name(10080.), "Semana");
         assert!(super::meter(&[], "smart").is_none());
         let o = super::MeterOptions { mode: "smart".into(), providers: None, warning_below: 50., danger_below: 20. };
         let m = o.decorate(limits[1].clone());
@@ -443,5 +490,25 @@ mod tests {
         assert_eq!(super::thousands(4454.333), "4,454.33");
         assert_eq!(super::thousands(1.6), "1.60");
         assert_eq!(super::parse_rfc3339("1970-01-02T00:00:01.5+00:00"), Some(86401.));
+        u.rate_fallbacks.insert("output".into(), serde_json::json!(2));
+        u.rates.insert("x".into(), serde_json::json!({"m": {"input": 1}}));
+        assert_eq!(u.row_cost(&Default::default(), "x", &row(serde_json::json!(["m", "2026-10-16", 0, 0, 1_000_000, 0, 0, 0]))), Some(2.));
+    }
+
+    #[test]
+    fn a_file_plan_comes_through_its_jq() {
+        let dir = std::env::temp_dir().join(format!("abx-plan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("plan.json");
+        std::fs::write(&f, r#"{"windows": [{"mins": 300, "pct": 40}]}"#).unwrap();
+        let mut u = super::Usage::default();
+        let e = crate::ui::expr::Exprs::default();
+        u.load_file_plan("acme", &f.to_string_lossy(), "[.windows[] | {window_minutes: .mins, used: .pct, kind: \"session\"}]", &e);
+        let (limits, updated) = u.file_plans["acme"].clone();
+        assert_eq!((limits[0]["name"].as_str(), limits[0]["left"].as_f64()), (Some("Session"), Some(60.)));
+        assert!(updated.is_some());
+        let providers: serde_json::Map<String, serde_json::Value> = serde_json::from_value(serde_json::json!({"acme": {"name": "Acme", "plan": {"source": "file"}}})).unwrap();
+        assert_eq!(u.plans(&providers)[0]["provider"], "acme");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
