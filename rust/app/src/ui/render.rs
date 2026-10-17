@@ -53,8 +53,6 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("icon", "A Lucide icon. `props.name` (e.g. git-branch, panel-left, plus), `props.size` (points), `props.spin` (bool)."),
     ("image", "A picture, animated GIF/WebP, or video (mp4, mov, m4v, webm; muted, looping): `props.src` (a file: absolute, ~/, or relative to the settings folder; or an http(s) URL) and `props.fit` (cover, contain, fill, scale_down, none). Size it with `style`; settings `background` puts one behind the whole window."),
     ("logo", "The app's logo (settings `logo`) at `props.size` (24). Any `logo` key in props overrides it for this node, e.g. `{\"tile\": null}` for bare art."),
-    ("input", "A one-line text field bound to a state key: `props.state` (key), `props.placeholder`, `props.autofocus`, `props.appearance` (false: no border). Read the text as `.state.<key>`. Or `props.value` (follows the context while the field isn't focused) with `on.submit` (an action run on Enter, with the text as `.input`)."),
-    ("spinner", "A loading spinner. `props.size`: xsmall | small | medium | large."),
     ("spacer", "Takes the remaining space (grow 1)."),
     ("divider", "A 1-point line. `props.axis`: x (default, horizontal) | y."),
     ("markdown", "Rendered Markdown. `props.text`, `props.id` for a stable identity."),
@@ -264,59 +262,6 @@ impl Workspace {
                     .map(|i| img(i).size(px(size)).flex_none().into_any_element())
                     .into_iter()
                     .collect()
-            }
-            "input" => {
-                use gpui_kit::component::input::{Input, InputEvent, InputState};
-                let key = props.get("state").and_then(Value::as_str).unwrap_or("").to_string();
-                let entity = match self.inputs.get(&id) {
-                    Some(e) => e.clone(),
-                    None => {
-                        let placeholder = props.get("placeholder").map(value_text).unwrap_or_default();
-                        let start = self.state.get(&key).map(value_text).unwrap_or_default();
-                        let e = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(start));
-                        let (k, input_id) = (key.clone(), id.clone());
-                        self._subscriptions.push(cx.subscribe_in(&e, window, move |ws: &mut Workspace, e, ev: &InputEvent, window, cx| match ev {
-                            InputEvent::Change if !k.is_empty() => {
-                                let v = e.read(cx).value().to_string();
-                                ws.set_state(k.clone(), Value::String(v));
-                                cx.notify();
-                            }
-                            InputEvent::PressEnter { .. } => {
-                                if let Some((action, ctx)) = ws.input_submits.get(&input_id).cloned() {
-                                    let text = e.read(cx).value().to_string();
-                                    let c = with(&ctx, vec![("input".into(), to_val(&Value::String(text)))]);
-                                    let resolved = ws.exprs.resolve_action(&action, &c);
-                                    ws.pending_actions.push(resolved);
-                                    // Leave the field so it shows the saved value again.
-                                    window.blur(cx);
-                                    cx.notify();
-                                }
-                            }
-                            _ => {}
-                        }));
-                        if props.get("autofocus").and_then(Value::as_bool) == Some(true) {
-                            e.update(cx, |s, cx| s.focus(window, cx));
-                        }
-                        self.inputs.insert(id.clone(), e.clone());
-                        e
-                    }
-                };
-                // `value` follows the context while the field isn't being edited; `on.submit` runs on Enter with `.input`.
-                if let Some(v) = props.get("value").map(value_text) {
-                    let editing = entity.read(cx).focus_handle(cx).is_focused(window);
-                    if !editing && entity.read(cx).value().as_ref() != v.as_str() {
-                        entity.update(cx, |s, cx| s.set_value(v, window, cx));
-                    }
-                }
-                match obj.get("on").and_then(|o| o.get("submit")) {
-                    Some(a) => self.input_submits.insert(id.clone(), (a.clone(), ctx.clone())),
-                    None => self.input_submits.remove(&id),
-                };
-                vec![Input::new(&entity).appearance(props.get("appearance").and_then(Value::as_bool).unwrap_or(true)).into_any_element()]
-            }
-            "spinner" => {
-                let color = props.get("color").and_then(|c| style::color(c, &theme));
-                vec![self.spinner(props.get("size").and_then(Value::as_str), color, cx)]
             }
             "markdown" => {
                 let text = value_text(props.get("text").unwrap_or(&Value::Null));
