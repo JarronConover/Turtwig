@@ -28,6 +28,11 @@ pub fn load() {
     }
 }
 
+/** Every option the app sent. */
+pub fn all() -> Value {
+    OPTIONS.read().unwrap().clone().unwrap_or(Value::Object(Default::default()))
+}
+
 pub fn get(key: &str) -> Option<Value> {
     OPTIONS.read().unwrap().as_ref().and_then(|o| o.get(key).cloned()).filter(|v| !v.is_null())
 }

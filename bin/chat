@@ -46,13 +46,13 @@ TRUST = {"claude": {"file": "~/.claude.json", "path": ["projects", "{dir}", "has
 # argv with {placeholders}; a nested list is dropped when a placeholder in it is empty. `session`:
 # "assigned" (the chat id is the session id) or "discovered" (the CLI picks it; found in `sessions_dir`).
 # transcripts_root/backup_dir: what sync-worker backs up, and where under the sessions branch.
-# process_names/process_session_pattern: how another process running the same session is found.
+# process_names/process_session_pattern: another process running a session (the pattern's group 1).
 AGENTS = {
     "claude": {
         "bin": "claude", "session": "assigned", "trust": "claude", "remote_control": True, "stop_elsewhere": True,
         "rc_url_pattern": r"https://claude\.ai/code/session_[A-Za-z0-9]+",
         "transcripts_root": "~/.claude/projects", "backup_dir": "projects",
-        "process_names": ["claude"], "process_session_pattern": r"--(resume|session-id)[ =]{session}\b",
+        "process_names": ["claude"], "process_session_pattern": r"--(?:resume|session-id)[ =]([0-9a-f]{8}-[0-9a-f-]{27})",
         "hooks_file": "~/.claude/settings.json", "hooks_installer": "claude-hooks", "provider": "anthropic",
         "hook_events": ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "PermissionRequest", "Stop",
                         "SubagentStop", "SessionStart", "SessionEnd"],
@@ -333,20 +333,21 @@ def agent_bin(name):
 
 def session_pids(chat):
     """Processes of the chat's agent (its `process_names`, and their wrappers) running its session outside
-    a.box, by `process_session_pattern` ({session}: the session id)."""
+    a.box: `process_session_pattern`'s group 1 is the session id."""
     agent = agent_def(chat)
     session = session_of(chat)
     names = agent.get("process_names") or []
     pattern = agent.get("process_session_pattern")
     if not (session and names and pattern):
         return []
-    want = re.compile(pattern.replace("{session}", re.escape(session)))
+    want = re.compile(pattern)
     out = run(["ps", "-axo", "pid=,args="], capture_output=True, check=False).stdout
     pids = []
     for line in out.splitlines():
         pid, _, args = line.strip().partition(" ")
         words = args.split()[:2]
-        if any(w == n or w.endswith("/" + n) for w in words for n in names) and want.search(args):
+        m = want.search(args)
+        if any(w == n or w.endswith("/" + n) for w in words for n in names) and m and m.group(1) == session:
             pids.append(int(pid))
     return pids
 
@@ -462,7 +463,14 @@ def wait_for_rc_url(name, timeout=None, pattern=None):
 
 
 def transcript(chat):
-    """The chat's conversation file (None: a Codex chat with no session yet)."""
+    """The chat's conversation file (None: a Codex chat with no session yet). An agent with a
+    `transcript_path` template ({id} {session} {dir} {dir_slug}) keeps it there."""
+    template = agent_def(chat).get("transcript_path")
+    if template and not (chat.get("transcript") and os.path.exists(chat["transcript"])):
+        session = session_of(chat) or chat["id"]
+        values = {"id": chat["id"], "session": session, "dir": chat.get("dir") or "",
+                  "dir_slug": project_slug(os.path.realpath(chat["dir"])) if chat.get("dir") else ""}
+        return Path(abxcfg.expand(abxcfg.subst(template, values)))
     if agent_def(chat).get("session") == "discovered":
         # `transcript` is this machine's path; after a move the rollout is found again by its session.
         path = chat.get("transcript")

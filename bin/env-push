@@ -3,13 +3,13 @@
 # what they wrote (option env_push: `paths`, each one-way or two_way, every
 # project's auto memory, the PreToolUse safety hooks matching `hooks_match`).
 # Files only flow toward the newer copy, so neither side loses edits. Targets:
-# env_push.hosts, else every other host with ssh (the box).
+# the hosts given as arguments, else env_push.hosts, else every other host with ssh (the box).
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 
 conf=$(cfg env_push); [ -n "$conf" ] && [ "$conf" != null ] || conf='{}'
 c() { jq -r "$1" <<< "$conf"; }
-targets=$(c '.hosts // empty | .[]')
+targets=${*:-$(c '.hosts // empty | .[]')}
 if [ -z "$targets" ]; then
   targets=$(cfg hosts | jq -r --arg me "$AGENT_HOST" 'to_entries[] | select(.key != $me and (.value.ssh // "") != "") | .key')
 fi

@@ -105,6 +105,7 @@ WT_TOOL = {
     "delete": ["{bin}", "remove", "{path}", "--force", "--purge-cache"],
     "list": ["{bin}", "list"],
     "start": ["{bin}", "start", "{branch}", "-d"],
+    "partial_note": "run `wt adopt {path}` before starting its stack",
     "env": {"WT_PRIMARY": "{primary}", "WT_BASE": "{worktrees_base}"},
 }
 

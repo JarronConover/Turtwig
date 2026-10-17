@@ -1,4 +1,4 @@
-/*! agent-boxd: the a.box app's daemon, on the box or (in Mac mode, over super.engineering) on the Mac.
+/*! agent-boxd: the a.box app's daemon, one on each host (the box, the Mac, any other in `hosts`).
 `run` serves the app's protocol on a unix socket, `connect` relays stdio to it, `hook` logs Claude Code hooks. */
 
 mod agents;
@@ -6,7 +6,8 @@ mod codex;
 mod config;
 mod db;
 mod diff;
-mod mac;
+mod elsewhere;
+mod hosts;
 mod model;
 mod server;
 mod term;
