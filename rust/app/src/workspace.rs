@@ -153,6 +153,8 @@ pub struct Workspace {
     /** The latest press: the innermost node with a handler under it, when, and where; and the node the
     latest single press (the first half of any double) landed on. */
     pub(crate) press: Option<(String, std::time::Instant, Point<Pixels>)>,
+    /** While rendering inside a "motion": false node: its subtree doesn't animate. */
+    pub(crate) motion_off: usize,
     pub(crate) first_press: Option<String>,
     /** The designer's conversations, as the history list last read them. */
     pub(crate) designer_sessions: Vec<Value>,
@@ -355,6 +357,7 @@ impl Workspace {
             designer: Default::default(),
             designer_sessions: vec![],
             press: None,
+            motion_off: 0,
             first_press: None,
             designer_tx,
             problems_written: String::new(),

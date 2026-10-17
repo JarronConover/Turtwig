@@ -324,7 +324,12 @@ impl Workspace {
             _ => vec![],
         };
         let virtual_list = kind == "scroll" && props.get("virtual").and_then(Value::as_bool) == Some(true);
+        // "motion": false holds still the whole subtree, so a node that appears (a popover button's copy) doesn't
+        // fade or slide its contents in.
+        let still = obj.get("motion").and_then(Value::as_bool) == Some(false);
+        self.motion_off += still as usize;
         let kids = if virtual_list { vec![self.virtual_list(obj, ctx, path, &id, cx)] } else { children(self, window, cx) };
+        self.motion_off -= still as usize;
 
         let mut el = el.id(SharedString::from(id.clone()));
         if kind == "input" {
@@ -593,7 +598,7 @@ impl Workspace {
         };
         // A node lifted "above" (a popover's button while it's open) stays where it is: gliding it would read
         // its deferred position as a move.
-        let moves = self.motion.borrow().enabled && obj.get("motion").and_then(Value::as_bool) != Some(false) && layer != "above";
+        let moves = self.motion.borrow().enabled && !still && self.motion_off == 0 && layer != "above";
         let el = if moves { crate::ui::motion::Motion::new(id, el, self.motion.clone()).into_any_element() } else { el };
         // "layer": "top" paints the node above everything else (popovers, dialogs) and keeps clicks off what's under it;
         // "above" goes over that too (the button that opened a popover stays a button while it's open).
