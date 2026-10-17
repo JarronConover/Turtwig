@@ -48,21 +48,23 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("row", "Children side by side."),
     ("column", "Children stacked."),
     ("stack", "Children layered on top of each other (later children on top); position them with `style.position: absolute`."),
-    ("scroll", "A scrolling container. `props.axis`: y (default) | x | both. `props.virtual`: true builds only the children on screen (each `for` item is one row), for long lists."),
-    ("text", "Text. `props.text` (templates allowed); a plain string node is shorthand for this."),
+    ("scroll", "A scrolling container. `props.axis`: y (default) | x | both. `props.scrollbar`: never (default) | scrolling | hover | always. `props.handle` names it for `ui.scroll` (default: its id). `props.virtual`: true builds only the children on screen (each `for` item is one row), for long lists; then `props.align` top | bottom (rows sit at the bottom when they don't fill it), `props.follow` (stay at the end as rows are added), `props.overdraw` (points drawn past each edge, 400)."),
+    ("text", "Text. `props.text` (templates allowed); a plain string node is shorthand for this. `props.selectable`: true lets it be selected and copied."),
     ("icon", "A Lucide icon. `props.name` (e.g. git-branch, panel-left, plus), `props.size` (points), `props.spin` (bool)."),
     ("image", "A picture, animated GIF/WebP, or video (mp4, mov, m4v, webm; muted, looping): `props.src` (a file: absolute, ~/, or relative to the settings folder; or an http(s) URL) and `props.fit` (cover, contain, fill, scale_down, none). Size it with `style`; settings `background` puts one behind the whole window."),
     ("logo", "The app's logo (settings `logo`) at `props.size` (24). Any `logo` key in props overrides it for this node, e.g. `{\"tile\": null}` for bare art."),
     ("spacer", "Takes the remaining space (grow 1)."),
     ("divider", "A 1-point line. `props.axis`: x (default, horizontal) | y."),
-    ("markdown", "Rendered Markdown. `props.text`, `props.id` for a stable identity."),
+    ("markdown", "Rendered Markdown. `props.text`, `props.id` for a stable identity, `props.selectable` (default `chat.selectable`). Looks like settings `markdown` (same keys as `chat.markdown`, which it defaults to), with `props.markdown` over it."),
+    ("select", "A dropdown: a button showing the chosen option that opens a menu of `props.options` ([values] or [{value, label}]) bound to `props.state` (or `props.value`), `props.placeholder` when nothing is chosen, `props.icon` (chevron-down). `on.change` gets `.value`. Look: `theme.select` and `style`. Agents: `ui.menu {id, item}` or `ui.click {id: \"ID:VALUE\"}`."),
     ("transcript", "The built-in chat transcript. `props.chat` (chat id; default the selected chat). Look: settings `chat`."),
     ("composer", "The built-in message box for a chat. `props.chat`, `props.placeholder`."),
     ("waiting", "The built-in card for a chat waiting on a permission or question, with its answer buttons. `props.chat`."),
     ("terminal", "The built-in terminal for a worktree. `props.path` (default the selected worktree). Look: settings `terminal`."),
     ("attachments", "Preview chips for files attached to a chat but not sent yet (spinner while uploading, × to remove). `props.chat` (default the selected chat), `props.size`. Look: settings `chat.attachments`, `chat.attachment`."),
     ("diff", "The built-in diff of a worktree: a file list beside the changes. `props.path` (default the selected worktree), `props.base` (default `state.diff_base`: uncommitted | branch). Click a file to jump, a file header to collapse, a line number to open it in the editor. Look: settings `diff`."),
-    ("resize_handle", "A drag handle that sets a numeric state value. `props.state` (key), `props.axis` x|y, `props.min`, `props.max`, `props.invert` (bool, for handles on the far edge)."),
+    ("resize_handle", "A drag handle that sets a numeric state value. `props.state` (key), `props.axis` x|y, `props.min` (80), `props.max` (2000), `props.default` (300, the size while the state is unset), `props.invert` (bool, for handles on the far edge). `on.double_click` works on it (e.g. a state.set back to a size)."),
+    ("(every node)", "Besides `type`, `props`, `style`, `children`: `id` (stable identity; listed in inspect.json `layout`), `for`/`as`/`key`, `if`, `on` (events: click, double_click, mouse_down, mouse_up, right_click, hover_start, hover_end, scroll (`.dx`/`.dy` added to the action), key ({KEY: action} or [{key, do}], while focused), focus, blur, click_outside, drop, drop_item, change, submit), `focusable` (true: takes keyboard focus; Enter/Space click it, Tab moves on; `.focused_node` is the focused node's id), `menu` (entries) with `menu_on` (right_click (default) | click), `tooltip`, `drag`, `drop_key`, `drop_zones`, `layer` (top | above | a number: paint above lower layers), `occlude`, `animate`, `motion`, `transition`."),
     ("<Component>", "Any name under `components`; its `props` are available inside as `.props`. `style` merges into its root's, and `id`, `on`, `menu`, `tooltip`, `drag`, `drop_key`, `drop_zones`, `layer`, `animate`, `motion` and `transition` set on the use replace its root's."),
 ];
 
@@ -120,9 +122,17 @@ impl Workspace {
     }
 
     pub(crate) fn render_view(&mut self, name: &str, ctx: &Val, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if name == "main" {
-            FRAME_CTX.with(|c| *c.borrow_mut() = Some(ctx.clone()));
-        }
+        let main_ctx;
+        let ctx = if name == "main" {
+            super::drive::new_frame();
+            super::drive::load_fonts(&self.settings.theme, window);
+            let focused = super::drive::ui(|u| u.focused_last.clone()).map(Value::String).unwrap_or(Value::Null);
+            main_ctx = with(ctx, vec![("focused_node".into(), to_val(&focused))]);
+            FRAME_CTX.with(|c| *c.borrow_mut() = Some(main_ctx.clone()));
+            &main_ctx
+        } else {
+            ctx
+        };
         let Some(node) = self.settings.views.get(name).cloned() else {
             return div().child(format!("No view named `{name}` in settings.views")).into_any_element();
         };
@@ -170,6 +180,10 @@ impl Workspace {
             }
         }
         let kind = obj.get("type").and_then(Value::as_str).unwrap_or("box").to_string();
+        if kind == "select" && !self.settings.components.contains_key("select") {
+            let node = self.select_node(obj, ctx, path);
+            return self.render(&node, ctx, path, window, cx);
+        }
         if let Some(comp) = self.settings.components.get(&kind).cloned() {
             let props = self.exprs.resolve_val(obj.get("props").unwrap_or(&Value::Null), ctx);
             let c = with(ctx, vec![("props".into(), props)]);
@@ -182,7 +196,7 @@ impl Workspace {
                         }
                     }
                 }
-                for k in ["id", "animate", "motion", "transition", "tooltip", "on", "menu", "drag", "drop_key", "drop_zones", "layer"] {
+                for k in ["id", "animate", "motion", "transition", "tooltip", "on", "menu", "menu_on", "focusable", "drag", "drop_key", "drop_zones", "layer"] {
                     if let Some(v) = obj.get(k) {
                         base.insert(k.into(), v.clone());
                     }
@@ -206,7 +220,48 @@ impl Workspace {
             Some(own) => format!("{own}{}", loop_keys(path)),
             None => path.to_string(),
         };
-        self.apply_transitions(obj, &mut st, &id, window);
+        // `hover_ms` (and ui.hover) apply hover styles from tracked state, so they can ease.
+        let hover_ms = st.get("hover_ms").and_then(Value::as_u64);
+        let (hovered, forced) = super::drive::ui(|u| (u.hovered.contains(&id), u.forced_hover.as_deref() == Some(id.as_str())));
+        let mut eased: Vec<(String, u64)> = vec![];
+        let tracks_hover = hover_ms.is_some() && st.get("hover").is_some_and(Value::is_object);
+        if let Some(Value::Object(h)) = st.get("hover").cloned().filter(|_| tracks_hover || forced) {
+            st.remove("hover");
+            if hovered || forced {
+                st.extend(h.clone());
+            }
+            if let Some(ms) = hover_ms {
+                eased.extend(h.keys().map(|k| (k.clone(), ms)));
+            }
+        }
+        let on = obj.get("on").and_then(Value::as_object);
+        let focusable = obj.get("focusable").is_some_and(|f| match f {
+            Value::Bool(b) => *b,
+            Value::String(code) => self.exprs.truthy(code, ctx),
+            _ => false,
+        }) || on.is_some_and(|o| o.contains_key("key"));
+        let focus = focusable.then(|| super::drive::focus_handle(&id, cx));
+        let focused = focus.as_ref().is_some_and(|h| h.is_focused(window));
+        if focused {
+            super::drive::ui(|u| u.focused = Some(id.clone()));
+            if let Some(Value::Object(f)) = st.get("focus").cloned() {
+                st.extend(f);
+            }
+        }
+        if focusable {
+            let was = super::drive::ui(|u| u.focused_last.as_deref() == Some(id.as_str()));
+            let event = match (focused, was) {
+                (true, false) => on.and_then(|o| o.get("focus")),
+                (false, true) => on.and_then(|o| o.get("blur")),
+                _ => None,
+            };
+            if let Some(a) = event {
+                let a = self.exprs.resolve_action(a, ctx);
+                self.pending_actions.push(a);
+                cx.notify();
+            }
+        }
+        self.apply_transitions(obj, &mut st, &id, &eased, window);
         self.apply_enter(obj, &mut st, &id, window);
 
         let children = |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| -> Vec<AnyElement> {
@@ -231,14 +286,17 @@ impl Workspace {
         let el = style::apply(base, &st, &theme);
 
         let content: Vec<AnyElement> = match kind.as_str() {
+            "text" if props.get("selectable").and_then(Value::as_bool) == Some(true) => {
+                let text = markdown_escape(&value_text(props.get("text").unwrap_or(&Value::Null)));
+                vec![TextView::markdown(SharedString::from(format!("{id}:text")), text).selectable(true).into_any_element()]
+            }
             "text" => vec![value_text(props.get("text").unwrap_or(&Value::Null)).into_any_element()],
             "icon" => {
                 let name = props.get("name").and_then(Value::as_str).unwrap_or("circle");
                 let size = props.get("size").and_then(Value::as_f64).unwrap_or(14.) as f32;
                 let mut icon = Icon::empty().path(format!("icons/{name}.svg")).size(px(size));
+                // Without props.color the icon takes the node's text color, hover included.
                 if let Some(c) = props.get("color").and_then(|c| style::color(c, &theme)) {
-                    icon = icon.text_color(c);
-                } else if let Some(c) = st.get("color").and_then(|c| style::color(c, &theme)) {
                     icon = icon.text_color(c);
                 }
                 if props.get("spin").and_then(Value::as_bool) == Some(true) {
@@ -266,7 +324,12 @@ impl Workspace {
             "markdown" => {
                 let text = value_text(props.get("text").unwrap_or(&Value::Null));
                 let mid = props.get("id").map(value_text).unwrap_or(id.clone());
-                vec![TextView::markdown(SharedString::from(mid), text).into_any_element()]
+                let mut md = self.settings.get("markdown").or_else(|| self.settings.chat.get("markdown")).and_then(Value::as_object).cloned();
+                if let Some(Value::Object(over)) = props.get("markdown") {
+                    md.get_or_insert_with(Map::new).extend(over.clone());
+                }
+                let selectable = props.get("selectable").and_then(Value::as_bool).unwrap_or(self.settings.chat.get("selectable").and_then(Value::as_bool) != Some(false));
+                vec![self.markdown_with(&mid, &text, md.as_ref(), selectable, &theme).into_any_element()]
             }
             "transcript" => {
                 let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
@@ -278,7 +341,17 @@ impl Workspace {
             }
             "waiting" => {
                 let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
-                chat.and_then(|c| self.chat(&c).cloned()).filter(|c| c.state == "waiting").map(|c| self.waiting_card(&c, cx)).into_iter().collect()
+                let chat = chat.and_then(|c| self.chat(&c).cloned()).filter(|c| c.state == "waiting");
+                let spec = self.settings.chat.get("render").and_then(|r| r.get("waiting")).cloned();
+                chat.map(|c| {
+                    let custom = spec.as_ref().filter(|s| !s.is_null()).and_then(|spec| {
+                        let props = self.waiting_props(&c);
+                        self.render_part(Some(spec), props, &format!("{path}:waiting"), window, cx)
+                    });
+                    custom.unwrap_or_else(|| self.waiting_card(&c, cx))
+                })
+                .into_iter()
+                .collect()
             }
             "terminal" => {
                 let path = props.get("path").and_then(Value::as_str).map(str::to_string).or_else(|| self.selected.clone());
@@ -308,10 +381,11 @@ impl Workspace {
         // fade or slide its contents in.
         let still = obj.get("motion").and_then(Value::as_bool) == Some(false);
         self.motion_off += still as usize;
-        let kids = if virtual_list { vec![self.virtual_list(obj, ctx, path, &id, cx)] } else { children(self, window, cx) };
+        let kids = if virtual_list { vec![self.virtual_list(obj, &props, ctx, path, &id, cx)] } else if super::widgets::OWNS_CHILDREN.contains(&kind.as_str()) { vec![] } else { children(self, window, cx) };
         self.motion_off -= still as usize;
 
         let mut el = el.id(SharedString::from(id.clone()));
+        let mut scrollbar: Option<AnyElement> = None;
         if kind == "input" {
             // Clicks in a field are for the field, not a drag or click handler around it.
             el = el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
@@ -319,20 +393,32 @@ impl Workspace {
         if virtual_list {
             el = el.overflow_hidden();
         } else if kind == "scroll" {
-            el = match props.get("axis").and_then(Value::as_str) {
-                Some("x") => el.overflow_x_scroll(),
-                Some("both") => el.overflow_scroll(),
+            let axis = props.get("axis").and_then(Value::as_str).unwrap_or("y");
+            el = match axis {
+                "x" => el.overflow_x_scroll(),
+                "both" => el.overflow_scroll(),
                 _ => el.overflow_y_scroll(),
             };
-            if let Some(handle) = props.get("handle").and_then(Value::as_str) {
-                let h = self.scroll_handles.entry(handle.to_string()).or_default().clone();
-                el = el.track_scroll(&h);
+            let name = props.get("handle").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| id.clone());
+            let h = self.scroll_handles.entry(name).or_default().clone();
+            el = el.track_scroll(&h);
+            if let Some(mode) = scrollbar_mode(props.get("scrollbar")) {
+                if !st.contains_key("position") {
+                    el = el.relative();
+                }
+                let bar = match axis {
+                    "x" => gpui_kit::component::scroll::Scrollbar::horizontal(&h),
+                    "both" => gpui_kit::component::scroll::Scrollbar::new(&h),
+                    _ => gpui_kit::component::scroll::Scrollbar::vertical(&h),
+                };
+                scrollbar = Some(bar.mode(mode).into_any_element());
             }
         }
         if kind == "resize_handle" {
             let key = props.get("state").and_then(Value::as_str).unwrap_or("").to_string();
             let vertical = props.get("axis").and_then(Value::as_str) == Some("y");
             let invert = props.get("invert").and_then(Value::as_bool) == Some(true);
+            let start_default = props.get("default").and_then(Value::as_f64).unwrap_or(300.);
             let (min, max) = (
                 props.get("min").and_then(Value::as_f64).unwrap_or(80.) as f32,
                 props.get("max").and_then(Value::as_f64).unwrap_or(2000.) as f32,
@@ -340,18 +426,27 @@ impl Workspace {
             el = el
                 .cursor(if vertical { CursorStyle::ResizeUpDown } else { CursorStyle::ResizeLeftRight })
                 .on_mouse_down(MouseButton::Left, cx.listener(move |ws, e: &MouseDownEvent, _, cx| {
-                    let start_size = ws.state.get(&key).and_then(Value::as_f64).unwrap_or(300.) as f32;
+                    let start_size = ws.state.get(&key).and_then(Value::as_f64).unwrap_or(start_default) as f32;
                     let start = if vertical { f32::from(e.position.y) } else { f32::from(e.position.x) };
                     ws.drag = Some(crate::workspace::Drag { key: key.clone(), vertical, invert, start, start_size, min, max });
                     cx.stop_propagation();
                 }));
         }
-        if let Some(Value::Object(h)) = st.get("hover") {
-            let (h, theme) = (h.clone(), theme.clone());
-            el = el.hover(move |mut s| {
-                style::refine(&mut s, &h, &theme);
-                s
-            });
+        if tracks_hover || on.is_some_and(|o| o.contains_key("hover_start") || o.contains_key("hover_end")) {
+            let get = |k: &str| on.and_then(|o| o.get(k)).map(|a| self.exprs.resolve_action(a, ctx));
+            let (start, end) = (get("hover_start"), get("hover_end"));
+            super::drive::ui(|u| u.hovers.push((id.clone(), start.clone(), end.clone())));
+            let me = id.clone();
+            el = el.on_hover(cx.listener(move |ws, over: &bool, window, cx| {
+                let changed = super::drive::ui(|u| if *over { u.hovered.insert(me.clone()) } else { u.hovered.remove(&me) });
+                if !changed {
+                    return;
+                }
+                match (*over, &start, &end) {
+                    (true, Some(a), _) | (false, _, Some(a)) => ws.run_action(a, window, cx),
+                    _ => cx.notify(),
+                }
+            }));
         }
         if let Some(Value::Object(spec)) = obj.get("drag") {
             let spec = self.exprs.resolve(&Value::Object(spec.clone()), ctx);
@@ -391,13 +486,6 @@ impl Workspace {
                 s
             });
         }
-        if let Some(Value::Object(d)) = st.get("drag_over") {
-            let (d, theme) = (d.clone(), theme.clone());
-            el = el.drag_over::<ExternalPaths>(move |mut s, _, _, _| {
-                style::refine(&mut s, &d, &theme);
-                s
-            });
-        }
         if let Some(Value::Object(a)) = st.get("active") {
             let (a, theme) = (a.clone(), theme.clone());
             el = el.active(move |mut s| {
@@ -405,10 +493,17 @@ impl Workspace {
                 s
             });
         }
+        let mut keyboard_click: Option<Value> = None;
+        let menu_on_click = obj.get("menu_on").and_then(Value::as_str) == Some("click") && obj.get("menu").is_some_and(Value::is_array);
         if let Some(Value::Object(on)) = obj.get("on") {
             let get = |k: &str| on.get(k).map(|a| self.exprs.resolve_action(a, ctx));
             let (click, double, down, drop) = (get("click"), get("double_click"), get("mouse_down"), get("drop"));
-            let label = obj.get("tooltip").map(|t| value_text(&self.exprs.resolve(t, ctx))).filter(|t| !t.is_empty()).unwrap_or_default();
+            let label = obj
+                .get("tooltip")
+                .map(|t| value_text(&self.exprs.resolve(t, ctx)))
+                .filter(|t| !t.is_empty())
+                .or_else(|| first_text(obj).map(|t| value_text(&self.exprs.resolve(&t, ctx))).filter(|t| !t.is_empty()))
+                .unwrap_or_default();
             if let Some(c) = click.clone() {
                 self.clickables.push((id.clone(), label.clone(), c));
             }
@@ -417,7 +512,24 @@ impl Workspace {
                 self.clickables.push((format!("{id}:double"), label.clone(), d));
             }
             if let Some(d) = down.clone() {
-                self.clickables.push((format!("{id}:press"), label, d));
+                self.clickables.push((format!("{id}:press"), label.clone(), d));
+            }
+            if let Some(r) = get("right_click") {
+                self.clickables.push((format!("{id}:right_click"), label.clone(), r.clone()));
+                el = el.on_mouse_down(MouseButton::Right, cx.listener(move |ws, _: &MouseDownEvent, window, cx| ws.run_action(&r, window, cx)));
+            }
+            if let Some(u) = get("mouse_up") {
+                el = el.on_mouse_up(MouseButton::Left, cx.listener(move |ws, _: &MouseUpEvent, window, cx| ws.run_action(&u, window, cx)));
+            }
+            if let Some(o) = get("click_outside") {
+                el = el.on_mouse_down_out(cx.listener(move |ws, _: &MouseDownEvent, window, cx| ws.run_action(&o, window, cx)));
+            }
+            if let Some(w) = get("scroll") {
+                el = el.on_scroll_wheel(cx.listener(move |ws, e: &ScrollWheelEvent, window, cx| {
+                    let d = e.delta.pixel_delta(window.line_height());
+                    let a = super::drive::with_args(&w, &[("dx", Value::from(f32::from(d.x) as f64)), ("dy", Value::from(f32::from(d.y) as f64))]);
+                    ws.run_action(&a, window, cx);
+                }));
             }
             if let Some(spec) = on.get("drop_item") {
                 let drop_key = obj.get("drop_key").map(|k| value_text(&self.exprs.resolve(k, ctx))).unwrap_or_else(|| id.clone());
@@ -434,6 +546,7 @@ impl Workspace {
                     })
                     .collect(),
                 );
+                super::drive::ui(|u| u.drops.push(super::drive::DropTarget { key: drop_key.clone(), zones: zones.clone(), specs: specs.clone(), ctx: ctx.clone() }));
                 let (k2, z2, specs2, ctx2) = (drop_key.clone(), zones.clone(), specs.clone(), ctx.clone());
                 el = el.on_drag_move::<DragItem>(cx.listener(move |ws, e: &DragMoveEvent<DragItem>, _, cx| {
                     let item = e.drag(cx).clone();
@@ -501,7 +614,11 @@ impl Workspace {
                 }));
             }
             for event in on.keys() {
-                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down" | "drop" | "drop_item") && !(event == "submit" && kind == "input") && !super::widgets::EVENTS.contains(&event.as_str()) {
+                let known = matches!(
+                    event.as_str(),
+                    "click" | "double_click" | "mouse_down" | "mouse_up" | "right_click" | "hover_start" | "hover_end" | "scroll" | "key" | "focus" | "blur" | "click_outside" | "drop" | "drop_item"
+                );
+                if !known && !(event == "submit" && kind == "input") && !super::widgets::EVENTS.contains(&event.as_str()) {
                     self.exprs.note(format!("unknown event `{event}` at {path}"));
                 }
             }
@@ -530,6 +647,9 @@ impl Workspace {
                     }
                 }));
             }
+            if let Some(c) = click.clone().filter(|_| focusable) {
+                keyboard_click = Some(c);
+            }
             if let Some(c) = click {
                 // A button takes every press as a click (a quick second one too); only a node that also
                 // has a double_click leaves the second press of a pair to it.
@@ -550,18 +670,61 @@ impl Workspace {
                 }
             }
         }
+        if let Some(h) = &focus {
+            let keys = key_map(on.and_then(|o| o.get("key")), |a| self.exprs.resolve_action(a, ctx));
+            super::drive::ui(|u| u.keys.push((id.clone(), keys.clone(), keyboard_click.clone())));
+            let clicks = keyboard_click.is_some();
+            el = el.track_focus(h).on_key_down(cx.listener(move |ws, e: &KeyDownEvent, window, cx| {
+                let pressed = e.keystroke.unparse();
+                if let Some((_, a)) = keys.iter().find(|(k, _)| *k == pressed) {
+                    ws.run_action(a, window, cx);
+                    cx.stop_propagation();
+                } else if let (Some(c), "enter" | "space") = (&keyboard_click, pressed.as_str()) {
+                    ws.run_action(c, window, cx);
+                    cx.stop_propagation();
+                } else if pressed == "tab" || pressed == "shift-tab" {
+                    if pressed == "tab" { window.focus_next(cx) } else { window.focus_prev(cx) }
+                    cx.stop_propagation();
+                }
+            }));
+            if !st.contains_key("cursor") && clicks {
+                el = el.cursor_pointer();
+            }
+        }
         if let Some(tip) = obj.get("tooltip") {
             let tip = value_text(&self.exprs.resolve(tip, ctx));
             if !tip.is_empty() {
-                el = el.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx));
+                super::drive::ui(|u| u.tooltips.push((id.clone(), tip.clone())));
+                let look = theme.get("tooltip").and_then(Value::as_object).cloned().unwrap_or_default();
+                if let Some(ms) = theme.get("tooltip_delay_ms").and_then(Value::as_u64) {
+                    el = el.tooltip_show_delay(Duration::from_millis(ms));
+                }
+                let theme = theme.clone();
+                el = el.tooltip(move |w, cx| {
+                    let mut t = gpui_kit::component::tooltip::Tooltip::new(tip.clone());
+                    style::refine(t.style(), &look, &theme);
+                    t.build(w, cx)
+                });
             }
         }
-        let mut el = el.children(content).children(kids);
+        if let (true, Some(Value::Array(menu))) = (menu_on_click, obj.get("menu")) {
+            let (spec, menu_ctx, mid) = (menu.clone(), ctx.clone(), id.clone());
+            el = el.cursor_pointer().on_click(cx.listener(move |ws, e: &ClickEvent, window, cx| {
+                let at = ws.motion.borrow().bounds.get(&mid).map(|b| point(px(b[0]), px(b[1] + b[3]))).unwrap_or(e.position());
+                super::drive::toggle_menu(ws, &mid, &spec, &menu_ctx, at, window, cx);
+            }));
+        }
+        let open_menu = super::drive::ui(|u| u.menu.as_ref().filter(|m| m.id == id).map(|m| (m.at, m.menu.clone())));
+        let mut el = el.children(content).children(kids).children(scrollbar);
+        if let Some((at, menu)) = open_menu {
+            el = el.child(deferred(anchored().position(at).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(3));
+        }
         let layer = obj.get("layer").map(|l| value_text(&self.exprs.resolve(l, ctx))).unwrap_or_default();
+        let z = layer.parse::<usize>().ok().or_else(|| st.get("z_index").and_then(Value::as_u64).map(|z| z as usize));
         if layer == "top" || obj.get("occlude").and_then(Value::as_bool) == Some(true) {
             el = el.occlude();
         }
-        let el: AnyElement = if let Some(Value::Array(menu)) = obj.get("menu") {
+        let el: AnyElement = if let (false, Some(Value::Array(menu))) = (menu_on_click, obj.get("menu")) {
             // Entries are worked out when the menu opens, not on every frame.
             let (spec, menu_ctx) = (menu.clone(), ctx.clone());
             let tip = obj.get("tooltip").map(|t| value_text(&self.exprs.resolve(t, ctx))).unwrap_or_default();
@@ -574,17 +737,28 @@ impl Workspace {
             })
             .into_any_element()
         } else {
+            if let (true, Some(Value::Array(menu))) = (menu_on_click, obj.get("menu")) {
+                let tip = obj.get("tooltip").map(|t| value_text(&self.exprs.resolve(t, ctx))).unwrap_or_default();
+                self.menus.push((id.clone(), tip, std::rc::Rc::new(menu.clone()), ctx.clone()));
+            }
             el.into_any_element()
         };
         // A node lifted "above" (a popover's button while it's open) stays where it is: gliding it would read
         // its deferred position as a move.
-        let moves = self.motion.borrow().enabled && !still && self.motion_off == 0 && layer != "above";
-        let el = if moves { crate::ui::motion::Motion::new(id, el, self.motion.clone()).into_any_element() } else { el };
+        let moves = self.motion.borrow().enabled && !still && self.motion_off == 0 && layer != "above" && z.is_none();
+        let el = if moves {
+            crate::ui::motion::Motion::new(id, el, self.motion.clone()).into_any_element()
+        } else if obj.contains_key("id") && !id.contains('/') {
+            crate::ui::motion::Track::new(id, el, self.motion.clone()).into_any_element()
+        } else {
+            el
+        };
         // "layer": "top" paints the node above everything else (popovers, dialogs) and keeps clicks off what's under it;
         // "above" goes over that too (the button that opened a popover stays a button while it's open).
-        match layer.as_str() {
-            "top" => return vec![deferred(el).with_priority(1).into_any_element()],
-            "above" => return vec![deferred(el).with_priority(2).into_any_element()],
+        match (layer.as_str(), z) {
+            ("top", _) => return vec![deferred(el).with_priority(1).into_any_element()],
+            ("above", _) => return vec![deferred(el).with_priority(2).into_any_element()],
+            (_, Some(n)) => return vec![deferred(el).with_priority(n).into_any_element()],
             _ => {}
         }
         vec![el]
@@ -592,7 +766,7 @@ impl Workspace {
 
     /** A `scroll` with `props.virtual`: its children (each `for` item counts as one) become rows of a list
     that builds and lays out only the rows on screen. */
-    fn virtual_list(&mut self, obj: &Map<String, Value>, ctx: &Val, path: &str, id: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn virtual_list(&mut self, obj: &Map<String, Value>, props: &Map<String, Value>, ctx: &Val, path: &str, id: &str, cx: &mut Context<Self>) -> AnyElement {
         let kids: Vec<Value> = match obj.get("children") {
             Some(Value::Array(k)) => k.clone(),
             Some(one) => vec![one.clone()],
@@ -621,7 +795,21 @@ impl Workspace {
             }
         }
         let keys: Vec<String> = rows.iter().map(|r| r.2.clone()).collect();
-        let entry = self.virtual_lists.entry(id.to_string()).or_insert_with(|| (ListState::new(0, ListAlignment::Top, px(400.)), vec![], Default::default()));
+        let spec = (
+            props.get("align").and_then(Value::as_str) == Some("bottom"),
+            props.get("overdraw").and_then(Value::as_f64).unwrap_or(400.).max(0.) as u32,
+            props.get("follow").and_then(Value::as_bool) == Some(true),
+        );
+        if super::drive::ui(|u| u.lists.insert(id.to_string(), spec)).is_some_and(|old| old != spec) {
+            self.virtual_lists.remove(id);
+        }
+        let entry = self.virtual_lists.entry(id.to_string()).or_insert_with(|| {
+            let state = ListState::new(0, if spec.0 { ListAlignment::Bottom } else { ListAlignment::Top }, px(spec.1 as f32));
+            if spec.2 {
+                state.set_follow_mode(FollowMode::Tail);
+            }
+            (state, vec![], Default::default())
+        });
         let state = entry.0.clone();
         if entry.1 != keys {
             let (old, new) = (&entry.1, &keys);
@@ -634,12 +822,89 @@ impl Workspace {
         state.remeasure_items(0..rows.len());
         entry.2 = std::rc::Rc::new(rows);
         let list_id = id.to_string();
-        list(state, cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| {
+        let bar = scrollbar_mode(props.get("scrollbar")).map(|m| gpui_kit::component::scroll::Scrollbar::vertical(&state).mode(m));
+        let rows = list(state, cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| {
             let Some(row) = ws.virtual_lists.get(&list_id).and_then(|l| l.2.get(ix).cloned()) else { return div().into_any_element() };
             div().w_full().flex().flex_col().children(ws.render(&row.0, &row.1, &row.2, window, cx)).into_any_element()
         }))
-        .size_full()
-        .into_any_element()
+        .size_full();
+        match bar {
+            Some(bar) => div().relative().size_full().child(rows).child(bar).into_any_element(),
+            None => rows.into_any_element(),
+        }
+    }
+
+    /** What a `chat.render.waiting` component gets as `.props`: the question, its options (each with the
+    action that answers it) and the cancel action. */
+    fn waiting_props(&self, c: &agent_box_protocol::Chat) -> Value {
+        let w = c.waiting_on.clone().unwrap_or_default();
+        let message = w["message"].as_str().or(w["tool_name"].as_str()).map(str::to_string).unwrap_or_else(|| self.tr("waiting", "The agent is waiting for you", &[]));
+        let (options, questions) = crate::workspace::waiting_options(&w, &self.settings);
+        let options: Vec<Value> = options
+            .iter()
+            .enumerate()
+            .map(|(i, label)| serde_json::json!({"label": label, "index": i, "do": {"do": "chat.answer", "chat": c.id, "option": i}}))
+            .collect();
+        serde_json::json!({
+            "chat": c.id, "message": message, "questions": questions, "options": options, "tool": w["tool_name"],
+            "cancel": {"label": self.tr("waiting_cancel", "Cancel", &[]), "do": {"do": "chat.answer", "chat": c.id, "option": "cancel"}},
+        })
+    }
+
+    /** A `select` as the nodes it's made of: a button (text + chevron) with a left-click menu of its options. */
+    fn select_node(&mut self, obj: &Map<String, Value>, ctx: &Val, path: &str) -> Value {
+        let props = match self.exprs.resolve(obj.get("props").unwrap_or(&Value::Null), ctx) {
+            Value::Object(p) => p,
+            _ => Map::new(),
+        };
+        let key = props.get("state").and_then(Value::as_str).map(str::to_string);
+        let current = key.as_ref().and_then(|k| self.state.get(k).cloned()).or_else(|| props.get("value").cloned()).unwrap_or(Value::Null);
+        let on_change = obj.get("on").and_then(|o| o.get("change"));
+        let options = select_options(props.get("options"));
+        let id = match obj.get("id").and_then(Value::as_str) {
+            Some(own) => format!("{own}{}", loop_keys(path)),
+            None => path.to_string(),
+        };
+        let mut items = vec![];
+        for (value, label) in &options {
+            let action = self.change_action(key.as_deref(), value.clone(), on_change, ctx);
+            self.clickables.push((format!("{id}:{}", value_text(value)), label.clone(), action.clone()));
+            items.push(serde_json::json!({"label": label, "checked": *value == current, "do": action}));
+        }
+        let shown = options.iter().find(|(v, _)| *v == current).map(|(_, l)| l.clone());
+        let placeholder = props.get("placeholder").map(value_text).unwrap_or_else(|| self.tr("select_placeholder", "Choose…", &[]));
+        let mut style = self.settings.theme.get("select").and_then(Value::as_object).cloned().unwrap_or_else(|| {
+            serde_json::json!({"direction": "row", "align": "center", "gap": 6, "padding": [4, 10], "radius": 6, "border": 1, "border_color": "@line", "background": "@pill", "font_size": 12.5, "hover": {"background": "@pill_hover"}})
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+        });
+        if let Some(Value::Object(own)) = obj.get("style") {
+            style.extend(own.clone());
+        }
+        let mut node = Map::new();
+        for k in ["id", "tooltip", "layer", "motion", "animate", "transition", "focusable"] {
+            if let Some(v) = obj.get(k) {
+                node.insert(k.into(), v.clone());
+            }
+        }
+        if let Some(Value::Object(on)) = obj.get("on") {
+            let rest: Map<String, Value> = on.iter().filter(|(k, _)| k.as_str() != "change").map(|(k, v)| (k.clone(), v.clone())).collect();
+            node.insert("on".into(), Value::Object(rest));
+        }
+        node.insert("type".into(), Value::from("row"));
+        node.insert("style".into(), Value::Object(style));
+        node.insert("menu_on".into(), Value::from("click"));
+        node.insert("menu".into(), Value::Array(items));
+        let icon = props.get("icon").and_then(Value::as_str).unwrap_or("chevron-down");
+        node.insert(
+            "children".into(),
+            serde_json::json!([
+                {"type": "text", "props": {"text": shown.unwrap_or(placeholder)}},
+                {"type": "icon", "props": {"name": icon, "size": 12}}
+            ]),
+        );
+        Value::Object(node)
     }
 
     /** Menu entries with `if` applied and `for` expanded. */
@@ -753,12 +1018,17 @@ impl Workspace {
 
     /** `transition` (and `motion.style` for common keys): numbers and colors ease from their old value
     to the new one. Dragging and first appearances snap. */
-    fn apply_transitions(&mut self, obj: &Map<String, Value>, st: &mut Map<String, Value>, id: &str, window: &mut Window) {
+    fn apply_transitions(&mut self, obj: &Map<String, Value>, st: &mut Map<String, Value>, id: &str, extra: &[(String, u64)], window: &mut Window) {
         let enabled = self.motion.borrow().enabled && obj.get("motion").and_then(Value::as_bool) != Some(false);
         let mut keys: Vec<(String, u64)> = match obj.get("transition") {
             Some(Value::Object(tr)) => tr.iter().map(|(k, ms)| (k.clone(), ms.as_u64().unwrap_or(200))).collect(),
             _ => vec![],
         };
+        for (k, ms) in extra {
+            if !keys.iter().any(|(x, _)| x == k) {
+                keys.push((k.clone(), *ms));
+            }
+        }
         if let Some(ms) = self.settings.motion.get("style").and_then(|s| s.get("duration")).and_then(Value::as_u64) {
             for k in AUTO_KEYS {
                 if st.contains_key(*k) && !keys.iter().any(|(x, _)| x == k) {
@@ -842,10 +1112,12 @@ pub struct DragPreview {
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let note = self.note.borrow().clone();
-        let accent = style::color(&Value::String("@accent".into()), &self.theme);
+        let note_style = self.theme.get("drag_preview_note").and_then(Value::as_object).cloned().unwrap_or_else(|| {
+            serde_json::json!({"font_size": 11.5, "color": "@accent"}).as_object().cloned().unwrap_or_default()
+        });
         style::apply(div(), &self.style, &self.theme)
             .child(self.label.clone())
-            .when(!note.is_empty(), |d| d.child(div().text_size(px(11.5)).when_some(accent, |d, c| d.text_color(c)).child(note)))
+            .when(!note.is_empty(), |d| d.child(style::apply(div(), &note_style, &self.theme).child(note)))
     }
 }
 
@@ -861,7 +1133,7 @@ fn accepted(spec: Option<&Value>) -> Vec<String> {
 }
 
 /** The `[key]` segments of a path, so an `id` inside a `for` stays unique per item. */
-fn loop_keys(path: &str) -> String {
+pub(crate) fn loop_keys(path: &str) -> String {
     let mut out = String::new();
     let mut depth = 0;
     for ch in path.chars() {
@@ -895,7 +1167,7 @@ pub(crate) enum MenuEntry {
     Submenu { label: String, icon: Option<String>, children: Vec<MenuEntry> },
 }
 
-fn build_menu(
+pub(crate) fn build_menu(
     mut m: gpui_kit::component::menu::PopupMenu,
     entries: Vec<MenuEntry>,
     view: &Entity<Workspace>,
@@ -905,6 +1177,18 @@ fn build_menu(
 ) -> gpui_kit::component::menu::PopupMenu {
     let danger_color = style::color(&Value::String("@danger".into()), theme);
     let faint = style::color(&Value::String("@text_faint".into()), theme);
+    // `theme.menu`: min_width, max_height (it scrolls past that), scrollable.
+    if let Some(look) = theme.get("menu").and_then(Value::as_object) {
+        if let Some(w) = look.get("min_width").and_then(Value::as_f64) {
+            m = m.min_w(px(w as f32));
+        }
+        if let Some(h) = look.get("max_height").and_then(Value::as_f64) {
+            m = m.max_h(px(h as f32)).scrollable(true);
+        }
+        if let Some(b) = look.get("scrollable").and_then(Value::as_bool) {
+            m = m.scrollable(b);
+        }
+    }
     for e in entries {
         match e {
             MenuEntry::Separator => m = m.separator(),
@@ -948,4 +1232,107 @@ fn build_menu(
 
 fn menu_icon(name: String) -> Icon {
     Icon::empty().path(format!("icons/{name}.svg"))
+}
+
+/** `props.scrollbar` / `chat.scrollbar`: scrolling | hover | always; never (or unset) draws none. */
+pub(crate) fn scrollbar_mode(v: Option<&Value>) -> Option<gpui_kit::component::scroll::ScrollbarMode> {
+    use gpui_kit::component::scroll::ScrollbarMode;
+    match v.and_then(Value::as_str) {
+        Some("scrolling") => Some(ScrollbarMode::Scrolling),
+        Some("hover") => Some(ScrollbarMode::Hover),
+        Some("always") => Some(ScrollbarMode::Always),
+        _ => None,
+    }
+}
+
+/** The first `text` node (or plain string) under a node, unresolved: a clickable's label when it has no tooltip. */
+fn first_text(obj: &Map<String, Value>) -> Option<Value> {
+    if obj.get("type").and_then(Value::as_str) == Some("text") {
+        return obj.get("props").and_then(|p| p.get("text")).cloned();
+    }
+    let kids = match obj.get("children")? {
+        Value::Array(k) => k.clone(),
+        one => vec![one.clone()],
+    };
+    kids.iter().find_map(|k| match k {
+        Value::String(s) => Some(Value::String(s.clone())),
+        Value::Object(o) if !o.contains_key("for") => first_text(o),
+        _ => None,
+    })
+}
+
+/** `on.key`: {"KEY": action} or [{key, do}], keys as `cmd-k`, `enter`, `shift-tab`. */
+fn key_map(spec: Option<&Value>, resolve: impl Fn(&Value) -> Value) -> Vec<(String, Value)> {
+    match spec {
+        Some(Value::Array(list)) => list.iter().filter_map(|e| Some((e.get("key")?.as_str()?.to_string(), resolve(e.get("do")?)))).collect(),
+        Some(Value::Object(o)) if o.contains_key("key") => key_map(Some(&Value::Array(vec![Value::Object(o.clone())])), resolve),
+        Some(Value::Object(o)) => o.iter().map(|(k, a)| (k.clone(), resolve(a))).collect(),
+        _ => vec![],
+    }
+}
+
+/** A select's options as (value, label): [values] or [{value, label}]. */
+fn select_options(v: Option<&Value>) -> Vec<(Value, String)> {
+    v.and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|o| match o {
+                    Value::Object(m) => {
+                        let value = m.get("value").or_else(|| m.get("id")).cloned().unwrap_or(Value::Null);
+                        let label = m.get("label").map(value_text).unwrap_or_else(|| value_text(&value));
+                        (value, label)
+                    }
+                    other => (other.clone(), value_text(other)),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/** Plain text as Markdown that renders as itself (punctuation escaped, line breaks kept). */
+pub(crate) fn markdown_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push_str("\\\n");
+        }
+        for c in line.chars() {
+            if "\\`*_{}[]<>()#+-.!|~&".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::{first_text, key_map, markdown_escape, select_options};
+    use serde_json::{json, Value};
+
+    #[test]
+    fn plain_text_survives_markdown() {
+        assert_eq!(markdown_escape("a*b"), "a\\*b");
+        assert_eq!(markdown_escape("# x\ny"), "\\# x\\\ny");
+    }
+
+    #[test]
+    fn clickables_are_named_by_their_text() {
+        let o = json!({"type": "row", "children": [{"type": "icon"}, {"type": "text", "props": {"text": "Save"}}]});
+        assert_eq!(first_text(o.as_object().unwrap()), Some(json!("Save")));
+        let o = json!({"children": ["Hi {{ .x }}"]});
+        assert_eq!(first_text(o.as_object().unwrap()), Some(json!("Hi {{ .x }}")));
+        assert_eq!(first_text(json!({"children": [{"type": "icon"}]}).as_object().unwrap()), None);
+    }
+
+    #[test]
+    fn keys_and_options_read_both_shapes() {
+        let id = |v: &Value| v.clone();
+        assert_eq!(key_map(Some(&json!({"enter": "a", "escape": "b"})), id).len(), 2);
+        assert_eq!(key_map(Some(&json!([{"key": "cmd-k", "do": "x"}])), id), vec![("cmd-k".to_string(), json!("x"))]);
+        assert_eq!(key_map(Some(&json!({"key": "up", "do": "y"})), id), vec![("up".to_string(), json!("y"))]);
+        let opts = select_options(Some(&json!(["a", {"value": 2, "label": "Two"}])));
+        assert_eq!(opts, vec![(json!("a"), "a".to_string()), (json!(2), "Two".to_string())]);
+    }
 }

@@ -2530,6 +2530,7 @@ impl Workspace {
                 let _ = drop_view.update(cx, |ws, cx| ws.attach(chat, files, window, cx));
             })
             .child(rows)
+            .when_some(crate::ui::render::scrollbar_mode(cs.get("scrollbar")), |d, m| d.child(gpui_kit::component::scroll::Scrollbar::vertical(&state).mode(m)))
             .when(shift_holds, |d| d.child(crate::ui::trace_view::shift_scroll_layer(None, 1.)))
             .children(jump)
             .children(loading_earlier)

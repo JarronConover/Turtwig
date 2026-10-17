@@ -57,6 +57,16 @@
     "danger": "#d8566c",
     "merged": "#8b5cf6",
     "success": "#3fb950",
+    // The second line of the drag preview ("Move to …").
+    "drag_preview_note": { "font_size": 11.5, "color": "@accent" },
+    // Font files to load (absolute, ~/, or in the settings folder); use them by family name in font_family.
+    "fonts": [],
+    // Style objects over tooltips (background, color, padding, radius, font_size...) and the button of a
+    // `select` node; `menu`: {min_width, max_height, scrollable} for menus. tooltip_delay_ms: wait before
+    // a tooltip shows (unset: the built-in delay).
+    "tooltip": {},
+    "menu": {},
+    "select": { "direction": "row", "align": "center", "gap": 6, "padding": [4, 10], "radius": 6, "border": 1, "border_color": "@line", "background": "@pill", "font_size": 12.5, "hover": { "background": "@pill_hover" } },
     "drag_preview": { "padding": [5, 10], "radius": 8, "background": "#2b2f38", "border": 1, "border_color": "#488efc", "color": "#f5f5f7", "font_size": 13, "shadow": "lg", "opacity": 0.95 }
   },
 
@@ -1782,8 +1792,11 @@
     "tools": {},
     // Replace a transcript part with a component name or node; it gets the item as .props: user and
     // assistant {kind, text, index, chat, key, uploads, raw}, notice, step {kind: tool | thinking, id, title,
-    // icon, running, error, open, tool, input, result, summary, text}. null: the built-in look.
-    "render": { "user": null, "assistant": null, "step": null, "notice": null },
+    // icon, running, error, open, tool, input, result, summary, text}; waiting (the `waiting` node's card)
+    // {chat, message, questions, options: [{label, index, do}], cancel: {label, do}, tool}. null: built in.
+    "render": { "user": null, "assistant": null, "step": null, "notice": null, "waiting": null },
+    // A scrollbar on the transcript: never | scrolling | hover | always.
+    "scrollbar": "never",
     // Each run of thinking and tool calls as one row (false: a row per step); fold_running: a long run
     // folds its earlier steps while it's still going.
     "group_steps": true, "fold_running": true,

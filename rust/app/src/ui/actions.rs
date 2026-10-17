@@ -877,6 +877,7 @@ impl Workspace {
                     .map(|(_, _, a)| a.clone());
                 match hit {
                     Some(action) => self.run_action(&action, window, cx),
+                    None if crate::ui::drive::reveal_and_click(self, id.as_deref(), a) => {}
                     None => self.exprs.note(format!("ui.click: nothing clickable matches {}", id.or(label).unwrap_or_default())),
                 }
             }

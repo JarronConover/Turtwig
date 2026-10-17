@@ -44,8 +44,8 @@ thread_local! {
     static FONTS: RefCell<Option<Arc<usvg::fontdb::Database>>> = const { RefCell::new(None) };
     static SLIDING: RefCell<Option<String>> = const { RefCell::new(None) };
     static APPLIED: RefCell<HashMap<String, (String, bool)>> = RefCell::new(HashMap::new());
-    /** Set while the app itself changes a field's text, so that isn't reported as an edit. */
-    static SETTING: Cell<bool> = const { Cell::new(false) };
+    /** Text the app itself put in a field (its change event arrives later), so that isn't reported as an edit. */
+    static SET_BY_APP: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /** Multi-line `input` fields by node id (single-line ones are in `Workspace::inputs`). */
@@ -555,8 +555,9 @@ impl Workspace {
         let appearance = props.get("appearance").and_then(Value::as_bool).unwrap_or(true);
         let submit_on_enter = flag(props, "submit_on_enter");
         let (k, input_id) = (key.clone(), id.to_string());
+        let app_id = id.to_string();
         let on_edit = move |ws: &mut Workspace, text: String, cx: &mut Context<Workspace>| {
-            if SETTING.with(Cell::get) {
+            if SET_BY_APP.with(|m| m.borrow_mut().remove(&app_id)).as_deref() == Some(text.as_str()) {
                 return;
             }
             if !k.is_empty() {
@@ -619,9 +620,8 @@ impl Workspace {
             }
             if let Some(v) = want {
                 if !entity.read(cx).focus_handle(cx).is_focused(window) && entity.read(cx).value().as_ref() != v.as_str() {
-                    SETTING.with(|s| s.set(true));
+                    SET_BY_APP.with(|m| m.borrow_mut().insert(id.to_string(), v.clone()));
                     entity.update(cx, |s, cx| s.set_value(v, window, cx));
-                    SETTING.with(|s| s.set(false));
                 }
             }
             return vec![style::apply_plain(Textarea::new(&entity).appearance(appearance).disabled(disabled), &field, &theme).into_any_element()];
@@ -663,9 +663,8 @@ impl Workspace {
         }
         if let Some(v) = want {
             if !entity.read(cx).focus_handle(cx).is_focused(window) && entity.read(cx).value().as_ref() != v.as_str() {
-                SETTING.with(|s| s.set(true));
+                SET_BY_APP.with(|m| m.borrow_mut().insert(id.to_string(), v.clone()));
                 entity.update(cx, |s, cx| s.set_value(v, window, cx));
-                SETTING.with(|s| s.set(false));
             }
         }
         let input = Input::new(&entity).appearance(appearance).disabled(disabled).when(password && flag(props, "mask_toggle"), |i| i.mask_toggle());
