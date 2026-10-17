@@ -103,6 +103,10 @@ pub fn run() -> anyhow::Result<()> {
     spawn_loop("events", shared.clone(), event_loop);
     spawn_loop("model", shared.clone(), model_loop);
     spawn_loop("transcripts", shared.clone(), transcript_loop);
+    // Only where no app runs: there, run.json is the app's own to read.
+    if crate::mac::host() != "mac" {
+        spawn_loop("app-actions", shared.clone(), app_action_loop);
+    }
     eprintln!("agent-boxd listening on {}", sock.display());
     for stream in listener.incoming().flatten() {
         let shared = shared.clone();
@@ -113,6 +117,29 @@ pub fn run() -> anyhow::Result<()> {
 
 fn spawn_loop(name: &str, shared: Arc<Shared>, f: fn(&Arc<Shared>)) {
     std::thread::Builder::new().name(name.into()).spawn(move || loop { f(&shared) }).expect("spawn loop");
+}
+
+/** What the Mac app sends here so agents on this machine can see it as they would on the Mac. */
+const APP_FILES: [&str; 4] = ["inspect.json", "activity.log", "problems.txt", "snapshot.png"];
+
+fn app_dir() -> std::path::PathBuf {
+    util::agent_home().join("state").join("settings")
+}
+
+/** `abx do` here writes run.json in the settings folder; it goes to the connected app, which runs it. */
+fn app_action_loop(shared: &Arc<Shared>) {
+    std::thread::sleep(Duration::from_millis(300));
+    let path = app_dir().join("run.json");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let subscribed: Vec<Arc<Conn>> = shared.conns.lock().unwrap().iter().filter(|c| c.subscribed.load(Ordering::SeqCst)).cloned().collect();
+    if subscribed.is_empty() {
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    let action = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text.trim().to_string()));
+    for c in subscribed {
+        c.event(Event::AppAction { action: action.clone() });
+    }
 }
 
 /** New hook rows: update chat states, fan out to subscribers, and wake the model loop. */
@@ -660,6 +687,18 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             return Ok(json!({}));
         }
         Call::Usage => return Ok(crate::usage::scan()),
+        Call::AppFile { name, data } => {
+            if !APP_FILES.contains(&name.as_str()) {
+                return Err(format!("not an app file: {name}"));
+            }
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| e.to_string())?;
+            let dir = app_dir();
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let tmp = dir.join(format!(".{name}"));
+            std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, dir.join(&name))).map_err(|e| e.to_string())?;
+            return Ok(json!({}));
+        }
         Call::TermKill { session } => {
             if session.starts_with("sh-") {
                 util::run("tmux", &["kill-session", "-t", &format!("={session}")], &[], None, Duration::from_secs(5));

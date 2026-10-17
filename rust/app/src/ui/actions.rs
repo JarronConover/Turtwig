@@ -490,6 +490,7 @@ impl Workspace {
             "chat.move" => {
                 if let Some(id) = chat() {
                     let to = s("to").unwrap_or("mac".into());
+                    self.pending_move = Some((id.clone(), to.clone()));
                     let mut args = vec!["chat".into(), "move".into(), id, "--to".into(), to];
                     if let Some(scope) = s("scope") {
                         args.extend(["--scope".into(), scope]);

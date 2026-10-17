@@ -84,6 +84,9 @@ pub struct Drag {
     pub max: f32,
 }
 
+/** The machine the app runs on (its daemon is local); every other host is reached over ssh. */
+pub(crate) const LOCAL_HOST: &str = "mac";
+
 pub struct Workspace {
     _remote_guards: Vec<RemoteGuard>,
     /** One daemon connection per host: "box" over ssh, "mac" run locally. */
@@ -193,6 +196,11 @@ pub struct Workspace {
     pub(crate) drop_preview: bool,
     pub(crate) inspect_at: Option<std::time::Instant>,
     pub(crate) inspect_digest: u64,
+    /** When the app's files last went to the other machines, and what each held. */
+    pub(crate) mirror_at: Option<std::time::Instant>,
+    pub(crate) mirrored: HashMap<String, u64>,
+    /** A chat being moved and where to: selected there once it shows up. */
+    pub(crate) pending_move: Option<(String, String)>,
     pub(crate) perf: std::rc::Rc<std::cell::RefCell<crate::ui::inspect::Perf>>,
     /** The redraw a looping animation (spinner, pulse) asked for, at `motion.animation_fps`. */
     pub(crate) anim_tick: Option<Task<()>>,
@@ -266,6 +274,36 @@ impl Workspace {
             });
             let Ok(every) = every else { break };
             cx.background_executor().timer(Duration::from_secs_f64(every)).await;
+        });
+        // `app.auto_update`: pull a.box's main from its remote and rebuild what changed (the daemon, the app);
+        // a new app build restarts the app. So a change pushed from the box ships to the Mac on its own.
+        let update_loop = cx.spawn(async move |this, cx| loop {
+            let every = this.update(cx, |ws, _| (ws.settings.get("app.auto_update").and_then(Value::as_bool) != Some(false)).then(|| ws.settings.num("app.update_check_secs", 60.).max(15.)));
+            let Ok(every) = every else { break };
+            cx.background_executor().timer(Duration::from_secs_f64(every.unwrap_or(300.))).await;
+            if every.is_none() {
+                continue;
+            }
+            let out = cx.background_spawn(async move { std::process::Command::new("/bin/sh").arg("-c").arg(UPDATE_SCRIPT).output() }).await;
+            let text = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+            if !text.starts_with("updated") {
+                continue;
+            }
+            let app = text.split_whitespace().any(|w| w == "app");
+            let ok = this.update(cx, |ws, cx| {
+                ws.log_action(&json!({"do": "app.updated", "what": text}));
+                if app {
+                    ws.save_drafts(cx);
+                }
+            });
+            if ok.is_err() {
+                break;
+            }
+            if app {
+                let _ = std::process::Command::new("/bin/sh").arg("-c").arg("sleep 1; open \"$HOME/Applications/a.box.app\"").spawn();
+                let _ = this.update(cx, |_, cx| cx.quit());
+                break;
+            }
         });
         let env_every = settings.connection.env_push_seconds;
         let env_push = cx.spawn(async move |_, cx| loop {
@@ -388,6 +426,9 @@ impl Workspace {
             drop_preview: false,
             inspect_at: None,
             inspect_digest: 0,
+            mirror_at: None,
+            mirrored: HashMap::new(),
+            pending_move: None,
             perf: Default::default(),
             anim_tick: None,
             anim_epoch: std::time::Instant::now(),
@@ -414,7 +455,7 @@ impl Workspace {
             diff_geom: Default::default(),
             diff_scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
-            _tasks: [watch, env_push, designer_listen, usage_loop].into_iter().chain(listeners).chain(clicks).collect(),
+            _tasks: [watch, env_push, designer_listen, usage_loop, update_loop].into_iter().chain(listeners).chain(clicks).collect(),
             _subscriptions: vec![],
         };
         let mut ws = ws;
@@ -908,6 +949,16 @@ impl Workspace {
                 self.update_badge(&ctx);
                 self.pending_motion = true;
                 self.mark_diffs_stale();
+                // A moved chat: follow it to its worktree on the machine it went to, tab open.
+                if let Some((id, to)) = self.pending_move.clone() {
+                    if let Some(path) = self.all_worktrees().iter().find(|w| w.host == to && w.chat_ids.contains(&id)).map(|w| w.path.clone()) {
+                        self.opened.insert(id.clone());
+                        self.closed.remove(&id);
+                        self.active_chat.insert(path.clone(), id);
+                        self.selected = Some(path);
+                        self.pending_move = None;
+                    }
+                }
                 if let Some(id) = self.pending_select.clone() {
                     if let Some(path) = self.all_worktrees().iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone()) {
                         self.opened.insert(id.clone());
@@ -936,6 +987,10 @@ impl Workspace {
                     t.update(cx, |t, cx| t.output(&data, cx));
                 }
                 return;
+            }
+            Incoming::Event(Event::AppAction { action }) => {
+                self.log_action(&json!({"from": host, "action": "relayed"}));
+                self.run_action(&action, window, cx);
             }
             Incoming::Event(Event::Hook(e)) => {
                 let keep = self.settings.num("inspect.hook_events", 50.) as usize;
@@ -3255,6 +3310,27 @@ pub(crate) fn image_element(src: &str, fit: &str) -> Img {
 }
 
 /** Refreshes Claude Code's plan-usage cache from its OAuth endpoint (the token stays in the keychain). */
+/** One auto-update check in ~/dev/agent-box: fast-forward to origin/main when the checkout is clean, then
+rebuild and restart the daemon if its code changed and bundle the app if the app's did. Prints "updated"
+and what it rebuilt ("daemon", "app"), or nothing. */
+const UPDATE_SCRIPT: &str = r#"cd "$HOME/dev/agent-box" || exit 0
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+git fetch -q origin main 2>/dev/null || exit 0
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && exit 0
+[ "$(git branch --show-current)" = main ] || exit 0
+[ -z "$(git status --porcelain --untracked-files=no)" ] || exit 0
+git merge-base --is-ancestor HEAD origin/main || exit 0
+changed=$(git diff --name-only HEAD origin/main)
+git merge -q --ff-only origin/main || exit 0
+what=""
+if printf '%s\n' "$changed" | grep -q '^rust/daemon/\|^rust/protocol/'; then
+  (cd rust && cargo build --release -q -p agent-boxd) >/dev/null 2>&1 && pkill -f '[a]gent-boxd run' && what="$what daemon"
+fi
+if printf '%s\n' "$changed" | grep -q '^rust/app/src/\|^rust/app/Cargo\|^rust/protocol/\|^rust/Cargo\|^rust/app/bundle'; then
+  (cd rust/app && ./bundle.sh) >/dev/null 2>&1 && what="$what app"
+fi
+echo "updated$what""#;
+
 const PLAN_COMMAND: &str = r#"token=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])' 2>/dev/null); [ -n "$token" ] && out=$(/usr/bin/curl -sS -m 10 https://api.anthropic.com/api/oauth/usage -H "Authorization: Bearer $token" -H "anthropic-beta: oauth-2025-04-20") && printf '%s' "$out" | grep -q '"limits"' && printf '%s' "$out" > "$HOME/.claude/oauth-usage-cache.json""#;
 
 /** A cheap fingerprint of what a transcript row shows: its items' kinds, text lengths and results. */

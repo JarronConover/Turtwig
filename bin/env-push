@@ -50,6 +50,10 @@ for box in $(ssh -n "$host" 'for d in ~/.claude/projects/*/memory; do [ -n "$(ls
   mkdir -p "$HOME/.claude/projects/$mac/memory"
   rsync -au "$host:.claude/projects/$box/memory/" "$HOME/.claude/projects/$mac/memory/"
 done
+# Files TJ drops into the app (screenshots, recordings), at the same place under the box's home, so a
+# chat there can open the Mac path it's given (/Users/tj/... -> ~/...).
+ssh -n "$host" 'mkdir -p ~/.agent-box/uploads' 2> /dev/null
+rsync -au "$HOME/.agent-box/uploads/" "$host:.agent-box/uploads/"
 # Config the factory scripts read (Cursor environments, type-check agents).
 ssh -n "$host" 'mkdir -p ~/.config/redo' 2> /dev/null
 rsync -au "$HOME/.config/redo/cursor-environments.json" "$HOME/.config/redo/cursor-typecheck-agents.json" \

@@ -2,7 +2,9 @@
 current, `activity.log` of every action run, and `app.snapshot` to capture the window. */
 
 use crate::settings;
+use crate::remote::Remote;
 use crate::workspace::Workspace;
+use agent_box_protocol::Call;
 use gpui_kit::*;
 use serde_json::{json, Value};
 use std::io::Write as _;
@@ -84,6 +86,34 @@ impl Workspace {
                 let _ = std::fs::rename(tmp, path);
             }
         }
+        self.mirror_app_files(&["inspect.json", "activity.log", "problems.txt"]);
+    }
+
+    /** Sends the app's files (inspect.json and the rest) to every other connected machine, at most every
+    `inspect.mirror_ms`, each only when it changed: agents there read them as they would here. */
+    pub(crate) fn mirror_app_files(&mut self, names: &[&str]) {
+        let every = self.settings.num("inspect.mirror_ms", 1500.);
+        if every <= 0. || self.mirror_at.is_some_and(|t| (t.elapsed().as_millis() as f64) < every) && names != ["snapshot.png"] {
+            return;
+        }
+        self.mirror_at = Some(std::time::Instant::now());
+        let hosts: Vec<Remote> = self.remotes.iter().filter(|(h, _)| h.as_str() != crate::workspace::LOCAL_HOST && self.host_up.get(*h) == Some(&true)).map(|(_, r)| r.clone()).collect();
+        if hosts.is_empty() {
+            return;
+        }
+        use base64::Engine as _;
+        for name in names {
+            let Ok(bytes) = std::fs::read(settings::dir().join(name)) else { continue };
+            let digest = bytes.len() as u64 ^ bytes.iter().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(*b as u64));
+            if self.mirrored.get(*name) == Some(&digest) {
+                continue;
+            }
+            self.mirrored.insert(name.to_string(), digest);
+            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            for r in &hosts {
+                r.send(Call::AppFile { name: name.to_string(), data: data.clone() });
+            }
+        }
     }
 
     /** One line per action run, newest last, trimmed to the last few hundred. */
@@ -124,8 +154,9 @@ impl Workspace {
             return;
         };
         let path = settings::dir().join("snapshot.png");
-        cx.background_spawn(async move {
-            let _ = std::process::Command::new("/usr/sbin/screencapture").args(["-x", "-o", &format!("-l{id}")]).arg(path).status();
+        cx.spawn(async move |this, cx| {
+            let _ = cx.background_spawn(async move { std::process::Command::new("/usr/sbin/screencapture").args(["-x", "-o", &format!("-l{id}")]).arg(path).status() }).await;
+            this.update(cx, |ws, _| ws.mirror_app_files(&["snapshot.png"])).ok();
         })
         .detach();
     }

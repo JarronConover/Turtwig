@@ -1997,6 +1997,11 @@
   // The command palette.
   "palette": { "placeholder": "Type a command or a worktree…", "worktrees": true, "worktree_label": "Go to {title}" },
 
+  // Keep a.box itself current: every update_check_secs, fast-forward ~/dev/agent-box to its remote's main
+  // (when the checkout is clean, on main), rebuild the daemon if it changed, and bundle and restart the app if
+  // it did. Changes pushed from the box ship to the Mac this way.
+  "app": { "auto_update": true, "update_check_secs": 60 },
+
   "settings_editor": { "width": 760 },
 
   // Cost and plan usage (the $ pill and the gauge in the toolbar). rates: per model id (or prefix),
@@ -2049,7 +2054,10 @@
     "interval_ms": 500, "activity_lines": 400, "activity_chars": 600, "perf_window_secs": 2,
     "hook_events": 50, "transcript_items": 20, "transcript_chars": 2000, "terminal_lines": 40,
     // Presses go in activity.log too ({"input": ..., "node": id, "count": n}), to see where clicks land.
-    "log_input": true
+    "log_input": true,
+    // inspect.json, activity.log, problems.txt and snapshot.png also go to the other machines' settings
+    // folders (at most this often), so agents there see the app; their `abx do` reaches the app too.
+    "mirror_ms": 1500
   },
 
   "scripts_options": { "context_cache_ms": 250, "min_timer_ms": 16 },

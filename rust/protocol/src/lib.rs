@@ -94,6 +94,9 @@ pub enum Call {
     Usage,
     /** Ends a terminal's tmux session (closing a terminal tab). */
     TermKill { session: String },
+    /** The Mac app's view of itself for agents on this machine: a file of the settings folder
+    (inspect.json, activity.log, problems.txt, snapshot.png), base64. */
+    AppFile { name: String, data: String },
     TermInput { term_id: u64, data: String },
     TermResize { term_id: u64, cols: u16, rows: u16 },
     TermClose { term_id: u64 },
@@ -128,6 +131,8 @@ pub enum Event {
     /** Terminal output, base64. */
     TermOutput { term_id: u64, data: String },
     TermExit { term_id: u64 },
+    /** An action an agent on this machine asked the app to run (its settings folder's run.json). */
+    AppAction { action: Value },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
