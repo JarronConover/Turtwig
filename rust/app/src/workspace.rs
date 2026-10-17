@@ -1817,11 +1817,27 @@ impl Workspace {
         if count == 1 {
             self.first_press = Some(id.to_string());
         }
-        self.log_input(id, count, "press");
+        let (x, y) = (f32::from(at.x).round(), f32::from(at.y).round());
+        if self.settings.get("inspect.log_input").and_then(Value::as_bool) == Some(true) {
+            self.log_action(&json!({"input": "press", "node": id, "count": count, "x": x, "y": y}));
+        }
     }
 
-    /** Whether this event's press is this node's own (or nothing inside it recorded one). */
+    /** Whether this event's press is this node's own: nothing inside it recorded one, and it isn't on a
+    clickable node drawn inside it (by last frame's layout, so a button counts even when its hitbox
+    missed). */
     pub(crate) fn press_is(&self, id: &str, at: Point<Pixels>) -> bool {
+        let (x, y) = (f32::from(at.x), f32::from(at.y));
+        let motion = self.motion.borrow();
+        let inside = |b: &[f32; 4], o: &[f32; 4]| b[0] >= o[0] && b[1] >= o[1] && b[0] + b[2] <= o[0] + o[2] && b[1] + b[3] <= o[1] + o[3];
+        if let Some(mine) = motion.bounds.get(id) {
+            let on_child = self.clickables_last.iter().filter(|(cid, _, _)| cid != id).filter_map(|(cid, _, _)| motion.bounds.get(cid)).any(|b| {
+                inside(b, mine) && x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3]
+            });
+            if on_child {
+                return false;
+            }
+        }
         match &self.press {
             Some((who, t, p)) if *p == at && t.elapsed() < std::time::Duration::from_millis(50) => who == id,
             _ => true,
