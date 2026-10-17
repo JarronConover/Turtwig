@@ -1181,6 +1181,10 @@ impl Workspace {
             .chain(self.model.sections.iter().flat_map(|s| s.items.iter().map(move |w| (w, json!({"id": s.id, "name": s.name})))))
             .map(|(w, section)| self.worktree_json(w, section))
             .collect();
+        let project_ids: Vec<String> = self.model.projects.iter().filter(|p| !self.project_removed(&p.repo)).map(|p| p.repo.clone()).collect();
+        let project_gap = self.card_gap("project", "projcard", &project_ids);
+        let section_ids: Vec<String> = self.model.sections.iter().map(|s| s.id.clone()).collect();
+        let section_gap = self.card_gap("section", "seccard", &section_ids);
         let projects: Vec<Value> = self
             .model
             .projects
@@ -1188,6 +1192,7 @@ impl Workspace {
             .enumerate()
             .filter(|(_, p)| !self.project_removed(&p.repo))
             .map(|(i, p)| {
+                let (gap, gap_end) = &project_gap;
                 let (name, letter, hue) = self.project_look(&p.repo, &p.name, p.hue);
                 let (show_external, show_primary) = (!self.flag(&format!("hide_external:{}", p.repo)), !self.flag(&format!("hide_primary:{}", p.repo)));
                 let shown = self.visible_items(&p.items, |w| (show_external || !w.external) && (show_primary || !w.is_primary));
@@ -1200,6 +1205,7 @@ impl Workspace {
                        "external_count": p.items.iter().filter(|w| w.external).count(),
                        "hidden_count": p.items.iter().chain(self.model.sections.iter().flat_map(|s| s.items.iter())).filter(|w| w.repo == p.repo && self.flag(&format!("hidden:{}", w.path))).count(),
                        "primary_path": primary.map(|w| w.path.clone()), "primary_host": primary.map(|w| w.host.clone()),
+                       "drop_gap": gap.as_deref() == Some(p.repo.as_str()), "drop_gap_end": gap_end.as_deref() == Some(p.repo.as_str()),
                        "items": shown.into_iter().map(|w| self.row_json(w, Value::Null, &gaps)).collect::<Vec<_>>()})
             })
             .collect();
@@ -1214,7 +1220,9 @@ impl Workspace {
                     shown.sort_by_key(|w| !self.chats_of(w).iter().any(|c| c.kind == "orchestrator"));
                 }
                 let gaps = self.drop_gaps(&shown);
+                let (gap, gap_end) = &section_gap;
                 json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
+                       "drop_gap": gap.as_deref() == Some(s.id.as_str()), "drop_gap_end": gap_end.as_deref() == Some(s.id.as_str()),
                        "host": self.section_hosts.get(&s.id).cloned().unwrap_or_else(|| "box".into()),
                        "items": shown.into_iter().map(|w| self.row_json(w, json!({"id": s.id, "name": s.name}), &gaps)).collect::<Vec<_>>()})
             })
@@ -1343,6 +1351,23 @@ impl Workspace {
             "before" => vec![target.to_string()],
             "after" => shown[i + 1..].iter().find(|w| Some(w.path.as_str()) != h.value.as_str()).map(|w| vec![w.path.clone(), target.to_string()]).unwrap_or_default(),
             _ => vec![],
+        }
+    }
+
+    /** While a section or project (`kind`) is dragged over a card (drop key `prefix:ID`): the card that opens
+    room above it for the drop (`drop_gap`), or the last card when it would land after it (`drop_gap_end`). */
+    fn card_gap(&self, kind: &str, prefix: &str, ids: &[String]) -> (Option<String>, Option<String>) {
+        let Some(h) = self.drop_hint.as_ref().filter(|h| h.kind == kind) else { return (None, None) };
+        let Some(target) = h.key.strip_prefix(prefix).and_then(|k| k.strip_prefix(':')) else { return (None, None) };
+        let shown: Vec<&String> = ids.iter().filter(|i| Some(i.as_str()) != h.value.as_str()).collect();
+        let Some(i) = shown.iter().position(|x| x.as_str() == target) else { return (None, None) };
+        match h.zone.as_str() {
+            "before" => (Some(target.to_string()), None),
+            "after" => match shown.get(i + 1) {
+                Some(next) => (Some(next.to_string()), None),
+                None => (None, Some(target.to_string())),
+            },
+            _ => (None, None),
         }
     }
 

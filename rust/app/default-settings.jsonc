@@ -179,146 +179,146 @@
                 {
                   "if": ".state[\"collapsed:projects\"] | not",
                   "for": ".app.drag as $d | .projects | map(select((($d.kind == \"project\" and $d.value == .repo) | not)))", "as": "p", "key": ".p.name",
-                  "id": "project-card",
+                  "id": "project-drop",
                   "type": "column",
-                  "style": { "position": "relative" },
                   "drop_key": "projcard:{{ .p.repo }}",
                   "drop_zones": { "project": "edges" },
-                  "on": {
-                    "drop_item": {
-                      "accept": "project",
-                      "valid": ".dragged as $d | .p.repo as $t | [.projects[].repo] as $r | ($r | index($t)) as $ti | ($r | index($d)) as $di | $d != $t and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
-                      "do": { "do": "project.move", "target": "{{ .p.repo }}" }
-                    }
-                  },
+                  "on": { "drop_item": { "accept": "project", "do": { "do": "project.move", "target": "{{ .p.repo }}" } } },
                   "children": [
-                    { "type": "DropLine", "props": { "key": "projcard:{{ .p.repo }}" } },
+                    { "if": ".p.drop_gap", "type": "DropSlot" },
                     {
-                      "id": "project-row",
-                      "type": "row",
-                      "style": {
-                        "position": "relative", "height": 37, "padding": [0, 8], "gap": 8, "align": "center", "radius": 8, "border": 1,
-                        "border_color": "{{ if (.app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"proj:\" + .p.repo) then \"@accent\" else \"transparent\" end }}",
-                        "background": "{{ if (.app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"proj:\" + .p.repo) then \"#488efc1a\" else \"transparent\" end }}",
-                        "cursor": "pointer"
-                      },
-                      "drag": { "kind": "project", "value": "{{ .p.repo }}", "label": "{{ .p.name }}" },
-                      "tooltip": "{{ if .state[\"collapsed:proj:\" + .p.repo] then \"Show\" else \"Hide\" end }} {{ .p.name }}'s worktrees",
-                      "drop_key": "proj:{{ .p.repo }}",
-                      "drop_zones": { "worktree": "inside" },
-                      "menu": [
-                        { "label": "Rename Project", "icon": "pencil", "do": { "do": "prompt", "title": "Rename project", "value": "{{ .p.name }}", "then": { "do": "state.set", "key": "project_name:{{ .p.repo }}", "value": "{{ .input }}" } } },
-                        { "label": "Project settings", "icon": "settings", "do": { "do": "project.settings", "repo": "{{ .p.repo }}" } },
-                        { "if": ".p.primary_path", "label": "View on GitLab", "icon": "gitlab", "do": { "do": "project.open_remote", "path": "{{ .p.primary_path }}" } },
-                        { "separator": true },
-                        { "label": "Show external worktrees", "checked": ".p.show_external", "do": { "do": "state.toggle", "key": "hide_external:{{ .p.repo }}" } },
-                        { "label": "Show primary worktree", "checked": ".p.show_primary", "do": { "do": "state.toggle", "key": "hide_primary:{{ .p.repo }}" } },
-                        { "if": ".p.hidden_count > 0", "label": "Show {{ .p.hidden_count }} hidden worktree{{ if .p.hidden_count == 1 then \"\" else \"s\" end }}", "icon": "eye", "do": { "do": "project.unhide", "repo": "{{ .p.repo }}" } },
-                        { "label": "New worktree from…", "icon": "git-branch", "shortcut": "⌘⇧N", "do": { "do": "worktree.new", "repo": "{{ .p.repo }}", "host": "{{ .p.primary_host // .p.host }}" } },
-                        { "separator": true },
-                        { "label": "Remove Project", "icon": "trash", "danger": true, "do": { "do": "confirm", "title": "Remove {{ .p.name }} from the sidebar?", "text": "Its worktrees and chats stay on disk. Bring it back from the command palette (Restore removed projects).", "confirm": "Remove", "then": { "do": "state.set", "key": "removed_project:{{ .p.repo }}", "value": true } } }
-                      ],
-                      "on": {
-                        "click": { "do": "state.toggle", "key": "collapsed:proj:{{ .p.repo }}" },
-                        "drop_item": [
-                          {
-                            "accept": "worktree",
-                            "valid": ".dragged as $d | [.worktrees[] | select(.path == $d)][0] as $w | $w.repo == .p.repo and $w.section != null",
-                            "do": { "do": "worktree.move", "section": null }
-                          }
-                        ]
-                      },
-                      "children": [
-                        { "type": "DropLine", "props": { "key": "proj:{{ .p.repo }}" } },
-                        { "type": "Badge", "props": { "letter": "{{ .p.letter }}", "hue": "{{ .p.hue }}", "size": 22 } },
-                        { "id": "project-name", "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "font_size": 14, "truncate": true, "min_width": 0, "shrink": 1 } },
-                        { "type": "icon", "props": { "name": "{{ if .state[\"collapsed:proj:\" + .p.repo] then \"chevron-right\" else \"chevron-down\" end }}", "size": 12, "color": "@text_faint" } },
-                        { "type": "spacer" },
-                        { "for": ".p.hosts", "as": "h", "id": "project-host", "type": "HostIcon", "props": { "host": "{{ .h }}", "size": 12 } },
-                        { "id": "project-new-chat", "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "dir": "{{ ([.p.items[] | select(.is_primary)][0] // .p.items[0]).path }}" } } }
-                      ]
-                    },
-                    {
-                      "if": ".state[\"collapsed:proj:\" + .p.repo] | not",
-                      "for": ".app.drag as $d | .p.items | map(select((($d.kind == \"worktree\" and $d.value == .path) | not)))", "as": "w", "key": ".w.path",
-                      "id": "project-worktrees",
+                      "id": "project-card",
                       "type": "column",
                       "children": [
-                        { "id": "wt-row", "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": false } },
-                        { "id": "wt-chats", "type": "WorktreeChats", "props": { "w": "{{ .w }}", "indent": 40 } }
+                        {
+                          "id": "project-row",
+                          "type": "row",
+                          "style": {
+                            "position": "relative", "height": 37, "padding": [0, 8], "gap": 8, "align": "center", "radius": 8, "border": 1,
+                            "border_color": "{{ if (.app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"proj:\" + .p.repo) then \"@accent\" else \"transparent\" end }}",
+                            "background": "{{ if (.app.drop.key == (\"proj:\" + .p.repo) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"proj:\" + .p.repo) then \"#488efc1a\" else \"transparent\" end }}",
+                            "cursor": "pointer"
+                          },
+                          "drag": { "kind": "project", "value": "{{ .p.repo }}", "label": "{{ .p.name }}" },
+                          "tooltip": "{{ if .state[\"collapsed:proj:\" + .p.repo] then \"Show\" else \"Hide\" end }} {{ .p.name }}'s worktrees",
+                          "drop_key": "proj:{{ .p.repo }}",
+                          "drop_zones": { "worktree": "inside" },
+                          "menu": [
+                            { "label": "Rename Project", "icon": "pencil", "do": { "do": "prompt", "title": "Rename project", "value": "{{ .p.name }}", "then": { "do": "state.set", "key": "project_name:{{ .p.repo }}", "value": "{{ .input }}" } } },
+                            { "label": "Project settings", "icon": "settings", "do": { "do": "project.settings", "repo": "{{ .p.repo }}" } },
+                            { "if": ".p.primary_path", "label": "View on GitLab", "icon": "gitlab", "do": { "do": "project.open_remote", "path": "{{ .p.primary_path }}" } },
+                            { "separator": true },
+                            { "label": "Show external worktrees", "checked": ".p.show_external", "do": { "do": "state.toggle", "key": "hide_external:{{ .p.repo }}" } },
+                            { "label": "Show primary worktree", "checked": ".p.show_primary", "do": { "do": "state.toggle", "key": "hide_primary:{{ .p.repo }}" } },
+                            { "if": ".p.hidden_count > 0", "label": "Show {{ .p.hidden_count }} hidden worktree{{ if .p.hidden_count == 1 then \"\" else \"s\" end }}", "icon": "eye", "do": { "do": "project.unhide", "repo": "{{ .p.repo }}" } },
+                            { "label": "New worktree from…", "icon": "git-branch", "shortcut": "⌘⇧N", "do": { "do": "worktree.new", "repo": "{{ .p.repo }}", "host": "{{ .p.primary_host // .p.host }}" } },
+                            { "separator": true },
+                            { "label": "Remove Project", "icon": "trash", "danger": true, "do": { "do": "confirm", "title": "Remove {{ .p.name }} from the sidebar?", "text": "Its worktrees and chats stay on disk. Bring it back from the command palette (Restore removed projects).", "confirm": "Remove", "then": { "do": "state.set", "key": "removed_project:{{ .p.repo }}", "value": true } } }
+                          ],
+                          "on": {
+                            "click": { "do": "state.toggle", "key": "collapsed:proj:{{ .p.repo }}" },
+                            "drop_item": [
+                              {
+                                "accept": "worktree",
+                                "valid": ".dragged as $d | [.worktrees[] | select(.path == $d)][0] as $w | $w.repo == .p.repo and $w.section != null",
+                                "do": { "do": "worktree.move", "section": null }
+                              }
+                            ]
+                          },
+                          "children": [
+                            { "type": "DropLine", "props": { "key": "proj:{{ .p.repo }}" } },
+                            { "type": "Badge", "props": { "letter": "{{ .p.letter }}", "hue": "{{ .p.hue }}", "size": 22 } },
+                            { "id": "project-name", "type": "text", "props": { "text": "{{ .p.name }}" }, "style": { "font_size": 14, "truncate": true, "min_width": 0, "shrink": 1 } },
+                            { "type": "icon", "props": { "name": "{{ if .state[\"collapsed:proj:\" + .p.repo] then \"chevron-right\" else \"chevron-down\" end }}", "size": 12, "color": "@text_faint" } },
+                            { "type": "spacer" },
+                            { "for": ".p.hosts", "as": "h", "id": "project-host", "type": "HostIcon", "props": { "host": "{{ .h }}", "size": 12 } },
+                            { "id": "project-new-chat", "type": "IconButton", "props": { "icon": "plus", "size": 22, "tooltip": "New chat in {{ .p.name }}", "do": { "do": "chat.new", "dir": "{{ ([.p.items[] | select(.is_primary)][0] // .p.items[0]).path }}" } } }
+                          ]
+                        },
+                        {
+                          "if": ".state[\"collapsed:proj:\" + .p.repo] | not",
+                          "for": ".app.drag as $d | .p.items | map(select((($d.kind == \"worktree\" and $d.value == .path) | not)))", "as": "w", "key": ".w.path",
+                          "id": "project-worktrees",
+                          "type": "column",
+                          "children": [
+                            { "id": "wt-row", "type": "WorktreeRow", "props": { "w": "{{ .w }}", "in_section": false } },
+                            { "id": "wt-chats", "type": "WorktreeChats", "props": { "w": "{{ .w }}", "indent": 40 } }
+                          ]
+                        }
                       ]
-                    }
+                    },
+                    { "if": ".p.drop_gap_end", "type": "DropSlot" }
                   ]
                 },
                 {
                   "for": ".app.drag as $d | .sections | map(select((($d.kind == \"section\" and $d.value == .id) | not)))", "as": "s", "key": ".s.id",
-                  "id": "section-card",
+                  "id": "section-drop",
                   "type": "column",
-                  "style": { "position": "relative" },
                   "drop_key": "seccard:{{ .s.id }}",
                   "drop_zones": { "section": "edges" },
-                  "on": {
-                    "drop_item": {
-                      "accept": "section",
-                      "valid": ".dragged as $d | .s.id as $t | [.sections[].id] as $r | ($r | index($t)) as $ti | ($r | index($d)) as $di | $d != $t and ((.zone == \"before\" and $di != $ti - 1) or (.zone == \"after\" and $di != $ti + 1))",
-                      "do": { "do": "section.move", "target": "{{ .s.id }}" }
-                    }
-                  },
+                  "on": { "drop_item": { "accept": "section", "do": { "do": "section.move", "target": "{{ .s.id }}" } } },
                   "children": [
-                    { "type": "DropLine", "props": { "key": "seccard:{{ .s.id }}" } },
+                    { "if": ".s.drop_gap", "type": "DropSlot" },
                     {
-                      "id": "section-label",
-                      "type": "SectionLabel",
-                      "props": {
-                        "text": "{{ .s.name }}",
-                        "drop_key": "sec:{{ .s.id }}",
-                        "collapsed": "{{ (\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end }}"
-                      },
-                      "style": {
-                        "position": "relative", "cursor": "pointer", "radius": 6,
-                        "background": "{{ if (.app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"sec:\" + .s.id) then \"#488efc1a\" else \"transparent\" end }}",
-                        "color": "{{ if (.app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"sec:\" + .s.id) then \"@accent\" else \"@text_muted\" end }}"
-                      },
-                      "drag": { "kind": "section", "value": "{{ .s.id }}", "label": "{{ .s.name }}" },
-                      "drop_key": "sec:{{ .s.id }}",
-                      "drop_zones": { "worktree": "inside" },
-                      "on": {
-                        "click": { "do": "state.toggle", "key": "collapsed:{{ .s.id }}", "default": "{{ .s.collapsed }}" },
-                        "drop_item": [
-                          {
-                            "accept": "worktree",
-                            "valid": ".s.items[0].path != .dragged",
-                            "do": { "do": "worktree.move", "section": "{{ .s.id }}", "before": "{{ .s.items[0].path // \"\" }}" }
-                          }
-                        ]
-                      },
-                      "menu": [
-                        { "label": "Rename…", "do": { "do": "section.rename", "id": "{{ .s.id }}" } },
-                        { "separator": true },
-                        { "label": "Sort by recent activity", "checked": ".state.sidebar_order == \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "recent" } },
-                        { "label": "Sort manually", "checked": ".state.sidebar_order != \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "manual" } },
-                        { "separator": true },
-                        { "label": "Delete section", "do": { "do": "section.delete", "id": "{{ .s.id }}" } }
-                      ]
-                    },
-                    {
-                      "if": "(\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end | not",
-                      "for": ".app.drag as $d | .s.items | map(select((($d.kind == \"worktree\" and $d.value == .path) | not)))",
-                      "as": "w", "key": ".w.path",
-                      "id": "section-worktrees",
+                      "id": "section-card",
                       "type": "column",
                       "children": [
                         {
-                          "id": "wt-row",
-                          "type": "WorktreeRow",
+                          "id": "section-label",
+                          "type": "SectionLabel",
                           "props": {
-                            "w": "{{ .w }}", "in_section": true,
-                            "child": "{{ (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) }}"
-                          }
+                            "text": "{{ .s.name }}",
+                            "drop_key": "sec:{{ .s.id }}",
+                            "collapsed": "{{ (\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end }}"
+                          },
+                          "style": {
+                            "position": "relative", "cursor": "pointer", "radius": 6,
+                            "background": "{{ if (.app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"sec:\" + .s.id) then \"#488efc1a\" else \"transparent\" end }}",
+                            "color": "{{ if (.app.drop.key == (\"sec:\" + .s.id) and .app.drop.zone == \"inside\") or .app.drag.into_key == (\"sec:\" + .s.id) then \"@accent\" else \"@text_muted\" end }}"
+                          },
+                          "drag": { "kind": "section", "value": "{{ .s.id }}", "label": "{{ .s.name }}" },
+                          "drop_key": "sec:{{ .s.id }}",
+                          "drop_zones": { "worktree": "inside" },
+                          "on": {
+                            "click": { "do": "state.toggle", "key": "collapsed:{{ .s.id }}", "default": "{{ .s.collapsed }}" },
+                            "drop_item": [
+                              {
+                                "accept": "worktree",
+                                "valid": ".s.items[0].path != .dragged",
+                                "do": { "do": "worktree.move", "section": "{{ .s.id }}", "before": "{{ .s.items[0].path // \"\" }}" }
+                              }
+                            ]
+                          },
+                          "menu": [
+                            { "label": "Rename…", "do": { "do": "section.rename", "id": "{{ .s.id }}" } },
+                            { "separator": true },
+                            { "label": "Sort by recent activity", "checked": ".state.sidebar_order == \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "recent" } },
+                            { "label": "Sort manually", "checked": ".state.sidebar_order != \"recent\"", "do": { "do": "state.set", "key": "sidebar_order", "value": "manual" } },
+                            { "separator": true },
+                            { "label": "Delete section", "do": { "do": "section.delete", "id": "{{ .s.id }}" } }
+                          ]
                         },
-                        { "id": "wt-chats", "type": "WorktreeChats", "props": { "w": "{{ .w }}", "indent": "{{ if (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) then 44 else 32 end }}" } }
+                        {
+                          "if": "(\"collapsed:\" + .s.id) as $k | if .state | has($k) then .state[$k] else .s.collapsed end | not",
+                          "for": ".app.drag as $d | .s.items | map(select((($d.kind == \"worktree\" and $d.value == .path) | not)))",
+                          "as": "w", "key": ".w.path",
+                          "id": "section-worktrees",
+                          "type": "column",
+                          "children": [
+                            {
+                              "id": "wt-row",
+                              "type": "WorktreeRow",
+                              "props": {
+                                "w": "{{ .w }}", "in_section": true,
+                                "child": "{{ (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) }}"
+                              }
+                            },
+                            { "id": "wt-chats", "type": "WorktreeChats", "props": { "w": "{{ .w }}", "indent": "{{ if (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) then 44 else 32 end }}" } }
+                          ]
+                        }
                       ]
-                    }
+                    },
+                    { "if": ".s.drop_gap_end", "type": "DropSlot" }
                   ]
                 }
               ]
@@ -645,6 +645,13 @@
         { "type": "icon", "props": { "name": "paperclip", "size": 22, "color": "@accent" } },
         { "type": "text", "props": { "text": "Drop to attach to {{ .props.name }}" } }
       ]
+    },
+
+    "DropSlot": {
+      "about": "The room a dragged section or project opens where it would land (sections and projects get drop_gap / drop_gap_end while one is dragged over them).",
+      "type": "box",
+      "motion": false,
+      "style": { "height": 34, "margin": [0, 0, 8, 0], "radius": 6, "border": 1, "border_color": "@accent", "background": "#488efc1a" }
     },
 
     "SectionLabel": {
