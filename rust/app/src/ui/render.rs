@@ -56,7 +56,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("attachments", "Preview chips for files attached to a chat but not sent yet (spinner while uploading, × to remove). `props.chat` (default the selected chat), `props.size`. Look: settings `chat.attachments`, `chat.attachment`."),
     ("diff", "The built-in diff of a worktree: a file list beside the changes. `props.path` (default the selected worktree), `props.base` (default `state.diff_base`: uncommitted | branch). Click a file to jump, a file header to collapse, a line number to open it in the editor. Look: settings `diff`."),
     ("resize_handle", "A drag handle that sets a numeric state value. `props.state` (key), `props.axis` x|y, `props.min`, `props.max`, `props.invert` (bool, for handles on the far edge)."),
-    ("<Component>", "Any name under `components`; its `props` are available inside as `.props`."),
+    ("<Component>", "Any name under `components`; its `props` are available inside as `.props`. `style` merges into its root's, and `id`, `on`, `menu`, `tooltip`, `drag`, `drop_key`, `drop_zones`, `layer`, `animate`, `motion` and `transition` set on the use replace its root's."),
 ];
 
 impl Workspace {
@@ -159,7 +159,7 @@ impl Workspace {
                         }
                     }
                 }
-                for k in ["id", "animate", "motion", "transition", "tooltip", "on", "menu"] {
+                for k in ["id", "animate", "motion", "transition", "tooltip", "on", "menu", "drag", "drop_key", "drop_zones", "layer"] {
                     if let Some(v) = obj.get(k) {
                         base.insert(k.into(), v.clone());
                     }
