@@ -4,10 +4,12 @@
 # Prints nothing: SessionStart output would land in the session's context.
 set -u
 . "$(dirname "$0")/env.sh"
-# The template's AgentAPI runs `claude --continue` in ~/project at every start,
-# which would resume the newest primary chat a second time. Stop it the moment
-# its session starts.
-[ "$AGENT_HOST" = box ] && pkill -f "^agentapi server" 2> /dev/null
+# This host's boot.kill_patterns: the box template's AgentAPI runs `claude --continue`
+# in ~/project at every start, which would resume the newest primary chat a second
+# time. Stop it the moment its session starts.
+cfg boot | jq -r '.kill_patterns // [] | .[]' 2> /dev/null | while IFS= read -r pat; do
+  [ -n "$pat" ] && pkill -f "$pat" 2> /dev/null
+done
 if [ ! -f /tmp/agent-box-booted ]; then
   log "boot triggered by ${AGENT_BOX_TRIGGER:-SessionStart}"
   detach "$AGENT_BOX_DIR/bin/boot"

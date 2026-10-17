@@ -3,12 +3,11 @@ left the default branch (everything on the branch). Untracked files are included
 
 use crate::{config, util};
 use serde_json::{json, Value};
-use std::time::Duration;
 
 fn git(path: &str, args: &[&str]) -> util::Output {
     let mut all = vec!["-C", path];
     all.extend_from_slice(args);
-    util::run("git", &all, &[("GIT_PAGER", "cat")], None, Duration::from_secs(30))
+    util::run("git", &all, &[("GIT_PAGER", "cat")], None, config::secs("git_timeout_secs", 30))
 }
 
 fn default_branch(path: &str) -> String {
@@ -17,7 +16,9 @@ fn default_branch(path: &str) -> String {
     if head.ok && !name.is_empty() && name != "origin/HEAD" {
         return name.to_string();
     }
-    config::text("diff_default_base", "origin/main")
+    config::get("diff_default_base")
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("origin/{}", config::text("default_base", "main")))
 }
 
 pub fn worktree_diff(path: &str, base: Option<&str>) -> Result<Value, String> {

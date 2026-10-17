@@ -64,9 +64,11 @@ pub enum Call {
     /** The worktree's name in the sidebar (a leading emoji becomes its icon). */
     WorktreeLabel { path: String, label: String },
     WorktreeRenameBranch { path: String, branch: String },
-    /** A worktree on `branch` (checked out if it exists here or on origin, else new from origin/main); replies `{path, branch}`. */
+    /** A worktree on `branch` (checked out if it exists here or on origin, else new from origin's default
+    branch); replies `{path, branch}`. `WorktreeCreateWith` also takes a base and a folder name. */
     WorktreeCreate { repo: String, branch: String },
-    /** Run a shell command on the box (bash -lc): `{code, stdout, stderr}`. For scripts that add box-side abilities. */
+    /** Run a shell command on this host (bash -lc, in bin/agent-env): `{code, stdout, stderr}`. For scripts that
+    add host-side abilities; off when the `exec_allowed` option is false. */
     Exec { cmd: String, cwd: Option<String>, timeout_secs: Option<u64> },
     ProjectMove { repo: String, index: usize },
     /** `{diff, base, from, truncated}`: unified diff text; `base` "uncommitted" (default) or "branch". */
@@ -100,8 +102,102 @@ pub enum Call {
     TermInput { term_id: u64, data: String },
     TermResize { term_id: u64, cols: u16, rows: u16 },
     TermClose { term_id: u64 },
-    /** Past chats, newest first: `{chats: [{id, name, dir, host, last_activity, closed}]}`. `ChatStart` reopens any of them. */
+    /** Past chats, newest first: `{chats: [{id, name, dir, host, agent, kind, branch, last_activity, closed}]}`.
+    `ChatStart` reopens any of them. */
     History { limit: Option<usize> },
+    /** `History` for `host` (None: this one; "*": every host in the shared registry). */
+    HistoryQuery {
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        host: Option<String>,
+    },
+    /** `WorktreeCreate` from `origin/<base>` (None: the default branch), in a folder named `name` where the repo's
+    worktree template uses one. */
+    WorktreeCreateWith {
+        repo: String,
+        branch: String,
+        #[serde(default)]
+        base: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /** The options in effect: `{options, agents, resolved: {host_id, host, hosts, repos, ...}, host_id}`. */
+    ConfigGet,
+    /** Hook events from the log, oldest first: after `from_seq`, at or after `since` (unix seconds), of one
+    session; at most `limit` (default `hook_events_limit`). `{events, last_seq}`. */
+    HookEvents {
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        from_seq: Option<i64>,
+        #[serde(default)]
+        since: Option<f64>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /** Snapshot every queued worktree and push this host's sessions branch now (bin/sync-worker, detached). */
+    SyncNow,
+    /** WIP snapshots on every host's sessions branch (one worktree's with `path`): `{wips: [{host, key, path,
+    branch, head, at}]}`. */
+    WipList {
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /** Apply `from`'s (None: the other host's) latest WIP for the worktree's branch (bin/wip-restore). */
+    WipRestore {
+        path: String,
+        #[serde(default)]
+        from: Option<String>,
+    },
+    /** The last `lines` lines of a log named in the `logs` option (boxd, agent-box, supervisor, boxd-build, ...):
+    `{name, path, text}`. */
+    LogTail {
+        name: String,
+        #[serde(default)]
+        lines: Option<usize>,
+    },
+    ChatRename { chat_id: String, name: String },
+    /** Terminal shells (tmux sessions `sh-*`), of one folder with `cwd`: `{terms: [{session, name, cwd, attached,
+    created, command}]}`. */
+    TermList {
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    /** The branch a worktree targets (its merge request's target, the diff base). */
+    WorktreeSetTarget { path: String, branch: String },
+    SectionCollapse { id: String, collapsed: bool },
+    /** Move a chat (with its worktree or whole section, `scope`) to host `to`; this host runs bin/chat move, so
+    it must reach the other end over ssh (an error says when it can't). */
+    ChatMove {
+        chat_id: String,
+        to: String,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    /** Check a chat's branch (or `branch` of `repo`) out on this host with its latest WIP from its host (or
+    `from`), for manual testing. */
+    TestLocal {
+        #[serde(default)]
+        chat_id: Option<String>,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        repo: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+    /** Start the chat branch's stack here (its repo's worktree_tool `start`), detached in tmux. */
+    StackStart { chat_id: String },
+    /** (Re)install the daemon's hooks for an agent CLI (bin/agent-hooks). */
+    HooksInstall { agent: String },
+    /** Copy the personal agent setup to `host` (None: every other host with ssh) and back (bin/env-push). */
+    EnvPush {
+        #[serde(default)]
+        host: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +239,25 @@ pub struct Model {
     pub sections: Vec<Section>,
     pub chats: Vec<Chat>,
     pub last_seq: i64,
+    /** The host's display name (`hosts.HOST.label`). */
+    #[serde(default)]
+    pub host_label: Option<String>,
+    /** This host's transcript and WIP backup (bin/sync-worker). */
+    #[serde(default)]
+    pub sync: Option<SyncStatus>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SyncStatus {
+    /** The last push failed and waits for the next turn. */
+    pub pending: bool,
+    /** Worktrees waiting to be snapshotted. */
+    pub queued: u32,
+    pub last_push_at: Option<String>,
+    pub error: Option<String>,
+    /** The sessions branch it pushes. */
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -178,12 +293,21 @@ pub struct Worktree {
     /** Newest activity (a chat transcript or the last commit), unix seconds. */
     pub age: Option<f64>,
     pub chat_ids: Vec<String>,
-    /** The machine it's on: "box" or "mac". */
+    /** The machine it's on: a host id (the daemon's `hosts`; originally "box" or "mac"). */
     #[serde(default = "default_host")]
     pub host: String,
     /** Made outside a.box and super.engineering (by hand with `git worktree add`, or another tool). */
     #[serde(default)]
     pub external: bool,
+    /** The branch it targets (`WorktreeSetTarget`), when one was set. */
+    #[serde(default)]
+    pub target_branch: Option<String>,
+    /** Commits its upstream has that it doesn't. */
+    #[serde(default)]
+    pub behind_count: u32,
+    /** Its upstream branch (`origin/x`). */
+    #[serde(default)]
+    pub upstream: Option<String>,
 }
 
 fn default_host() -> String {
@@ -198,6 +322,10 @@ pub struct MergeRequest {
     pub state: String,
     /** passing | failing | pending */
     pub checks: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub pipeline_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -226,6 +354,28 @@ pub struct Chat {
     /** The agent's own session id when it picks one (Codex); usage is filed under it. */
     #[serde(default)]
     pub session: Option<String>,
+    /** The rest of its registry entry. */
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub base: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /** The orchestrator chat that started it. */
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub feature: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub forked_from: Option<String>,
+    /** When its agent last started (unix seconds). */
+    #[serde(default)]
+    pub launched_at: Option<f64>,
+    /** Its transcript file on this host. */
+    #[serde(default)]
+    pub transcript: Option<String>,
 }
 
 fn default_agent() -> String {

@@ -1,11 +1,11 @@
-use agent_box_protocol::{Chat, MergeRequest, Model, Project, Section, Worktree};
+use agent_box_protocol::{Chat, MergeRequest, Model, Project, Section, SyncStatus, Worktree};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::util;
+use crate::{config, hosts, util};
 
 /** How long a worktree's git status / merge request stays fresh (`git_ttl_secs`, `mr_ttl_secs`). */
 fn git_ttl() -> Duration {
@@ -32,15 +32,13 @@ fn mr_ttl() -> Duration {
     crate::config::secs("mr_ttl_secs", 90)
 }
 
-/** Repo key and GitLab project for each checkout folder name. */
-pub(crate) fn repo_for(project_name: &str) -> (&'static str, &'static str, f32) {
-    match project_name {
-        "redotech-internal-tools" | "internal-tools" => {
-            ("internal-tools", "redo/redoapp/internal/redotech-internal-tools", 120.0)
-        }
-        "redo-data" => ("redo-data", "redo/redoapp/product/redo-data", 30.0),
-        _ => ("redo", "redo/redoapp/product/redo", 210.0),
-    }
+/** The host a registry chat without one is on (`registry_default_host`; chats from before hosts were named). */
+pub fn registry_default_host() -> String {
+    config::text("registry_default_host", "box")
+}
+
+fn git_wait() -> Duration {
+    config::secs("git_timeout_secs", 30)
 }
 
 #[derive(Clone, Default)]
@@ -48,6 +46,8 @@ pub struct GitInfo {
     pub uncommitted: u32,
     pub unpushed: u32,
     pub behind: bool,
+    pub behind_count: u32,
+    pub upstream: Option<String>,
     pub last_commit: Option<f64>,
 }
 
@@ -75,14 +75,15 @@ impl Caches {
         hit.map(|(_, g)| g).unwrap_or_default()
     }
 
-    pub fn mr(self: &Arc<Self>, repo: &str, branch: &str) -> Option<MergeRequest> {
+    pub fn mr(self: &Arc<Self>, repo: &str, branch: &str, path: &str) -> Option<MergeRequest> {
         let key = (repo.to_string(), branch.to_string());
         let hit = self.mr.lock().unwrap().get(&key).cloned();
         if hit.as_ref().map(|(t, _)| t.elapsed() > mr_ttl()).unwrap_or(true) {
             self.refresh(format!("mr:{repo}:{branch}"), {
                 let me = self.clone();
+                let path = path.to_string();
                 move || {
-                    let v = fetch_mr(&key.0, &key.1);
+                    let v = fetch_mr(&key.0, &key.1, &path);
                     me.mr.lock().unwrap().insert(key, (Instant::now(), v));
                 }
             });
@@ -102,31 +103,114 @@ impl Caches {
     }
 }
 
+/** Counts and upstream from `git status --porcelain --branch`'s first line. */
+fn parse_head(head: &str, info: &mut GitInfo) {
+    static RE: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
+    let (ahead, behind, upstream) = RE.get_or_init(|| {
+        (Regex::new(r"ahead (\d+)").unwrap(), Regex::new(r"behind (\d+)").unwrap(), Regex::new(r"\.\.\.(\S+)").unwrap())
+    });
+    info.unpushed = ahead.captures(head).and_then(|c| c[1].parse().ok()).unwrap_or(0);
+    info.behind_count = behind.captures(head).and_then(|c| c[1].parse().ok()).unwrap_or(0);
+    info.behind = info.behind_count > 0;
+    info.upstream = upstream.captures(head).map(|c| c[1].to_string());
+}
+
 fn git_info(path: &str) -> GitInfo {
-    let st = util::run("git", &["-C", path, "status", "--porcelain", "--branch"], &[], None, Duration::from_secs(30));
+    let st = util::run("git", &["-C", path, "status", "--porcelain", "--branch"], &[], None, git_wait());
     let mut info = GitInfo::default();
     if st.ok {
         let mut lines = st.stdout.lines();
         let head = lines.next().unwrap_or("");
         info.uncommitted = lines.count() as u32;
-        static AHEAD: OnceLock<Regex> = OnceLock::new();
-        let ahead = AHEAD.get_or_init(|| Regex::new(r"ahead (\d+)").unwrap());
-        info.unpushed = ahead.captures(head).and_then(|c| c[1].parse().ok()).unwrap_or(0);
-        info.behind = head.contains("behind ");
+        parse_head(head, &mut info);
     }
-    let log = util::run("git", &["-C", path, "log", "-1", "--format=%ct"], &[], None, Duration::from_secs(10));
+    let log = util::run("git", &["-C", path, "log", "-1", "--format=%ct"], &[], None, git_wait() / 3);
     info.last_commit = log.stdout.trim().parse().ok();
     info
 }
 
-fn glab_json(path: &str) -> Option<Value> {
-    let o = util::run("glab", &["api", path], &[], None, Duration::from_secs(30));
+fn forge_wait() -> Duration {
+    config::secs("forge_timeout_secs", 30)
+}
+
+fn json_of(cmd: &str, args: &[&str]) -> Option<Value> {
+    let o = util::run(cmd, args, &[], None, forge_wait());
     if o.ok { serde_json::from_str(&o.stdout).ok() } else { None }
 }
 
+/** (host, project path) from a remote URL: git@host:a/b.git, https://host/a/b.git, ssh://git@host/a/b. */
+pub(crate) fn parse_remote(url: &str) -> Option<(String, String)> {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let (host, path) = if let Some(rest) = url.split_once("://").map(|(_, r)| r) {
+        let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+        rest.split_once('/')?
+    } else {
+        let rest = url.rsplit_once('@').map_or(url, |(_, r)| r);
+        rest.split_once(':')?
+    };
+    let host = host.split(':').next().unwrap_or(host);
+    Some((host.to_string(), path.trim_start_matches('/').to_string()))
+}
+
+/** The branch's newest MR from `repos.REPO.forge` / `forge` (default: github for a github.com origin, else gitlab):
+"gitlab" (glab), "github" (gh), "command" (`forge_cmd` argv, {project} {branch} {path} {repo}, prints one), "none". */
+fn fetch_mr(repo: &str, branch: &str, path: &str) -> Option<MergeRequest> {
+    let conf = hosts::repos().get(repo).cloned().unwrap_or(Value::Null);
+    let s = |k: &str| conf.get(k).and_then(Value::as_str).map(str::to_string).or_else(|| config::get(k)?.as_str().map(str::to_string));
+    let origin = util::run("git", &["-C", path, "remote", "get-url", "origin"], &[], None, git_wait() / 3).stdout;
+    let remote = parse_remote(&origin);
+    let project = conf.get("forge_project").and_then(Value::as_str).map(str::to_string).or_else(|| remote.as_ref().map(|r| r.1.clone()))?;
+    let forge = s("forge").unwrap_or_else(|| {
+        if remote.as_ref().is_some_and(|r| r.0 == "github.com") { "github".into() } else { "gitlab".into() }
+    });
+    match forge.as_str() {
+        "gitlab" => gitlab_mr(&project, branch),
+        "github" => github_mr(&project, branch),
+        "command" => {
+            let template = conf.get("forge_cmd").or(config::get("forge_cmd").as_ref()).and_then(Value::as_array).cloned()?;
+            let argv: Vec<String> = template.iter().filter_map(Value::as_str)
+                .map(|a| a.replace("{project}", &project).replace("{branch}", branch).replace("{path}", path).replace("{repo}", repo))
+                .collect();
+            let (cmd, args) = argv.split_first()?;
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            serde_json::from_value(json_of(cmd, &refs)?).ok()
+        }
+        _ => None,
+    }
+}
+
+fn github_mr(project: &str, branch: &str) -> Option<MergeRequest> {
+    let list = json_of("gh", &["pr", "list", "--repo", project, "--head", branch, "--state", "all", "--limit", "1",
+                               "--json", "number,url,state,isDraft,title,statusCheckRollup"])?;
+    let pr = list.as_array()?.first()?.clone();
+    let checks: Vec<&Value> = pr.get("statusCheckRollup").and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default();
+    let field = |c: &Value, k: &str| c.get(k).and_then(Value::as_str).unwrap_or("").to_ascii_uppercase();
+    let failed = checks.iter().any(|c| ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT"].contains(&field(c, "conclusion").as_str())
+        || ["FAILURE", "ERROR"].contains(&field(c, "state").as_str()));
+    let pending = checks.iter().any(|c| {
+        let st = field(c, "status");
+        (!st.is_empty() && st != "COMPLETED") || field(c, "state") == "PENDING"
+    });
+    let state = match pr.get("state").and_then(Value::as_str).unwrap_or("OPEN") {
+        "MERGED" => "merged",
+        "CLOSED" => "closed",
+        _ if pr.get("isDraft").and_then(Value::as_bool).unwrap_or(false) => "draft",
+        _ => "opened",
+    };
+    Some(MergeRequest {
+        number: pr.get("number")?.as_u64()?,
+        url: pr.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
+        state: state.into(),
+        checks: if checks.is_empty() { None } else if failed { Some("failing".into()) } else if pending { Some("pending".into()) } else { Some("passing".into()) },
+        title: pr.get("title").and_then(Value::as_str).map(str::to_string),
+        pipeline_url: None,
+    })
+}
+
 /** The newest MR for a branch, as bin/dashboard's `_mr` reads it. */
-fn fetch_mr(repo: &str, branch: &str) -> Option<MergeRequest> {
-    let (_, project, _) = repo_for(repo);
+fn gitlab_mr(project: &str, branch: &str) -> Option<MergeRequest> {
+    let glab_json = |p: &str| json_of("glab", &["api", p]);
     let pid = project.replace('/', "%2F");
     let list = glab_json(&format!(
         "projects/{pid}/merge_requests?source_branch={branch}&order_by=updated_at&per_page=1"
@@ -148,6 +232,8 @@ fn fetch_mr(repo: &str, branch: &str) -> Option<MergeRequest> {
         url: m.get("web_url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         state: if draft && state == "opened" { "draft".into() } else { state.into() },
         checks: checks.map(|s| s.into()),
+        title: m.get("title").and_then(Value::as_str).map(str::to_string),
+        pipeline_url: m.pointer("/head_pipeline/web_url").and_then(Value::as_str).map(str::to_string),
     })
 }
 
@@ -157,7 +243,7 @@ fn sc(args: &[&str]) -> Value {
     all.extend(args.iter().map(|s| s.to_string()));
     let refs: Vec<&str> = all.iter().map(|s| s.as_str()).collect();
     let home = util::home();
-    let o = util::run("python3", &refs, &[], Some(&home.to_string_lossy()), Duration::from_secs(60));
+    let o = util::run("python3", &refs, &[], Some(&home.to_string_lossy()), config::secs("sc_list_timeout_secs", 60));
     serde_json::from_str(&o.stdout).unwrap_or(Value::Null)
 }
 
@@ -200,7 +286,7 @@ pub fn needs_user(payload: &Value) -> bool {
 
 /** A chat's tmux pane, with its colors. */
 fn capture(session: &str) -> Option<String> {
-    let o = util::run("tmux", &["capture-pane", "-p", "-e", "-t", &format!("={session}:")], &[], None, Duration::from_secs(5));
+    let o = util::run("tmux", &["capture-pane", "-p", "-e", "-t", &format!("={session}:")], &[], None, util::tmux_wait());
     o.ok.then_some(o.stdout)
 }
 
@@ -324,7 +410,8 @@ fn combine(turn: Option<String>, hook: Option<(String, Option<Value>)>) -> Optio
 
 fn chats(states: &ChatStates) -> Vec<Chat> {
     let dir = util::agent_home().join("state").join("registry").join("chats");
-    let here = crate::mac::host();
+    let here = hosts::here();
+    let foreign = hosts::flag("foreign_sessions", cfg!(target_os = "macos"));
     let alive = util::tmux_sessions();
     let mut out = vec![];
     let mut elsewhere: Option<std::collections::HashSet<String>> = None;
@@ -343,16 +430,16 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             continue;
         }
         let id = s("id").unwrap_or_default();
-        let host = s("host").unwrap_or_else(|| "box".into());
+        let host = s("host").unwrap_or_else(registry_default_host);
         if host != here {
             continue;
         }
         let tmux = util::chat_session(&id);
         let is_alive = alive.contains(&tmux);
-        // A stopped Mac chat that super.engineering still runs: starting it here takes it over.
-        let status = if !is_alive && here == "mac" && elsewhere
-            .get_or_insert_with(|| crate::mac::sessions_running())
-            .contains(&id) { "running_elsewhere".to_string() } else { status };
+        // A stopped chat another tool here still runs (super.engineering, on the Mac): starting it takes it over.
+        let status = if !is_alive && foreign && elsewhere
+            .get_or_insert_with(crate::elsewhere::sessions_running)
+            .contains(&crate::agents::session_key(&v).unwrap_or_else(|| id.clone())) { "running_elsewhere".to_string() } else { status };
         let dir = s("dir");
         let agent = crate::agents::of(&v);
         let transcript = crate::agents::transcript_path(&v);
@@ -388,6 +475,15 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             suggestion,
             agent,
             session: s("session_id"),
+            repo: s("repo"),
+            base: s("base"),
+            model: s("model"),
+            parent: s("parent"),
+            feature: s("feature"),
+            created_at: s("created_at"),
+            forked_from: s("forked_from"),
+            launched_at: v.get("launched_at").and_then(Value::as_f64),
+            transcript: transcript.as_ref().map(|p| p.to_string_lossy().into_owned()),
         });
     }
     out
@@ -396,8 +492,10 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
 fn worktree(caches: &Arc<Caches>, d: &Value, chats: &[Chat]) -> Option<Worktree> {
     let path = d.get("path")?.as_str()?.to_string();
     let s = |k: &str| d.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
-    let project = s("project_name").or_else(|| s("project_id")).unwrap_or_else(|| "redo".into());
-    let (repo, _, hue) = repo_for(&project);
+    let project = s("project_name").or_else(|| s("project_id")).unwrap_or_else(hosts::default_repo);
+    let known = hosts::repos();
+    let repo = s("project_id").filter(|id| known.contains_key(id)).unwrap_or_else(|| hosts::repo_for(&project));
+    let hue = hosts::hue(&repo);
     let is_primary = d.get("is_primary").and_then(|v| v.as_bool()).unwrap_or(false);
     let branch = s("branch");
     let git = caches.git(&path);
@@ -407,7 +505,7 @@ fn worktree(caches: &Arc<Caches>, d: &Value, chats: &[Chat]) -> Option<Worktree>
         Some(a.map_or(b, |a| a.max(b)))
     });
     let mr = match (&branch, is_primary) {
-        (Some(b), false) => caches.mr(repo, b),
+        (Some(b), false) => caches.mr(&repo, b, &path),
         _ => None,
     };
     Some(Worktree {
@@ -416,7 +514,7 @@ fn worktree(caches: &Arc<Caches>, d: &Value, chats: &[Chat]) -> Option<Worktree>
         path,
         branch,
         project,
-        repo: repo.into(),
+        repo,
         hue,
         is_primary,
         uncommitted: git.uncommitted,
@@ -425,9 +523,25 @@ fn worktree(caches: &Arc<Caches>, d: &Value, chats: &[Chat]) -> Option<Worktree>
         mr,
         age,
         chat_ids: mine.iter().map(|c| c.id.clone()).collect(),
-        host: crate::mac::host().into(),
+        host: hosts::here(),
         external: d.get("external").and_then(|v| v.as_bool()).unwrap_or(false),
+        target_branch: s("target_branch"),
+        behind_count: git.behind_count,
+        upstream: git.upstream,
     })
+}
+
+/** bin/sync-worker's last push (sync-status.json), whether one is pending, and the queue's length. */
+fn sync_status() -> Option<SyncStatus> {
+    let home = util::agent_home();
+    let v: Value = std::fs::read_to_string(home.join("sync-status.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let queued = std::fs::read_dir(home.join("queue")).map(|d| d.flatten().count() as u32).unwrap_or(0);
+    let pending = home.join("push-pending").exists();
+    if v.is_null() && queued == 0 && !pending {
+        return None;
+    }
+    let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    Some(SyncStatus { pending, queued, last_push_at: s("last_push_at"), error: s("error"), branch: s("branch") })
 }
 
 pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model {
@@ -480,25 +594,44 @@ pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model 
             }
         }
     }
-    let ssh_host = if crate::mac::is_mac() {
-        String::new()
-    } else {
-        std::env::var("AGENT_BOX_SSH_HOST").unwrap_or_else(|_| "coder.tj-agents".into())
-    };
+    let here = hosts::here();
+    let ssh = hosts::ssh();
+    let ssh_host = if ssh.is_empty() { ssh } else { std::env::var("AGENT_BOX_SSH_HOST").unwrap_or(ssh) };
     Model {
-        host: crate::mac::host().into(),
+        host_label: Some(hosts::label(&here)),
+        host: here,
         ssh_host,
         projects,
         sections,
         chats,
         last_seq,
+        sync: sync_status(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{combine, suggestion, typed_input};
+    use super::{combine, parse_head, parse_remote, suggestion, typed_input, GitInfo};
     use serde_json::json;
+
+    #[test]
+    fn remotes_name_their_host_and_project() {
+        let p = |u: &str| parse_remote(u).map(|(h, p)| format!("{h} {p}"));
+        assert_eq!(p("git@gitlab.com:redo/redoapp/product/redo.git").as_deref(), Some("gitlab.com redo/redoapp/product/redo"));
+        assert_eq!(p("https://github.com/acme/app.git").as_deref(), Some("github.com acme/app"));
+        assert_eq!(p("ssh://git@github.com:22/acme/app").as_deref(), Some("github.com acme/app"));
+        assert_eq!(p("https://oauth2:tok@gitlab.com/g/s/r.git\n").as_deref(), Some("gitlab.com g/s/r"));
+    }
+
+    #[test]
+    fn the_status_line_gives_upstream_and_counts() {
+        let mut g = GitInfo::default();
+        parse_head("## tj/x...origin/tj/x [ahead 2, behind 3]", &mut g);
+        assert_eq!((g.unpushed, g.behind_count, g.behind, g.upstream.as_deref()), (2, 3, true, Some("origin/tj/x")));
+        let mut g = GitInfo::default();
+        parse_head("## main", &mut g);
+        assert_eq!((g.unpushed, g.behind_count, g.upstream), (0, 0, None));
+    }
 
     #[test]
     fn a_turn_event_outranks_a_stale_hook() {

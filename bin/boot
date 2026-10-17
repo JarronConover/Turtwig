@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Idempotent box setup, safe to run at any time: packages, state clones,
-# Claude Code hooks, and restoring transcripts missing from this machine.
+# Idempotent machine setup, safe to run at any time: state clones, Claude Code
+# hooks, restoring transcripts missing from this machine, then this host's
+# `boot` steps (hosts.HOST.boot: packages, git insteadOf rules, the .bashrc
+# trigger, processes to stop, and the tmux services to keep running).
 # /tmp is wiped on every workspace start, so its marker means "booted
 # since the last restart". --force runs again anyway.
 set -u
@@ -12,48 +14,54 @@ exec 8> /tmp/agent-box-boot.lock
 flock -n 8 || exit 0
 log "boot start"
 
-if [ "$AGENT_HOST" = box ]; then
-  missing=()
-  for pkg in tmux rsync jq ttyd; do command -v "$pkg" > /dev/null || missing+=("$pkg"); done
-  if [ ${#missing[@]} -gt 0 ]; then
-    sudo apt-get update -qq > /dev/null 2>&1
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" > /dev/null 2>&1 \
-      || log "apt install failed: ${missing[*]}"
-  fi
+boot=$(cfg boot); [ -n "$boot" ] && [ "$boot" != null ] || boot='{}'
+b() { jq -r "$1" <<< "$boot"; }
+boxd="$AGENT_BOX_DIR/rust/target/release/agent-boxd"
+
+missing=()
+for pkg in $(b '.packages // [] | .[]'); do command -v "$pkg" > /dev/null || missing+=("$pkg"); done
+if [ ${#missing[@]} -gt 0 ] && [ -n "$(b '.install // empty')" ]; then
+  bash -c "$(b '.install' | sed "s|{packages}|${missing[*]}|g")" || log "package install failed: ${missing[*]}"
 fi
 
-ensure_branch_clone "$AGENT_STATE_DIR" state
+ensure_branch_clone "$AGENT_STATE_DIR" "${STATE_BRANCH:-state}"
 ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"
 git -C "$AGENT_STATE_DIR" pull -q --ff-only 2>> "$AGENT_LOG" || log "state pull failed"
 
-backup="$AGENT_SESSIONS_DIR/hosts/$AGENT_HOST/projects"
-if [ -d "$backup" ]; then
-  mkdir -p "$CLAUDE_PROJECTS_DIR"
-  rsync -a --ignore-existing "$backup/" "$CLAUDE_PROJECTS_DIR/"
-fi
+# Each agent's backed-up transcripts this machine is missing.
+while IFS=$'\t' read -r root dest; do
+  backup="$AGENT_SESSIONS_DIR/hosts/$AGENT_HOST/$dest"
+  [ -d "$backup" ] || continue
+  mkdir -p "$root"
+  rsync -a --ignore-existing "$backup/" "$root/"
+done < <(python3 "$AGENT_BOX_DIR/bin/chat" _backup_roots 2>> "$AGENT_LOG")
 
 "$AGENT_BOX_DIR/bin/claude-hooks"
 
-if [ "$AGENT_HOST" = box ]; then
-  # The template's startup claude otherwise sits on the first-run theme
-  # picker (and, without enableAllProjectMcpServers above, on the project
-  # MCP approval), and SessionStart, which runs this script, never fires.
-  cfg="$HOME/.claude.json"
-  [ -s "$cfg" ] || echo '{}' > "$cfg"
+if [ "$(b '.claude_onboarding // false')" = true ]; then
+  # A startup claude otherwise sits on the first-run theme picker (and, without
+  # enableAllProjectMcpServers, on the project MCP approval), and SessionStart,
+  # which runs this script, never fires.
+  cfgfile="$HOME/.claude.json"
+  [ -s "$cfgfile" ] || echo '{}' > "$cfgfile"
   tmp=$(mktemp)
-  jq '.hasCompletedOnboarding = true | .theme = (.theme // "dark")' "$cfg" > "$tmp" && cat "$tmp" > "$cfg"
+  jq '.hasCompletedOnboarding = true | .theme = (.theme // "dark")' "$cfgfile" > "$tmp" && cat "$tmp" > "$cfgfile"
   rm -f "$tmp"
+fi
 
-  # GitLab refuses the box's ssh key; https works through Coder's GitLab
-  # credential helper. Route every gitlab.com ssh URL over https (glab's git
-  # protocol defaults to ssh, and only redo/ URLs were rewritten before).
-  for from in git@gitlab.com: ssh://git@gitlab.com/; do
-    git config --global --get-all url.https://gitlab.com/.insteadOf | grep -qxF "$from" \
-      || git config --global --add url.https://gitlab.com/.insteadOf "$from"
-  done
+# git URL rewrites, {to: [from, ...]} (the box: GitLab refuses its ssh key, so
+# every gitlab.com ssh URL goes over https through Coder's credential helper).
+while IFS=$'\t' read -r to from; do
+  [ -n "$to" ] || continue
+  git config --global --get-all "url.$to.insteadOf" | grep -qxF "$from" \
+    || git config --global --add "url.$to.insteadOf" "$from"
+done < <(b '.git_insteadof // {} | to_entries[] | .key as $to | .value[] | [$to, .] | @tsv')
 
-  # Second trigger: any ssh into the box runs boot if it hasn't run.
-  line='[ -f /tmp/agent-box-booted ] || AGENT_BOX_TRIGGER=ssh "$HOME/agent-box/bin/session-start" < /dev/null'
+if [ "$(b '.bashrc_hook // false')" = true ]; then
+  # Second trigger: any ssh into the machine runs boot if it hasn't run.
+  dir=$AGENT_BOX_DIR
+  [ "${dir#"$HOME"/}" != "$dir" ] && dir="\$HOME/${dir#"$HOME"/}"
+  line="[ -f /tmp/agent-box-booted ] || AGENT_BOX_TRIGGER=ssh \"$dir/bin/session-start\" < /dev/null"
   grep -qxF "$line" "$HOME/.bashrc" 2> /dev/null || printf '\n%s\n' "$line" >> "$HOME/.bashrc"
 fi
 
@@ -62,31 +70,37 @@ touch "$marker"
 # tmux's server outlives this script; keep it from inheriting the lock fd.
 exec 8>&-
 
-if [ "$AGENT_HOST" = box ]; then
-  # The template's AgentAPI claude runs `--continue` in ~/project, which would
-  # resume (and double-run) the newest primary chat. It has done its job of
-  # firing SessionStart by now.
-  pkill -f "^agentapi server" 2> /dev/null || true
-  tmux has-session -t =agent-box 2> /dev/null \
-    || tmux new-session -d -s agent-box "$AGENT_BOX_DIR/bin/chat supervise 2>&1 | tee -a $AGENT_HOME/log/supervisor.log"
-  tmux has-session -t =agent-box-web 2> /dev/null \
-    || tmux new-session -d -s agent-box-web "$AGENT_BOX_DIR/bin/dashboard --port 8790 2>&1 | tee -a $AGENT_HOME/log/dashboard.log"
-  # The app's terminal pane is the chrome; tmux's own status line would be noise.
-  tmux set -g status off 2> /dev/null
-  # Terminals: /?arg=<tmux session> attaches to that chat's tmux session.
-  tmux has-session -t =agent-box-tty 2> /dev/null \
-    || tmux new-session -d -s agent-box-tty "ttyd -i 127.0.0.1 -p 8791 -W -a -t fontSize=13 -t 'fontFamily=ui-monospace,SF Mono,Menlo,monospace' -t 'theme={\"background\":\"#1e1e1f\",\"foreground\":\"#d6d6d8\",\"cursor\":\"#d6d6d8\",\"selectionBackground\":\"#3a4252\"}' -t disableLeaveAlert=true tmux attach -t 2>&1 | tee -a $AGENT_HOME/log/ttyd.log"
-  # agent-boxd, the native app's daemon: rebuilt when its sources are newer than the binary.
-  if [ -d "$AGENT_BOX_DIR/rust/daemon" ] && { [ ! -x "$boxd" ] || [ -n "$(find "$AGENT_BOX_DIR/rust/daemon" \
-      "$AGENT_BOX_DIR/rust/protocol" \( -name '*.rs' -o -name Cargo.toml \) -newer "$boxd" | head -1)" ]; }; then
-    if (cd "$AGENT_BOX_DIR/rust" && "$HOME/.cargo/bin/cargo" build --release -q -p agent-boxd) \
-      >> "$AGENT_HOME/log/boxd-build.log" 2>&1; then
-      tmux kill-session -t =agent-boxd 2> /dev/null
-    else
-      log "agent-boxd build failed; see log/boxd-build.log"
-    fi
+# E.g. the box template's AgentAPI claude, which runs `--continue` in ~/project and would resume (and
+# double-run) the newest primary chat; it has done its job of firing SessionStart by now.
+while IFS= read -r pat; do
+  [ -n "$pat" ] && { pkill -f "$pat" 2> /dev/null || true; }
+done < <(b '.kill_patterns // [] | .[]')
+
+# The daemon is rebuilt when its sources are newer than the binary (a service with "build": true).
+build_daemon() {
+  [ -d "$AGENT_BOX_DIR/rust/daemon" ] || return 1
+  [ -x "$boxd" ] && [ -z "$(find "$AGENT_BOX_DIR/rust/daemon" "$AGENT_BOX_DIR/rust/protocol" \
+    \( -name '*.rs' -o -name Cargo.toml \) -newer "$boxd" | head -1)" ] && return 1
+  if (cd "$AGENT_BOX_DIR/rust" && "$HOME/.cargo/bin/cargo" build --release -q -p agent-boxd) \
+    >> "$AGENT_HOME/log/boxd-build.log" 2>&1; then
+    return 0
   fi
-  [ -x "$boxd" ] && { tmux has-session -t =agent-boxd 2> /dev/null \
-    || tmux new-session -d -s agent-boxd "$boxd run 2>&1 | tee -a $AGENT_HOME/log/boxd.log"; }
-fi
+  log "agent-boxd build failed; see log/boxd-build.log"
+  return 1
+}
+
+mkdir -p "$AGENT_HOME/log"
+while IFS=$'\t' read -r name build cmd; do
+  [ -n "$name" ] || continue
+  cmd=${cmd//\{agent_box_dir\}/$AGENT_BOX_DIR}
+  cmd=${cmd//\{agent_home\}/$AGENT_HOME}
+  cmd=${cmd//\{boxd\}/$boxd}
+  if [ "$build" = true ]; then
+    build_daemon && tmux kill-session -t "=$name" 2> /dev/null
+    [ -x "$boxd" ] || continue
+  fi
+  tmux has-session -t "=$name" 2> /dev/null || tmux new-session -d -s "$name" "$cmd"
+  # The app's terminal pane is the chrome; tmux's own status line would be noise.
+  [ "$(b '.tmux_status_off // false')" = true ] && tmux set -g status off 2> /dev/null
+done < <(b '.services // [] | .[] | [.name, (.build // false | tostring), .cmd] | @tsv')
 log "boot done"
