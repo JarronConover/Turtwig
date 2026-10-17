@@ -90,7 +90,7 @@ macro_rules! trampoline {
     };
 }
 
-const TRAMPOLINES: [Callback; 8] = trampoline!(0, 1, 2, 3, 4, 5, 6, 7);
+const TRAMPOLINES: [Callback; 32] = trampoline!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
 
 impl Engine {
     pub fn new() -> Self {
@@ -98,7 +98,7 @@ impl Engine {
         Engine { ctx: unsafe { JSGlobalContextCreate(std::ptr::null_mut()) } }
     }
 
-    /** Defines a global function `name`; up to eight per engine. */
+    /** Defines a global function `name`; up to 32 per engine. */
     pub fn define(&mut self, name: &str, f: Native) {
         let ix = NATIVES.with(|n| {
             let mut n = n.borrow_mut();
