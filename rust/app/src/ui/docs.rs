@@ -272,7 +272,7 @@ pub fn write_reference() {
     let defaults = settings::defaults_value();
     let mut md = String::from(GUIDE);
     md.push_str("\n## Node types\n\n| type | what it is |\n| --- | --- |\n");
-    for (t, d) in NODE_TYPES {
+    for (t, d) in all_node_types() {
         md.push_str(&format!("| `{t}` | {d} |\n"));
     }
     md.push_str("\n## Style keys\n\n| key | value |\n| --- | --- |\n");
@@ -280,7 +280,7 @@ pub fn write_reference() {
         md.push_str(&format!("| `{k}` | {d} |\n"));
     }
     md.push_str("\n## Actions\n\nUsed by `on`, `menu`, `keys`, and `commands`. An action is a name (`\"palette.open\"`), an object\n`{\"do\": \"name\", ...args}`, or a list of actions run in order.\n\n| action | arguments |\n| --- | --- |\n");
-    for (a, d) in ACTIONS.iter().chain(crate::ui::trace_view::ACTIONS).chain(crate::ui::diff_view::ACTIONS).chain(crate::terminal::ACTIONS) {
+    for (a, d) in all_actions() {
         md.push_str(&format!("| `{a}` | {d} |\n"));
     }
     md.push_str("\n## Theme tokens in the defaults\n\n");
@@ -311,9 +311,17 @@ pub fn write_reference() {
     }
 }
 
+fn all_node_types() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    NODE_TYPES.iter().chain(crate::ui::widgets::NODE_TYPES)
+}
+
+fn all_actions() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    ACTIONS.iter().chain(crate::ui::trace_view::ACTIONS).chain(crate::ui::diff_view::ACTIONS).chain(crate::terminal::ACTIONS).chain(crate::ui::drive::ACTIONS)
+}
+
 fn schema() -> Value {
-    let types: Vec<&str> = NODE_TYPES.iter().map(|(t, _)| *t).filter(|t| !t.starts_with('<')).collect();
-    let actions: Vec<String> = ACTIONS.iter().chain(crate::ui::trace_view::ACTIONS).chain(crate::ui::diff_view::ACTIONS).chain(crate::terminal::ACTIONS).flat_map(|(a, _)| a.split(" / ").map(str::to_string)).collect();
+    let types: Vec<&str> = all_node_types().map(|(t, _)| *t).filter(|t| !t.starts_with('<')).collect();
+    let actions: Vec<String> = all_actions().flat_map(|(a, _)| a.split(" / ").map(str::to_string)).collect();
     let styles: serde_json::Map<String, Value> = STYLE_KEYS
         .iter()
         .flat_map(|(k, d)| k.split(" / ").map(move |k| (k.to_string(), json!({"description": d}))))

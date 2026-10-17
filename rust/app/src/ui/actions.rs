@@ -992,6 +992,7 @@ impl Workspace {
             other if crate::ui::trace_view::dispatch(self, other, a, window, cx) => {}
             other if crate::ui::diff_view::dispatch(self, other, a, window, cx) => {}
             other if crate::terminal::dispatch(self, other, a, window, cx) => {}
+            other if crate::ui::drive::dispatch(self, other, a, window, cx) => {}
             other => self.exprs.note(format!("unknown action `{other}`")),
         }
         self.pending_motion = true;

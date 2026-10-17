@@ -72,6 +72,7 @@ impl Workspace {
             "clickable": self.clickables_last.iter().map(|(id, label, _)| json!({"id": id, "label": label})).collect::<Vec<_>>(),
             "menus": self.menus_last.iter().map(|(id, tip, _, _)| json!({"id": id, "label": tip})).collect::<Vec<_>>(),
             "composers": self.composers.iter().map(|(chat, c)| (chat.clone(), Value::String(c.read(cx).value().to_string()))).collect::<serde_json::Map<_, _>>(),
+            "ui": crate::ui::drive::inspect(self, window, cx),
             "layout": layout.into_iter().map(|(k, b)| json!({"id": k, "x": b[0], "y": b[1], "w": b[2], "h": b[3]})).collect::<Vec<_>>(),
         });
         let text = serde_json::to_string_pretty(&doc).unwrap_or_default();

@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod attach_view;
 pub mod diff_view;
+pub mod drive;
 pub mod docs;
 pub mod expr;
 pub mod inspect;
@@ -9,3 +10,4 @@ pub mod patch;
 pub mod render;
 pub mod style;
 pub mod trace_view;
+pub mod widgets;

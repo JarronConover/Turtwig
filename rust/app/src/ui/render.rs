@@ -13,6 +13,15 @@ use jaq_json::Val;
 use serde_json::{Map, Value};
 use std::time::{Duration, Instant};
 
+thread_local! {
+    /** The context `views.main` was drawn with this frame, for parts drawn outside the node tree (list rows). */
+    static FRAME_CTX: std::cell::RefCell<Option<Val>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn frame_ctx() -> Val {
+    FRAME_CTX.with(|c| c.borrow().clone()).unwrap_or_else(|| to_val(&Value::Object(Map::new())))
+}
+
 /** A style value easing toward its latest target: numbers use one lane, colors four (RGBA). */
 pub struct Transition {
     from: Vec<f32>,
@@ -99,7 +108,23 @@ impl Workspace {
         div().child(icon.rotate(percentage(ease_in_out(t)))).into_any_element()
     }
 
+    /** A settings replacement for a built-in part: `spec` is a component name or a node, drawn with `.props`
+    over this frame's context. None when `spec` is unset, null or false (the caller draws its own look). */
+    pub(crate) fn render_part(&mut self, spec: Option<&Value>, props: Value, path: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let node = match spec? {
+            Value::String(name) if !name.is_empty() => serde_json::json!({ "type": name }),
+            n @ Value::Object(_) => n.clone(),
+            _ => return None,
+        };
+        let ctx = with(&frame_ctx(), vec![("props".into(), to_val(&props))]);
+        let mut els = self.render(&node, &ctx, path, window, cx);
+        Some(if els.len() == 1 { els.pop().unwrap_or_else(|| div().into_any_element()) } else { div().flex().flex_col().children(els).into_any_element() })
+    }
+
     pub(crate) fn render_view(&mut self, name: &str, ctx: &Val, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if name == "main" {
+            FRAME_CTX.with(|c| *c.borrow_mut() = Some(ctx.clone()));
+        }
         let Some(node) = self.settings.views.get(name).cloned() else {
             return div().child(format!("No view named `{name}` in settings.views")).into_any_element();
         };
@@ -319,6 +344,7 @@ impl Workspace {
                 let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
                 self.attachments_view(chat, &props, cx).into_iter().collect()
             }
+            k if super::widgets::NODE_TYPES.iter().any(|(n, _)| *n == k) => self.render_widget(k, &id, &props, obj, ctx, &st, window, cx),
             "resize_handle" => vec![],
             "scroll" => vec![],
             _ => vec![],
@@ -521,7 +547,7 @@ impl Workspace {
                 }));
             }
             for event in on.keys() {
-                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down" | "drop" | "drop_item") && !(event == "submit" && kind == "input") {
+                if !matches!(event.as_str(), "click" | "double_click" | "mouse_down" | "drop" | "drop_item") && !(event == "submit" && kind == "input") && !super::widgets::EVENTS.contains(&event.as_str()) {
                     self.exprs.note(format!("unknown event `{event}` at {path}"));
                 }
             }
