@@ -256,10 +256,16 @@ impl Workspace {
     }
     fn markdown(&self, key: &str, text: &str, theme: &Map<String, Value>) -> TextView {
         let selectable = self.settings.chat.get("selectable").and_then(Value::as_bool) != Some(false);
-        let angles = self.settings.chat.get("markdown").and_then(|m| m.get("show_angle_brackets")).and_then(Value::as_bool) != Some(false);
+        let md = self.settings.chat.get("markdown").and_then(Value::as_object).cloned();
+        self.markdown_with(key, text, md.as_ref(), selectable, theme)
+    }
+
+    /** Markdown drawn with `md` (the shape of `chat.markdown`; None: the built-in look). */
+    pub(crate) fn markdown_with(&self, key: &str, text: &str, md: Option<&Map<String, Value>>, selectable: bool, theme: &Map<String, Value>) -> TextView {
+        let angles = md.and_then(|m| m.get("show_angle_brackets")).and_then(Value::as_bool) != Some(false);
         let text = if angles { show_angle_brackets(text) } else { text.to_string() };
         let view = TextView::markdown(SharedString::from(key.to_string()), text).selectable(selectable);
-        match self.markdown_style(theme) {
+        match md.and_then(|md| self.markdown_style_of(md, theme)) {
             Some(st) => view.style(st),
             None => view,
         }
@@ -268,8 +274,7 @@ impl Workspace {
     /** settings `chat.markdown`: paragraph_gap (rem), heading_sizes (h1..h6 points), style objects for
     code_block, table, table_head, table_cell, `theme` ("dark", "light", or "auto": `window.appearance`), and
     `highlight` ("dark", "light", or a Zed-format theme JSON file) for code colors. Unset: the built-in look. */
-    pub(crate) fn markdown_style(&self, theme: &Map<String, Value>) -> Option<gpui_kit::component::text::TextViewStyle> {
-        let md = self.settings.chat.get("markdown").and_then(Value::as_object)?;
+    fn markdown_style_of(&self, md: &Map<String, Value>, theme: &Map<String, Value>) -> Option<gpui_kit::component::text::TextViewStyle> {
         let refine = |k: &str| {
             let mut r = StyleRefinement::default();
             if let Some(o) = md.get(k).and_then(Value::as_object) {
@@ -559,7 +564,7 @@ impl Workspace {
                 line_style.insert(k, v);
             }
         }
-        let hover = line_style.get("hover").and_then(Value::as_object).cloned().unwrap_or_default();
+        let hover = if expandable { line_style.get("hover").and_then(Value::as_object).cloned().unwrap_or_default() } else { line_style.remove("hover"); Map::new() };
         let fg = line_style.get("color").and_then(|v| style::color(v, theme));
         let look = LineLook::of(&self.settings.chat);
         let icon_el = Icon::empty().path(format!("icons/{icon}.svg")).size(px(look.icon_size)).when_some(fg, |i, c| i.text_color(c));

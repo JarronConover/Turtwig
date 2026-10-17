@@ -6,6 +6,7 @@ use crate::diff::{self, Kind, Row};
 use crate::workspace::Workspace;
 use agent_box_protocol::Call;
 use gpui_kit::component::Icon;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -314,7 +315,7 @@ impl Workspace {
                 let row = match custom {
                     Some(el) => div().id(("diff-file", i)).cursor_pointer().child(el).on_click(jump).into_any_element(),
                     None => style::apply(div().id(("diff-file", i)).flex().flex_row().items_center().cursor_pointer(), &st("file_row"), &theme)
-                        .hover(move |s| s.bg(hover_bg))
+                        .when(!st("file_row").contains_key("hover"), |d| d.hover(move |s| s.bg(hover_bg)))
                         .child(div().w(px(look.sign_w)).flex_shrink_0().text_color(look.status(f.status)).child(f.status.to_string()))
                         .child(div().flex_1().min_w_0().truncate().child(name).child(div().text_color(look.muted).text_size(px(11.)).truncate().child(dir)))
                         .child(div().text_size(px(11.)).text_color(look.add_fg).child(look.label("added", "+{n}", Some(f.added))))
