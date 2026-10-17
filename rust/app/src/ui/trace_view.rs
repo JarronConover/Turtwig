@@ -877,11 +877,11 @@ mod look_tests {
         assert_eq!((b.1.as_str(), b.2.as_str()), ("Ls -la", "Failed: Ls -la"));
         assert_eq!(describe("TodoWrite", &json!({}), "", 10, None).1, "Updated the plan");
         assert_eq!(describe("mcp__linear__get_issue", &json!({}), "X-1", 10, None).1, "linear · get_issue: X-1");
+        assert_eq!(describe("Read", &json!({"file_path": "/a/1792164281008-shot.png"}), "", 0, None).1, "Read 1792164281008-shot.png");
         crate::transcript::set_options(&json!({"tools": {"Read": {"done": "Opened", "icon": "eye"}, "*": {"failed": "Broke:"}}, "tool_names": {"separator": "/"}}));
         let t = describe("Read", &json!({"file_path": "x.rs"}), "", 10, None);
         assert_eq!((t.1.as_str(), t.3.as_str()), ("Opened x.rs", "eye"));
         assert_eq!(describe("mcp__a__b", &json!({}), "", 10, None).2, "Broke: a/b");
-        assert_eq!(describe("Read", &json!({"file_path": "/a/1792164281008-shot.png"}), "", 0, None).1, "Read 1792164281008-shot.png");
         assert_eq!(describe("Grep", &json!({}), "", 10, Some("TODOs".into())).1, "Searched for TODOs");
         assert_eq!(super::strip_stamp("2024-report.pdf", 10), "2024-report.pdf");
         assert_eq!(super::strip_stamp("2024-report.pdf", 1), "report.pdf");
