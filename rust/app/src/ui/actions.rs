@@ -50,7 +50,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("nav.back / nav.forward", "{steps?}: go back or forward through the worktrees and chats you've looked at, like a browser (`.app.nav.back` / `.forward` say whether you can; `.app.nav.visits` lists them)"),
     ("transcript.load_earlier", "{chat?}: load `chat.transcript_page` more of a long chat's older messages (scrolling to the top does this too)"),
     ("worktree.rename_branch", "{path, branch?}: rename the worktree's git branch (asks when branch is missing)"),
-    ("worktree.new", "{repo?, host?, branch?, select?, then?}: a worktree on that branch, checked out if it exists, else new from origin/main (asks when branch is missing); repo / host default to `worktree.default_repo` / `worktree.default_host` (else `app.default_host`); select (default `worktree.select`) shows it; `then` runs with its `.path`. (A base other than origin/main needs a daemon change.)"),
+    ("worktree.new", "{repo?, host?, branch?, base?, name?, select?, then?}: a worktree on that branch, checked out if it exists, else new from origin/<base> (default the repo's default branch) in a folder named name (asks when branch is missing); repo / host default to `worktree.default_repo` / `worktree.default_host` (else `app.default_host`); select (default `worktree.select`) shows it; `then` runs with its `.path`"),
     ("project.settings", "{repo}: edit the project's name, badge letter and color (saved in state as project_name:REPO, project_letter:REPO, project_hue:REPO)"),
     ("project.open_remote", "{path}: open the repo's origin (GitLab, GitHub) in the browser, at `project.remote_url_template` ({host}, {path})"),
     ("project.unhide", "{repo}: show the project's hidden worktrees again (hidden ones have state hidden:PATH)"),
@@ -81,7 +81,6 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("app.snapshot", "{path?, then?}: capture the window to path (default snapshot.png in the settings folder, for agents to look at); then `then` runs with `.path`, and the `app.snapshot_done` event fires"),
     ("drop.preview", "{key, zone: before|inside|after, kind?, value?}: show a drop target's indicator without dragging (for styling), as if `value` were being dragged; cleared by the next drag"),
     ("diff.refresh", "reload the selected worktree's diff now"),
-    ("diff.collapse_all / diff.expand_all", "collapse or expand every file in the diff"),
     ("designer.send", "{text}: ask the designer (a local agent that edits these settings live) for a change"),
     ("designer.reset", "end the designer conversation and start fresh"),
     ("designer.history", "reread the designer's past conversations into `.designer.sessions` (newest first: id, title (the latest message), first, messages, age_text, current)"),
@@ -169,13 +168,18 @@ impl Workspace {
         .detach();
     }
 
-    /** A worktree on `branch` in `repo` on `host`; selected when `select`, then `then` runs with `.path`. */
-    fn new_worktree(&mut self, repo: String, host: String, branch: String, select: bool, then: Option<Value>, cx: &mut Context<Self>) {
+    /** A worktree on `branch` in `repo` on `host` (new ones from `base`, in a folder named `name`); selected
+    when `select`, then `then` runs with `.path`. */
+    #[allow(clippy::too_many_arguments)]
+    fn new_worktree(&mut self, repo: String, host: String, branch: String, base: Option<String>, name: Option<String>, select: bool, then: Option<Value>, cx: &mut Context<Self>) {
         let remote = self.remote_for_host(&host);
         self.status = self.tr("making_worktree", "Making a worktree for {branch}…", &[("branch", &branch)]);
         cx.notify();
+        let branch = branch.trim().to_string();
+        // The plain call when nothing else is asked, so daemons from before WorktreeCreateWith still work.
+        let call = if base.is_none() && name.is_none() { Call::WorktreeCreate { repo, branch } } else { Call::WorktreeCreateWith { repo, branch, base, name } };
         cx.spawn(async move |this, cx| {
-            let res = remote.call(Call::WorktreeCreate { repo, branch: branch.trim().to_string() }).await;
+            let res = remote.call(call).await;
             this.update(cx, |ws, cx| {
                 match res {
                     Ok(v) => {
@@ -704,11 +708,12 @@ impl Workspace {
                 let host = s("host").or_else(|| self.settings.get("worktree.default_host").and_then(Value::as_str).map(str::to_string)).unwrap_or_else(|| self.default_host());
                 let select = a.get("select").and_then(Value::as_bool).or_else(|| self.settings.get("worktree.select").and_then(Value::as_bool)).unwrap_or(true);
                 let then = a.get("then").cloned();
+                let (base, folder) = (s("base"), s("name"));
                 match s("branch") {
-                    Some(b) => self.new_worktree(repo, host, b, select, then, cx),
+                    Some(b) => self.new_worktree(repo, host, b, base, folder, select, then, cx),
                     None => {
                         let title = self.tr("new_worktree_title", "New {repo} worktree from branch (new or existing)", &[("repo", &repo)]);
-                        self.name_dialog(&title, "", window, cx, move |ws, b, cx| ws.new_worktree(repo.clone(), host.clone(), b, select, then.clone(), cx));
+                        self.name_dialog(&title, "", window, cx, move |ws, b, cx| ws.new_worktree(repo.clone(), host.clone(), b, base.clone(), folder.clone(), select, then.clone(), cx));
                     }
                 }
             }
@@ -976,6 +981,7 @@ impl Workspace {
                     .map(|(_, _, a)| a.clone());
                 match hit {
                     Some(action) => self.run_action(&action, window, cx),
+                    None if crate::ui::drive::reveal_and_click(self, id.as_deref(), a) => {}
                     None => self.exprs.note(format!("ui.click: nothing clickable matches {}", id.or(label).unwrap_or_default())),
                 }
             }
@@ -1002,11 +1008,6 @@ impl Workspace {
                     d.fetched = d.fetched.map(|t| t - std::time::Duration::from_secs(10));
                 }
             }
-            "diff.collapse_all" => {
-                let paths: Vec<String> = self.diffs.values().flat_map(|d| d.files.iter().map(|f| f.path.clone())).collect();
-                self.diff_collapsed.extend(paths);
-            }
-            "diff.expand_all" => self.diff_collapsed.clear(),
             "designer.send" => {
                 if let Some(t) = s("text") {
                     self.designer_send(t, cx);
@@ -1248,6 +1249,7 @@ impl Workspace {
             other if crate::ui::trace_view::dispatch(self, other, a, window, cx) => {}
             other if crate::ui::diff_view::dispatch(self, other, a, window, cx) => {}
             other if crate::terminal::dispatch(self, other, a, window, cx) => {}
+            other if crate::ui::drive::dispatch(self, other, a, window, cx) => {}
             other => self.exprs.note(format!("unknown action `{other}`")),
         }
         self.pending_motion = true;

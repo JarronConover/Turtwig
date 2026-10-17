@@ -1,6 +1,5 @@
-/*! Token usage from every agent session on this machine: Claude Code (~/.claude/projects) and Codex
-(~/.codex/sessions), per session, by model, day and prompt size. Files are read once, then only new lines;
-each Claude message id and each Codex token count counts once. Codex rollouts also carry its plan limits. */
+/*! Token usage from every agent session on this machine (each agent's `transcripts_root`, read by its
+`transcripts` format), per session, by model, day and prompt size; Codex rollouts also carry plan limits. */
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -8,13 +7,21 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/** Context sizes past which some models price higher (Anthropic's 200k, OpenAI's 272k, ...). */
+/** Context sizes past which some models price higher (Anthropic's 200k, OpenAI's 272k, ...): `usage_size_bounds`. */
 const SIZE_BOUNDS: [u64; 6] = [100_000, 128_000, 200_000, 272_000, 400_000, 1_000_000];
+
+fn size_bounds() -> Vec<u64> {
+    let mut b: Vec<u64> = crate::config::get("usage_size_bounds")
+        .and_then(|v| v.as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()))
+        .unwrap_or_else(|| SIZE_BOUNDS.to_vec());
+    b.sort_unstable();
+    b
+}
 
 /** A prompt's size bucket, as the smallest size in it (0, or one past a bound), so a rate tier for
 `size` applies when the bucket is over it. */
 fn size_class(prompt: u64) -> u64 {
-    SIZE_BOUNDS.iter().rev().find(|b| prompt > **b).map_or(0, |b| b + 1)
+    size_bounds().iter().rev().find(|b| prompt > **b).map_or(0, |b| b + 1)
 }
 
 /** Tokens: input, output, cache writes (5 minute), cache writes (1 hour), cache reads. */
@@ -73,7 +80,7 @@ fn add(f: &mut FileUsage, model: String, ts: &str, prompt: u64, t: Tokens) {
 event whose running total moved adds its last call's tokens (input includes the cached part). A fork or
 subagent rollout starts by replaying its parent's history, token counts included, before any model is
 set: those only set the running total, so they aren't counted twice. */
-fn read_codex(path: &Path, f: &mut FileUsage) {
+fn read_codex(path: &Path, f: &mut FileUsage, limits_field: &str) {
     let Some(buf) = new_lines(path, f) else { return };
     for line in buf.split(|b| *b == b'\n') {
         let interesting = find(line, b"\"token_count\"").is_some() || find(line, b"\"model\"").is_some() || (f.dir.is_none() && find(line, b"\"session_meta\"").is_some());
@@ -91,8 +98,8 @@ fn read_codex(path: &Path, f: &mut FileUsage) {
             ("turn_context", _) => f.model = p["model"].as_str().map(str::to_string).or(f.model.take()),
             (_, "thread_settings_applied") => f.model = p.pointer("/thread_settings/model").and_then(Value::as_str).map(str::to_string).or(f.model.take()),
             (_, "token_count") => {
-                if p["rate_limits"].is_object() {
-                    f.limits = Some((ts.to_string(), p["rate_limits"].clone()));
+                if p[limits_field].is_object() {
+                    f.limits = Some((ts.to_string(), p[limits_field].clone()));
                 }
                 let total = p.pointer("/info/total_token_usage/total_tokens").and_then(Value::as_u64).unwrap_or(0);
                 if total == 0 || total == f.total {
@@ -155,10 +162,9 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /** Codex rollouts, `rollout-<time>-<session id>.jsonl` by day, plus archived ones (one path per id). */
-fn codex_paths() -> Vec<(String, PathBuf)> {
-    let root = crate::util::home().join(".codex");
+fn codex_paths(roots: Vec<PathBuf>) -> Vec<(String, PathBuf)> {
     let mut out: HashMap<String, PathBuf> = HashMap::new();
-    let mut stack = vec![root.join("sessions"), root.join("archived_sessions")];
+    let mut stack = roots;
     while let Some(d) = stack.pop() {
         for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
             let p = e.path();
@@ -183,10 +189,10 @@ fn codex_paths() -> Vec<(String, PathBuf)> {
 /** Every session's usage (subagent files count toward their session): `{host, sessions: [{id, agent,
 provider, dir, last, tokens: [[model, day, size, input, output, cache_write_5m, cache_write_1h, cache_read],
 ...]}], plans: [{provider, at, rate_limits}]}`. `size` is the smallest prompt size in the row's bucket. */
-pub fn scan() -> Value {
-    let root = crate::util::home().join(".claude").join("projects");
+/** Claude Code session files under a projects folder, subagents' filed under their session. */
+fn claude_paths(root: &Path) -> Vec<(String, PathBuf)> {
     let mut paths: Vec<(String, PathBuf)> = vec![];
-    for project in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+    for project in std::fs::read_dir(root).into_iter().flatten().flatten() {
         for e in std::fs::read_dir(project.path()).into_iter().flatten().flatten() {
             let p = e.path();
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -202,38 +208,75 @@ pub fn scan() -> Value {
             }
         }
     }
+    paths
+}
+
+pub fn scan() -> Value {
+    use crate::agents;
+    let (mut claude, mut codex): (Vec<(String, String, PathBuf)>, Vec<(String, String, Vec<PathBuf>, String)>) = (vec![], vec![]);
+    let mut seen_roots = HashSet::new();
+    for a in agents::names() {
+        let format = agents::format(&a);
+        let default_root = if format == "codex" { "~/.codex/sessions" } else { "~/.claude/projects" };
+        let root = agents::expand(&agents::text(&a, "transcripts_root", &agents::text(&a, "sessions_dir", default_root)));
+        if !seen_roots.insert(root.clone()) {
+            continue;
+        }
+        let provider = agents::text(&a, "provider", if format == "codex" { "openai" } else { "anthropic" });
+        match format.as_str() {
+            "codex" => {
+                let mut roots = vec![root];
+                if let Some(archived) = agents::get(&a, "archived_dir").and_then(|v| v.as_str().map(agents::expand)) {
+                    roots.push(archived);
+                }
+                codex.push((a.clone(), provider, roots, agents::text(&a, "limits_field", "rate_limits")));
+            }
+            "claude" => claude.push((a.clone(), provider, root)),
+            _ => {}
+        }
+    }
     let mut all = FILES.lock().unwrap();
     let files = all.get_or_insert_with(HashMap::new);
-    let mut sessions: HashMap<String, (Option<String>, Option<String>, Vec<Value>, &str)> = HashMap::new();
-    let mut codex_limits: Option<(String, Value)> = None;
-    for (id, p) in codex_paths() {
-        let f = files.entry(p.clone()).or_default();
-        read_codex(&p, f);
-        if f.limits.as_ref().is_some_and(|(at, _)| codex_limits.as_ref().is_none_or(|(best, _)| at > best)) {
-            codex_limits = f.limits.clone();
+    let mut sessions: HashMap<String, (Option<String>, Option<String>, Vec<Value>, String, String)> = HashMap::new();
+    let mut plans: Vec<Value> = vec![];
+    for (agent, provider, roots, limits_field) in codex {
+        let mut limits: Option<(String, Value)> = None;
+        for (id, p) in codex_paths(roots) {
+            let f = files.entry(p.clone()).or_default();
+            read_codex(&p, f, &limits_field);
+            if f.limits.as_ref().is_some_and(|(at, _)| limits.as_ref().is_none_or(|(best, _)| at > best)) {
+                limits = f.limits.clone();
+            }
+            let own = f.session.as_ref().is_none_or(|root| *root == id);
+            let s = sessions.entry(f.session.clone().unwrap_or(id)).or_default();
+            (s.3, s.4) = (agent.clone(), provider.clone());
+            if own || s.0.is_none() {
+                s.0 = f.dir.clone();
+            }
+            if f.last > s.1 {
+                s.1 = f.last.clone();
+            }
+            for ((model, day, size), t) in &f.totals {
+                s.2.push(json!([model, day, size, t[0], t[1], t[2], t[3], t[4]]));
+            }
         }
-        let own = f.session.as_ref().is_none_or(|root| *root == id);
-        let s = sessions.entry(f.session.clone().unwrap_or(id)).or_default();
-        s.3 = "codex";
-        if own || s.0.is_none() {
-            s.0 = f.dir.clone();
+        if let Some((at, l)) = limits {
+            plans.push(json!({"provider": provider, "agent": agent, "at": at, "rate_limits": l}));
         }
-        if f.last > s.1 {
-            s.1 = f.last.clone();
-        }
-        for ((model, day, size), t) in &f.totals {
-            s.2.push(json!([model, day, size, t[0], t[1], t[2], t[3], t[4]]));
-        }
+    }
+    let mut paths: Vec<(String, PathBuf, String, String)> = vec![];
+    for (agent, provider, root) in claude {
+        paths.extend(claude_paths(&root).into_iter().map(|(id, p)| (id, p, agent.clone(), provider.clone())));
     }
     let mut seen_all = SEEN.lock().unwrap();
     let seen = seen_all.get_or_insert_with(HashSet::new);
     // Older files first, so a fork's copies are skipped rather than its parent's originals.
-    paths.sort_by_key(|(_, p)| std::fs::metadata(p).and_then(|m| m.created().or_else(|_| m.modified())).ok());
-    for (id, p) in paths {
+    paths.sort_by_key(|(_, p, ..)| std::fs::metadata(p).and_then(|m| m.created().or_else(|_| m.modified())).ok());
+    for (id, p, agent, provider) in paths {
         let f = files.entry(p.clone()).or_default();
         read_new(&p, f, seen);
         let s = sessions.entry(id).or_default();
-        s.3 = "claude";
+        (s.3, s.4) = (agent, provider);
         if s.0.is_none() && !p.to_string_lossy().contains("/subagents/") {
             s.0 = f.dir.clone();
         }
@@ -245,16 +288,15 @@ pub fn scan() -> Value {
         }
     }
     json!({
-        "host": crate::mac::host(),
+        "host": crate::hosts::here(),
         "sessions": sessions
             .into_iter()
             .filter(|(_, s)| !s.2.is_empty())
-            .map(|(id, (dir, last, tokens, agent))| {
-                let provider = if agent == "codex" { "openai" } else { "anthropic" };
+            .map(|(id, (dir, last, tokens, agent, provider))| {
                 json!({"id": id, "agent": agent, "provider": provider, "dir": dir, "last": last, "tokens": tokens})
             })
             .collect::<Vec<_>>(),
-        "plans": codex_limits.map(|(at, l)| vec![json!({"provider": "openai", "at": at, "rate_limits": l})]).unwrap_or_default(),
+        "plans": plans,
     })
 }
 
@@ -280,7 +322,7 @@ mod tests {
         ];
         std::fs::write(&p, lines.join("\n") + "\n").unwrap();
         let mut f = FileUsage::default();
-        read_codex(&p, &mut f);
+        read_codex(&p, &mut f, "rate_limits");
         assert_eq!(f.dir.as_deref(), Some("/w"));
         let t = f.totals.get(&("gpt-6-sol".to_string(), "2026-10-09".to_string(), 0)).copied().unwrap();
         assert_eq!(t, [1200, 100, 0, 0, 800]);

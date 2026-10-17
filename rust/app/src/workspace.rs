@@ -385,9 +385,9 @@ pub struct Workspace {
     badge: Option<String>,
     dock_icon: Option<Vec<u8>>,
     pub(crate) diff_collapsed: HashSet<String>,
-    /** Where the diff's rows are: first and last row drawn, row height, each file's header row (inspect.json). */
+    /** Per diff (`PATH|BASE`): rows drawn, row height, each file's header row (inspect.json). */
     pub(crate) diff_geom: std::rc::Rc<std::cell::RefCell<Value>>,
-    pub(crate) diff_scroll: UniformListScrollHandle,
+    pub(crate) diff_scroll: HashMap<String, crate::ui::diff_view::DiffScroll>,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     pub(crate) _subscriptions: Vec<Subscription>,
@@ -614,7 +614,7 @@ impl Workspace {
             dock_icon: None,
             diff_collapsed: HashSet::new(),
             diff_geom: Default::default(),
-            diff_scroll: UniformListScrollHandle::new(),
+            diff_scroll: HashMap::new(),
             focus: cx.focus_handle(),
             _tasks: [watch, env_push, designer_listen, usage_loop, update_loop].into_iter().chain(clicks).collect(),
             _subscriptions: vec![],
@@ -2441,8 +2441,8 @@ impl Workspace {
             // Skills of a worktree on another machine come from this Mac's checkout of its repo (`chat.local_repo_path`).
             let template = self.settings.text_at("chat.local_repo_path", "~/dev/{project}");
             let local = w.as_ref().filter(|w| !self.is_local_host(&w.host)).map(|w| template.replace("{project}", &w.project).replace("{repo}", &w.repo));
-            let all = crate::completions::entries(&self.settings, w.as_ref().map(|w| w.path.as_str()), local.as_deref());
-            let items = crate::completions::filter(&all, &query, self.settings.num("chat.completion_limit", 12.) as usize);
+            let all = crate::completions::entries(&self.settings, &trigger, w.as_ref().map(|w| w.path.as_str()), local.as_deref());
+            let items = crate::completions::filter(&all, &query, self.settings.num("chat.completion_limit", 12.) as usize, self.settings.get("chat.completion_rank").and_then(Value::as_str).unwrap_or("default"));
             let keep = self.completion.as_ref().filter(|c| c.0 == chat).map(|c| c.3).unwrap_or(0);
             (!items.is_empty()).then(|| (chat.to_string(), trigger, items.clone(), keep.min(items.len().saturating_sub(1))))
         });
@@ -3638,7 +3638,7 @@ impl Workspace {
                 .into_any_element()
         });
         let row_view = chat_id.clone();
-        let rows = list(state.clone(), cx.processor(move |ws: &mut Workspace, ix: usize, _, cx| ws.transcript_row(&row_view, ix, cx))).size_full();
+        let rows = list(state.clone(), cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| ws.transcript_row(&row_view, ix, window, cx))).size_full();
         let jump = self.jump_chip(&chat_id, &state, &theme, window, cx);
         let overlay = self.drop_overlay(&chat_id, cx);
         let shift_holds = cs.get("code_scroll").and_then(|c| c.get("shift_holds_transcript")).and_then(Value::as_bool) != Some(false);
@@ -3656,6 +3656,7 @@ impl Workspace {
                 let _ = drop_view.update(cx, |ws, cx| ws.attach(chat, files, window, cx));
             }))
             .child(rows)
+            .when_some(crate::ui::render::scrollbar_mode(cs.get("scrollbar")), |d, m| d.child(gpui_kit::component::scroll::Scrollbar::vertical(&state).mode(m)))
             .when(shift_holds, |d| d.child(crate::ui::trace_view::shift_scroll_layer(None, 1.)))
             .children(jump)
             .children(loading_earlier)
@@ -3778,10 +3779,10 @@ impl Workspace {
         l.state.clone()
     }
 
-    fn transcript_row(&mut self, chat_id: &str, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn transcript_row(&mut self, chat_id: &str, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some((blocks, working)) = self.lists.get(chat_id).map(|l| (l.blocks.clone(), l.working)) else { return div().into_any_element() };
         let Some(t) = self.transcripts.remove(chat_id) else { return div().into_any_element() };
-        let row = self.render_block(chat_id, &t.items, &blocks, ix, working, cx);
+        let row = self.render_block(chat_id, &t.items, &blocks, ix, working, window, cx);
         self.transcripts.insert(chat_id.to_string(), t);
         // `chat.list` styles the column the rows sit in: its gap goes between rows, its padding around them.
         let mut ls = self.settings.chat.get("list").and_then(Value::as_object).cloned().unwrap_or_default();
@@ -3831,6 +3832,7 @@ impl Workspace {
         let text = if unseen { label("new", "New messages") } else { label("latest", "Jump to latest") };
         let st = self.settings.chat.get("jump").and_then(Value::as_object).cloned().unwrap_or_default();
         let id = chat_id.to_string();
+        self.clickables.push((format!("jump:{chat_id}"), text.clone(), json!({"do": "chat.jump_to_latest", "chat": chat_id})));
         let chip = style::apply(h_flex().id(SharedString::from(format!("jump:{chat_id}"))).gap(px(6.)).items_center().cursor_pointer(), &st, theme)
             .child(gpui_kit::component::Icon::empty().path(format!("icons/{}.svg", self.settings.get("chat.jump_icon").and_then(Value::as_str).unwrap_or("arrow-down"))).size(px(self.settings.num("chat.jump_icon_size", 13.) as f32)))
             .child(text)
@@ -3959,7 +3961,7 @@ impl Workspace {
             style::apply(div().id(SharedString::from(format!("drop:{chat_id}"))).absolute().inset(px(8.)).flex().flex_col().items_center().justify_center(), &st, &theme)
                 .opacity(0.)
                 .drag_over::<ExternalPaths>(|s, _, _, _| s.opacity(1.))
-                .child(gpui_kit::component::Icon::empty().path(format!("icons/{icon}.svg")).size(px(22.)).text_color(accent))
+                .child(gpui_kit::component::Icon::empty().path(format!("icons/{icon}.svg")).size(px(self.settings.num("chat.drop_overlay_icon_size", 22.) as f32)).text_color(accent))
                 .child(text)
                 .on_drop(move |paths: &ExternalPaths, window, cx| {
                     let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
@@ -3970,9 +3972,9 @@ impl Workspace {
         )
     }
 
-    pub(crate) fn waiting_card(&self, chat: &Chat, cx: &mut Context<Self>) -> AnyElement {
-        let theme = &self.settings.theme;
-        let cs = &self.settings.chat;
+    pub(crate) fn waiting_card(&mut self, chat: &Chat, cx: &mut Context<Self>) -> AnyElement {
+        let theme = &self.settings.theme.clone();
+        let cs = &self.settings.chat.clone();
         let st = |k: &str| match cs.get(k) {
             Some(Value::Object(o)) => o.clone(),
             _ => Map::new(),
@@ -3981,11 +3983,13 @@ impl Workspace {
         let fallback = self.tr("waiting", "The agent is waiting for you", &[]);
         let message = w["message"].as_str().or(w["tool_name"].as_str()).map(str::to_string).unwrap_or(fallback);
         let (options, questions) = waiting_options(&w, &self.settings);
-        let mut row = h_flex().gap(px(6.)).flex_wrap();
+        let mut row = style::apply(h_flex().gap(px(6.)).flex_wrap(), &st("waiting_row"), theme);
         let cancel = self.tr("waiting_cancel", "Cancel", &[]);
         for (i, label) in options.iter().enumerate().chain(std::iter::once((usize::MAX, &cancel))) {
             let id = chat.id.clone();
             let keys = if i == usize::MAX { self.agent_keys(&chat.agent, "cancel_keys") } else { vec![self.answer_key(&chat.agent, i + 1)] };
+            let option = if i == usize::MAX { json!("cancel") } else { json!(i) };
+            self.clickables.push((format!("opt:{}:{i}", chat.id), label.clone(), json!({"do": "chat.answer", "chat": chat.id, "option": option})));
             row = row.child(
                 style::apply(div().id(SharedString::from(format!("opt:{}:{i}", chat.id))).cursor_pointer(), &st("waiting_option"), theme)
                     .child(label.clone())

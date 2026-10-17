@@ -9,26 +9,21 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::{agents, config, db, mac, model, term, util};
+use crate::{agents, config, db, hosts, model, term, util};
 
 struct Watch {
     path: PathBuf,
     offset: u64,
     next_line: usize,
-    parse: fn(&[u8]) -> Value,
+    parse: agents::Parser,
     /** A registry chat whose transcript isn't known yet (a new Codex chat): looked up again until it is. */
     resolve: Option<String>,
 }
 
 impl Watch {
-    fn new(path: PathBuf, parse: fn(&[u8]) -> Value) -> Self {
+    fn new(path: PathBuf, parse: agents::Parser) -> Self {
         Watch { path, offset: 0, next_line: 0, parse, resolve: None }
     }
-}
-
-/** How lines of the agent's transcripts become entries. */
-fn parser(agent: &str) -> fn(&[u8]) -> Value {
-    if agents::format(agent) == "codex" { crate::codex::entry } else { parse_entry }
 }
 
 struct Conn {
@@ -75,6 +70,7 @@ impl Shared {
 
 pub fn run() -> anyhow::Result<()> {
     config::load();
+    hosts::reload();
     let sock = util::socket_path();
     std::fs::create_dir_all(util::agent_home())?;
     if UnixStream::connect(&sock).is_ok() {
@@ -103,10 +99,11 @@ pub fn run() -> anyhow::Result<()> {
     spawn_loop("events", shared.clone(), event_loop);
     spawn_loop("model", shared.clone(), model_loop);
     spawn_loop("transcripts", shared.clone(), transcript_loop);
-    // Only where no app runs: there, run.json is the app's own to read.
-    if crate::mac::host() != "mac" {
+    // Only where no app runs (`relay_app_actions`): there, run.json is the app's own to read.
+    if hosts::flag("relay_app_actions", hosts::here() != "mac") {
         spawn_loop("app-actions", shared.clone(), app_action_loop);
     }
+    ensure_supervisor();
     eprintln!("agent-boxd listening on {}", sock.display());
     for stream in listener.incoming().flatten() {
         let shared = shared.clone();
@@ -119,8 +116,29 @@ fn spawn_loop(name: &str, shared: Arc<Shared>, f: fn(&Arc<Shared>)) {
     std::thread::Builder::new().name(name.into()).spawn(move || loop { f(&shared) }).expect("spawn loop");
 }
 
-/** What the Mac app sends here so agents on this machine can see it as they would on the Mac. */
-const APP_FILES: [&str; 4] = ["inspect.json", "activity.log", "problems.txt", "snapshot.png"];
+/** What the Mac app may send here (`app_files`) so agents on this machine can see it as they would on the Mac. */
+fn app_files() -> Vec<String> {
+    config::get("app_files")
+        .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
+        .unwrap_or_else(|| ["inspect.json", "activity.log", "problems.txt", "snapshot.png"].map(String::from).to_vec())
+}
+
+/** With `hosts.HOST.supervise`, the tmux session `supervise_session` runs `bin/chat supervise` (boot starts the
+same one on the box), so this host's running chats come back after a crash or restart. */
+fn ensure_supervisor() {
+    if !hosts::flag("supervise", false) {
+        return;
+    }
+    let name = config::text("supervise_session", "agent-box");
+    if util::run("tmux", &["has-session", "-t", &format!("={name}")], &[], None, util::tmux_wait()).ok {
+        return;
+    }
+    let log = util::agent_home().join("log");
+    let _ = std::fs::create_dir_all(&log);
+    let cmd = format!("{} supervise 2>&1 | tee -a {}", util::agent_box_dir().join("bin").join("chat").display(),
+                      log.join("supervisor.log").display());
+    util::run("tmux", &["new-session", "-d", "-s", &name, &cmd], &[], None, util::tmux_wait());
+}
 
 fn app_dir() -> std::path::PathBuf {
     util::agent_home().join("state").join("settings")
@@ -128,7 +146,7 @@ fn app_dir() -> std::path::PathBuf {
 
 /** `abx do` here writes run.json in the settings folder; it goes to the connected app, which runs it. */
 fn app_action_loop(shared: &Arc<Shared>) {
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(config::ms("app_action_poll_ms", 300));
     let path = app_dir().join("run.json");
     let Ok(text) = std::fs::read_to_string(&path) else { return };
     let subscribed: Vec<Arc<Conn>> = shared.conns.lock().unwrap().iter().filter(|c| c.subscribed.load(Ordering::SeqCst)).cloned().collect();
@@ -185,8 +203,10 @@ fn model_loop(shared: &Arc<Shared>) {
         *woke = false;
     }
     std::thread::sleep(config::ms("model_debounce_ms", 250));
-    // On the Mac every build polls super.engineering, so build only while someone is watching.
-    if mac::is_mac() && !shared.conns.lock().unwrap().iter().any(|c| c.subscribed.load(Ordering::SeqCst)) {
+    // Where `build_unwatched` is off (the Mac, where every build polls super.engineering), build only while
+    // someone is watching.
+    if !hosts::flag("build_unwatched", !cfg!(target_os = "macos"))
+        && !shared.conns.lock().unwrap().iter().any(|c| c.subscribed.load(Ordering::SeqCst)) {
         *shared.model.lock().unwrap() = None;
         return;
     }
@@ -214,7 +234,7 @@ fn read_lines(w: &mut Watch) -> Vec<Value> {
     }
     let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return vec![] };
     w.offset += end as u64 + 1;
-    let out: Vec<Value> = buf[..end].split(|b| *b == b'\n').map(w.parse).collect();
+    let out: Vec<Value> = buf[..end].split(|b| *b == b'\n').map(|l| (w.parse)(l)).collect();
     w.next_line += out.len();
     out
 }
@@ -265,7 +285,7 @@ fn warm_line_starts() {
 }
 
 /** Entries `from..to` (line numbers), parsed. */
-fn read_range(path: &PathBuf, starts: &[u64], from: usize, to: usize, parse: fn(&[u8]) -> Value) -> Vec<Value> {
+fn read_range(path: &PathBuf, starts: &[u64], from: usize, to: usize, parse: &agents::Parser) -> Vec<Value> {
     let lines = starts.len().saturating_sub(1);
     let (from, to) = (from.min(lines), to.min(lines));
     if from >= to {
@@ -277,7 +297,7 @@ fn read_range(path: &PathBuf, starts: &[u64], from: usize, to: usize, parse: fn(
         return vec![];
     }
     buf.pop();
-    buf.split(|b| *b == b'\n').map(parse).collect()
+    buf.split(|b| *b == b'\n').map(|l| parse(l)).collect()
 }
 
 /** The last `n` entries of a transcript and the line they start at; leaves `w` at the end of the file. */
@@ -285,7 +305,7 @@ fn read_tail(w: &mut Watch, n: usize) -> (usize, Vec<Value>) {
     let starts = line_starts(&w.path);
     let total = starts.len() - 1;
     let skip = total.saturating_sub(n);
-    let entries = read_range(&w.path, &starts, skip, total, w.parse);
+    let entries = read_range(&w.path, &starts, skip, total, &w.parse);
     w.offset = starts[total];
     w.next_line = total;
     (skip, entries)
@@ -295,7 +315,7 @@ fn read_tail(w: &mut Watch, n: usize) -> (usize, Vec<Value>) {
 fn read_from(w: &mut Watch, from: usize) -> Vec<Value> {
     let starts = line_starts(&w.path);
     let total = starts.len() - 1;
-    let entries = read_range(&w.path, &starts, from, total, w.parse);
+    let entries = read_range(&w.path, &starts, from, total, &w.parse);
     w.offset = starts[total];
     w.next_line = total;
     entries
@@ -304,7 +324,7 @@ fn read_from(w: &mut Watch, from: usize) -> Vec<Value> {
 /** A transcript line as the app needs it: without what it never shows (request blobs, image bytes in
 tool results, the `toolUseResult` copy), and long tool output cut to `tool_text_max`, so a chat full of
 screenshots opens in a fraction of the bytes. */
-fn parse_entry(line: &[u8]) -> Value {
+pub(crate) fn parse_entry(line: &[u8]) -> Value {
     let Ok(mut v) = serde_json::from_slice::<Value>(line) else { return Value::Null };
     match v.get("type").and_then(Value::as_str) {
         Some("user" | "assistant" | "system") => {}
@@ -424,9 +444,14 @@ fn serve(shared: Arc<Shared>, stream: UnixStream) {
     }
 }
 
-fn chat_tool(args: &[&str], timeout: u64) -> Result<Value, String> {
-    let chat = util::agent_box_dir().join("bin").join("chat");
-    let o = util::run(&chat.to_string_lossy(), args, &[], None, Duration::from_secs(timeout));
+/** bin/chat with `args`, waiting up to the option `timeout_key` (else `default` seconds). */
+fn chat_tool(args: &[&str], timeout_key: &str, default: u64) -> Result<Value, String> {
+    bin_tool("chat", args, timeout_key, default)
+}
+
+fn bin_tool(name: &str, args: &[&str], timeout_key: &str, default: u64) -> Result<Value, String> {
+    let tool = util::agent_box_dir().join("bin").join(name);
+    let o = util::run(&tool.to_string_lossy(), args, &[], None, config::secs(timeout_key, default));
     if o.ok { Ok(json!({ "stdout": o.stdout })) } else { Err(o.message()) }
 }
 
@@ -439,7 +464,7 @@ fn sc_tool(args: &[&str], path: Option<&str>) -> Result<Value, String> {
     let home = util::home();
     let cwd = path.map(|p| p.to_string()).unwrap_or_else(|| home.to_string_lossy().into_owned());
     let envs: Vec<(&str, &str)> = path.map(|p| vec![("SUPER_ENGINEERING_WORKTREE_PATH", p)]).unwrap_or_default();
-    let o = util::run("python3", &refs, &envs, Some(&cwd), Duration::from_secs(600));
+    let o = util::run("python3", &refs, &envs, Some(&cwd), config::secs("sc_timeout_secs", 600));
     if o.ok {
         Ok(serde_json::from_str(&o.stdout).unwrap_or(json!({ "stdout": o.stdout })))
     } else {
@@ -481,7 +506,11 @@ fn registry_chat(chat_id: &str) -> Option<Value> {
 fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, String> {
     let result = match call {
         Call::Hello { .. } => {
-            Ok(json!({ "version": PROTOCOL_VERSION, "host": mac::host() }))
+            let here = hosts::here();
+            return Ok(json!({
+                "version": PROTOCOL_VERSION, "host": here, "host_id": here, "label": hosts::label(&here),
+                "build": env!("CARGO_PKG_VERSION"), "commit": env!("AGENT_BOXD_COMMIT"),
+            }));
         }
         Call::Subscribe { from_seq } => {
             let current = shared.model.lock().unwrap().clone();
@@ -498,7 +527,8 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let last = shared.last_seq.load(Ordering::SeqCst);
             if let Some(from) = from_seq {
                 if let Ok(db) = db::open() {
-                    for e in db::since(&db, from, 1000).into_iter().filter(|e| e.seq <= last) {
+                    let max = config::count("subscribe_replay_max", 1000) as i64;
+                    for e in db::since(&db, from, max).into_iter().filter(|e| e.seq <= last) {
                         conn.event(Event::Hook(e));
                     }
                 }
@@ -535,7 +565,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                 }
                 None => reg_id.clone(),
             };
-            let mut w = Watch::new(path.clone(), parser(&kind));
+            let mut w = Watch::new(path.clone(), agents::parser(&kind));
             if found.is_none() && agent.is_none() {
                 w.resolve = Some(reg_id);
             }
@@ -544,7 +574,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                 let n = tail.unwrap_or(config::count("transcript_page", 600));
                 let starts = line_starts(&path);
                 let start = b.saturating_sub(n);
-                return Ok(json!({ "entries": read_range(&path, &starts, start, b, w.parse), "from": start }));
+                return Ok(json!({ "entries": read_range(&path, &starts, start, b, &w.parse), "from": start }));
             }
             let (from, entries) = match tail.filter(|_| from == 0) {
                 Some(n) => read_tail(&mut w, n),
@@ -568,25 +598,58 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                 }
             }
             let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            chat_tool(&refs, 900)
+            chat_tool(&refs, "chat_new_timeout_secs", 900)
         }
         Call::History { limit } => {
             let limit = limit.unwrap_or(config::count("history_limit", 200));
-            return Ok(history(limit));
+            return Ok(history(limit, None));
         }
-        Call::ChatFork { chat_id } => chat_tool(&["fork", &chat_id], 120),
-        Call::ChatStart { chat_id } => chat_tool(&["start", &chat_id], 300),
-        Call::ChatStop { chat_id } => chat_tool(&["stop", &chat_id], 120),
-        Call::ChatArchive { chat_id } => chat_tool(&["archive", &chat_id], 120),
+        Call::HistoryQuery { limit, host } => {
+            let limit = limit.unwrap_or(config::count("history_limit", 200));
+            return Ok(history(limit, host.as_deref()));
+        }
+        Call::ChatFork { chat_id } => chat_tool(&["fork", &chat_id], "chat_timeout_secs", 120),
+        Call::ChatStart { chat_id } => chat_tool(&["start", &chat_id], "chat_start_timeout_secs", 300),
+        Call::ChatStop { chat_id } => chat_tool(&["stop", &chat_id], "chat_timeout_secs", 120),
+        Call::ChatArchive { chat_id } => chat_tool(&["archive", &chat_id], "chat_timeout_secs", 120),
+        Call::ChatRename { chat_id, name } => chat_tool(&["rename", &chat_id, &name], "chat_timeout_secs", 120),
+        Call::ChatMove { chat_id, to, scope, dry_run } => {
+            let mut args = vec!["move", chat_id.as_str(), "--to", to.as_str()];
+            if let Some(s) = scope.as_deref() {
+                args.extend(["--scope", s]);
+            }
+            if dry_run {
+                args.push("--dry-run");
+            }
+            chat_tool(&args, "chat_move_timeout_secs", 1800)
+        }
+        Call::TestLocal { chat_id, branch, repo, from } => {
+            let mut args = vec!["test-local".to_string()];
+            args.extend(chat_id);
+            for (flag, v) in [("--branch", branch), ("--repo", repo), ("--from", from)] {
+                if let Some(v) = v.filter(|v| !v.is_empty()) {
+                    args.extend([flag.to_string(), v]);
+                }
+            }
+            let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            chat_tool(&refs, "chat_move_timeout_secs", 1800)
+        }
+        Call::StackStart { chat_id } => {
+            let session = format!("stack-{}", &chat_id[..chat_id.len().min(8)]);
+            let chat = util::agent_box_dir().join("bin").join("chat");
+            let cmd = format!("{} stack-start {}", chat.display(), chat_id);
+            let o = util::run("tmux", &["new-session", "-d", "-s", &session, &cmd], &[], None, util::tmux_wait());
+            if o.ok { Ok(json!({ "session": session })) } else { Err(o.message()) }
+        }
         Call::ChatSend { chat_id, text } => {
             // Pasted as one bracketed paste, then Enter: Claude Code sees exactly where the paste ends, so
             // the Enter submits it with no wait (typing it in took a half-second pause and a Python start).
             let target = format!("={}:", util::chat_session(&chat_id));
-            let ok = |args: &[&str]| util::run("tmux", args, &[], None, Duration::from_secs(10)).ok;
+            let ok = |args: &[&str]| util::run("tmux", args, &[], None, util::tmux_wait() * 2).ok;
             let chat = registry_chat(&chat_id);
             let kind = chat.as_ref().map(agents::of).unwrap_or_else(|| "claude".into());
             if !ok(&["has-session", "-t", &target]) {
-                return chat_tool(&["send", &chat_id, &text], 60);
+                return chat_tool(&["send", &chat_id, &text], "chat_send_timeout_secs", 60);
             }
             let buf = format!("abx-{}", &chat_id[..chat_id.len().min(8)]);
             if !(ok(&["set-buffer", "-b", &buf, "--", &text]) && ok(&["paste-buffer", "-p", "-d", "-b", &buf, "-t", &target])) {
@@ -604,14 +667,14 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                 if prompt.is_empty() {
                     break;
                 }
-                let pane = util::run("tmux", &["capture-pane", "-p", "-e", "-t", &target], &[], None, Duration::from_secs(5)).stdout;
+                let pane = util::run("tmux", &["capture-pane", "-p", "-e", "-t", &target], &[], None, util::tmux_wait()).stdout;
                 if model::typed_input(&pane, &prompt).is_none_or(|t| t.is_empty()) {
                     break;
                 }
             }
             // A new Codex chat's session (and rollout) starts with its first message: record it now.
             if chat.as_ref().is_some_and(|c| agents::format(&kind) == "codex" && c.get("session_id").is_none()) {
-                let _ = chat_tool(&["_session", &chat_id, "--background"], 10);
+                let _ = chat_tool(&["_session", &chat_id, "--background"], "chat_session_timeout_secs", 10);
             }
             Ok(json!({}))
         }
@@ -619,7 +682,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let target = format!("={}:", util::chat_session(&chat_id));
             let mut args = vec!["send-keys", "-t", target.as_str()];
             args.extend(keys.iter().map(|k| k.as_str()));
-            let o = util::run("tmux", &args, &[], None, Duration::from_secs(10));
+            let o = util::run("tmux", &args, &[], None, util::tmux_wait() * 2);
             // Esc ends the turn, and no hook says so: the chat is idle from here.
             if o.ok && keys == ["Escape"] && config::flag("escape_marks_idle", true) {
                 let sid = registry_chat(&chat_id).as_ref().and_then(agents::session_key).unwrap_or(chat_id.clone());
@@ -628,6 +691,20 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             if o.ok { Ok(json!({})) } else { Err(o.message()) }
         }
         Call::SectionCreate { name } => sc_tool(&["section", "create", &name, "--manual"], None),
+        Call::SectionCollapse { id, collapsed } => {
+            sc_tool(&["section", "edit", &id, "--collapsed", if collapsed { "true" } else { "false" }], None)
+        }
+        Call::WorktreeSetTarget { path, branch } => sc_tool(&["worktree", "set-target-branch", &branch], Some(&path)),
+        Call::WorktreeCreateWith { repo, branch, base, name } => {
+            let mut args = vec!["worktree", "create", "--project", repo.as_str(), "--branch", branch.as_str()];
+            if let Some(b) = base.as_deref().filter(|b| !b.is_empty()) {
+                args.extend(["--base", b]);
+            }
+            if let Some(n) = name.as_deref().filter(|n| !n.is_empty()) {
+                args.extend(["--worktree-name", n]);
+            }
+            sc_tool(&args, None)
+        }
         Call::SectionRename { id, name } => sc_tool(&["section", "edit", &id, "--name", &name], None),
         Call::SectionDelete { id } => sc_tool(&["section", "delete", &id], None),
         Call::SectionAssign { path, section } => match section {
@@ -657,22 +734,75 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         Call::WorktreeRenameBranch { path, branch } => sc_tool(&["worktree", "rename-branch", &branch], Some(&path)),
         Call::WorktreeCreate { repo, branch } => sc_tool(&["worktree", "create", "--project", &repo, "--branch", &branch], None),
         Call::Exec { cmd, cwd, timeout_secs } => {
+            if !config::flag("exec_allowed", true) {
+                return Err("exec is off on this host (option exec_allowed)".into());
+            }
             let home = util::home();
             let cwd = cwd.unwrap_or_else(|| home.to_string_lossy().into_owned());
             let env = util::agent_box_dir().join("bin").join("agent-env");
-            let o = util::run(&env.to_string_lossy(), &["bash", "-lc", &cmd], &[], Some(&cwd), Duration::from_secs(timeout_secs.unwrap_or(120)));
+            let timeout = timeout_secs.map(Duration::from_secs).unwrap_or_else(|| config::secs("exec_timeout_secs", 120));
+            let o = util::run(&env.to_string_lossy(), &["bash", "-lc", &cmd], &[], Some(&cwd), timeout);
             Ok(json!({ "code": if o.ok { 0 } else { 1 }, "stdout": o.stdout, "stderr": o.stderr }))
         }
+        Call::HooksInstall { agent } => bin_tool("agent-hooks", &[&agent], "hooks_timeout_secs", 60),
+        Call::EnvPush { host } => {
+            let args: Vec<&str> = host.as_deref().into_iter().collect();
+            bin_tool("env-push", &args, "env_push_timeout_secs", 300)
+        }
+        Call::SyncNow => {
+            util::spawn_detached(&util::agent_box_dir().join("bin").join("sync-worker"), &[]).map_err(|e| e.to_string())?;
+            return Ok(json!({}));
+        }
+        Call::WipList { path } => {
+            let mut args = vec!["_wip_list"];
+            if let Some(p) = path.as_deref() {
+                args.extend(["--path", p]);
+            }
+            let out = chat_tool(&args, "wip_timeout_secs", 120)?;
+            let text = out.get("stdout").and_then(Value::as_str).unwrap_or("[]");
+            return Ok(json!({ "wips": serde_json::from_str::<Value>(text).unwrap_or(json!([])) }));
+        }
+        Call::WipRestore { path, from } => {
+            let mut args = vec![path.as_str()];
+            if let Some(f) = from.as_deref() {
+                args.extend(["--from", f]);
+            }
+            bin_tool("wip-restore", &args, "wip_timeout_secs", 120)
+        }
+        Call::ConfigGet => {
+            let agents: serde_json::Map<String, Value> = agents::names().into_iter().map(|a| {
+                let v = agents::merged(&a);
+                (a, v)
+            }).collect();
+            return Ok(json!({
+                "options": config::all(), "agents": agents, "resolved": hosts::resolved(), "host_id": hosts::here(),
+            }));
+        }
+        Call::HookEvents { session_id, from_seq, since, limit } => {
+            let db = db::open().map_err(|e| e.to_string())?;
+            let limit = limit.unwrap_or(config::count("hook_events_limit", 1000));
+            let events = db::query(&db, session_id.as_deref(), from_seq, since, limit as i64);
+            return Ok(json!({ "events": events, "last_seq": shared.last_seq.load(Ordering::SeqCst) }));
+        }
+        Call::LogTail { name, lines } => {
+            let path = hosts::log_path(&name).ok_or_else(|| format!("no log named {name} (option logs)"))?;
+            let path = agents::expand(&path);
+            let text = util::tail(&path, lines.unwrap_or(config::count("log_tail_lines", 200)));
+            return Ok(json!({ "name": name, "path": path, "text": text }));
+        }
+        Call::TermList { cwd } => return Ok(json!({ "terms": util::shell_sessions(cwd.as_deref()) })),
         Call::SectionMove { id, index } => sc_tool(&["section", "move", &id, "--index", &index.to_string()], None),
         Call::ProjectMove { repo, index } => sc_tool(&["project", "move", &repo, "--index", &index.to_string()], None),
         Call::WorktreeDiff { path, base } => crate::diff::worktree_diff(&path, base.as_deref()),
         Call::Configure { options } => {
             crate::config::set(options);
+            hosts::reload();
+            ensure_supervisor();
             return Ok(json!({}));
         }
         Call::TermScroll { session, lines } => {
             let target = format!("={session}:");
-            let tmux = |args: &[&str]| util::run("tmux", args, &[], None, Duration::from_secs(5));
+            let tmux = |args: &[&str]| util::run("tmux", args, &[], None, util::tmux_wait());
             if lines == 0 {
                 tmux(&["send-keys", "-t", &target, "-X", "cancel"]);
             } else {
@@ -688,7 +818,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         }
         Call::Usage => return Ok(crate::usage::scan()),
         Call::AppFile { name, data } => {
-            if !APP_FILES.contains(&name.as_str()) {
+            if !app_files().contains(&name) {
                 return Err(format!("not an app file: {name}"));
             }
             use base64::Engine as _;
@@ -700,8 +830,8 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             return Ok(json!({}));
         }
         Call::TermKill { session } => {
-            if session.starts_with("sh-") {
-                util::run("tmux", &["kill-session", "-t", &format!("={session}")], &[], None, Duration::from_secs(5));
+            if session.starts_with("sh-") || session.starts_with("stack-") {
+                util::run("tmux", &["kill-session", "-t", &format!("={session}")], &[], None, util::tmux_wait());
             }
             return Ok(json!({}));
         }
@@ -739,10 +869,13 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
     result
 }
 
-/** This host's registry chats, archived ones too, newest first. */
-fn history(limit: usize) -> Value {
+/** Registry chats of `host` (None: this one; "*": every host), archived ones too, newest first. Another host's
+last activity is its registry entry's last update. */
+fn history(limit: usize, host: Option<&str>) -> Value {
     let dir = util::agent_home().join("state").join("registry").join("chats");
     let alive = util::tmux_sessions();
+    let here = hosts::here();
+    let want = host.unwrap_or(&here).to_string();
     let mut chats: Vec<Value> = vec![];
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let Some(c) = std::fs::read_to_string(e.path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
@@ -750,15 +883,17 @@ fn history(limit: usize) -> Value {
         };
         let s = |k: &str| c.get(k).and_then(|v| v.as_str()).map(|v| v.to_string());
         let (Some(id), dir) = (s("id"), s("dir")) else { continue };
-        let host = s("host").unwrap_or_else(|| "box".into());
-        if host != mac::host() {
+        let host = s("host").unwrap_or_else(model::registry_default_host);
+        if want != "*" && host != want {
             continue;
         }
-        let alive = alive.contains(&util::chat_session(&id));
-        let last = agents::transcript_path(&c).and_then(|p| util::mtime(&p));
+        let local = host == here;
+        let alive = local && alive.contains(&util::chat_session(&id));
+        let last = if local { agents::transcript_path(&c).and_then(|p| util::mtime(&p)) } else { util::mtime(&e.path()) };
         chats.push(json!({
             "id": id, "name": s("name").unwrap_or_default(), "dir": dir, "host": host, "last_activity": last,
-            "closed": s("status").as_deref() != Some("running") || !alive,
+            "closed": s("status").as_deref() != Some("running") || (local && !alive),
+            "agent": agents::of(&c), "kind": s("kind"), "branch": s("branch"), "status": s("status"),
         }));
     }
     let t = |v: &Value| v.get("last_activity").and_then(|x| x.as_f64()).unwrap_or(0.0);

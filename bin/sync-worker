@@ -4,8 +4,6 @@
 set -u
 . "$(dirname "$0")/env.sh"
 
-# The app's `daemon` settings, as this machine's daemon last saved them.
-opt() { jq -r --arg k "$1" '.[$k] // empty' "$AGENT_HOME/config.json" 2> /dev/null; }
 lock_wait=$(opt sync_lock_wait_secs); lock_wait=${lock_wait:-600}
 max_mb=$(opt sync_transcript_max_mb); max_mb=${max_mb:-95}
 warn_mb=$(opt sync_bundle_warn_mb); warn_mb=${warn_mb:-50}
@@ -52,24 +50,21 @@ snapshot_worktree() {
 }
 
 sync_sessions() {
-  local s=$AGENT_SESSIONS_DIR
+  local s=$AGENT_SESSIONS_DIR root dest rel
   # GitLab refuses any file over 100MB, which fails the whole push (WIP included): transcripts over
   # sync_transcript_max_mb (screenshots add up) stay on their machine.
-  if [ "$AGENT_HOST" = box ] && [ -d "$CLAUDE_PROJECTS_DIR" ]; then
-    mkdir -p "$s/hosts/$AGENT_HOST/projects"
-    rsync -a --max-size="${max_mb}m" "$CLAUDE_PROJECTS_DIR/" "$s/hosts/$AGENT_HOST/projects/"
-    find "$s/hosts/$AGENT_HOST/projects" -type f -size +"${max_mb}M" -delete
-  elif [ "$AGENT_HOST" = mac ]; then
-    # Only the chats that live on the Mac, not every local session.
-    local f id slug
-    for f in "$AGENT_STATE_DIR"/registry/chats/*.json; do
-      [ -f "$f" ] && [[ "$(jq -r '.host + " " + .status' "$f")" =~ ^mac\ (running|moving)$ ]] || continue
-      id=$(jq -r .id "$f")
-      slug=$(jq -r .dir "$f" | sed 's#[^A-Za-z0-9]#-#g')
-      [ -f "$CLAUDE_PROJECTS_DIR/$slug/$id.jsonl" ] || continue
-      mkdir -p "$s/hosts/mac/projects/$slug"
-      rsync -a --max-size="${max_mb}m" "$CLAUDE_PROJECTS_DIR/$slug/$id.jsonl" "$s/hosts/mac/projects/$slug/"
-      [ -d "$CLAUDE_PROJECTS_DIR/$slug/$id" ] && rsync -a --max-size="${max_mb}m" "$CLAUDE_PROJECTS_DIR/$slug/$id" "$s/hosts/mac/projects/$slug/"
+  if [ "${AGENT_SYNC_TRANSCRIPTS:-registry}" = all ]; then
+    # Every agent's transcripts (transcripts_root), each under its backup_dir.
+    while IFS=$'\t' read -r root dest; do
+      [ -d "$root" ] || continue
+      mkdir -p "$s/hosts/$AGENT_HOST/$dest"
+      rsync -a --max-size="${max_mb}m" "$root/" "$s/hosts/$AGENT_HOST/$dest/"
+    done < <(python3 "$AGENT_BOX_DIR/bin/chat" _backup_roots 2>> "$AGENT_LOG")
+  else
+    # Only the chats that live here, not every local session.
+    python3 "$AGENT_BOX_DIR/bin/chat" _backup_paths 2>> "$AGENT_LOG" | sort | while IFS=$'\t' read -r root dest rel; do
+      mkdir -p "$s/hosts/$AGENT_HOST/$dest/$(dirname "$rel")"
+      rsync -a --max-size="${max_mb}m" "$root/$rel" "$s/hosts/$AGENT_HOST/$dest/$(dirname "$rel")/"
     done
   fi
   find "$s/hosts" -type f -size +"${max_mb}M" -print -delete 2> /dev/null | while read -r big; do log "too big for the remote, kept local only: $big"; done
@@ -85,10 +80,22 @@ sync_sessions() {
   local err
   if err=$(git -C "$s" push -q --force origin "HEAD:refs/heads/$SESSIONS_BRANCH" 2>&1); then
     rm -f "$AGENT_HOME/push-pending"
+    sync_status "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ""
   else
     touch "$AGENT_HOME/push-pending"
     log "push failed, retrying on the next turn: $err"
+    sync_status "" "$err"
   fi
+}
+
+# sync-status.json, which the daemon reports as the model's `sync`: the last push, its error.
+sync_status() {
+  local f="$AGENT_HOME/sync-status.json" prev tmp
+  prev=$(cat "$f" 2> /dev/null || echo '{}')
+  tmp=$(mktemp)
+  jq -n --argjson prev "$prev" --arg at "$1" --arg err "$2" --arg branch "$SESSIONS_BRANCH" \
+    '{last_push_at: (if $at == "" then $prev.last_push_at else $at end), error: (if $err == "" then null else $err end),
+      branch: $branch, at: (now | todate)}' > "$tmp" 2> /dev/null && mv "$tmp" "$f" || rm -f "$tmp"
 }
 
 ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"

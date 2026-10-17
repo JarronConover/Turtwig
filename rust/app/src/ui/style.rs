@@ -32,14 +32,27 @@ pub const STYLE_KEYS: &[(&str, &str)] = &[
     ("italic", "bool"),
     ("line_height", "number (multiplier when < 4, else points)"),
     ("text_align", "left | center | right"),
-    ("truncate", "bool: one line with an ellipsis"),
+    ("truncate", "true: one line with an ellipsis; a number: that many lines, then the ellipsis (`ellipsis`: the text it ends with, default …)"),
+    ("line_clamp", "number: at most that many lines (cut off without an ellipsis)"),
+    ("white_space", "normal | nowrap"),
+    ("text_decoration", "underline | wavy | line_through | none (`decoration_color`: its color)"),
+    ("aspect_ratio", "number: width / height, for a node with only one of them set"),
+    ("display", "flex (default) | grid | block | none"),
+    ("grid_cols / grid_rows", "number: equal columns (rows) for `display: grid` (setting one turns grid on)"),
+    ("col_span / row_span", "number: how many grid columns (rows) a child takes"),
+    ("border_style", "solid | dashed"),
+    ("outline", "number: a ring of that width just outside the border (`outline_color`, default @accent), drawn as a shadow so it takes no space"),
+    ("gradient", "a background gradient: {angle (degrees, 180 = top to bottom), from, to (colors), from_at, to_at (0..1)}; over `background`"),
+    ("z_index", "number: paint the node above others, like `layer` with that number (on nodes only)"),
     ("overflow / overflow_x / overflow_y", "hidden | visible | scroll (for nodes, a `scroll` node scrolls; `scroll` here is for markdown parts like tables)"),
     ("position", "relative | absolute"),
     ("top / right / bottom / left", "number (for position: absolute)"),
     ("cursor", "pointer | text | default | col_resize | row_resize | grab"),
     ("hidden", "bool: render nothing"),
-    ("hover", "object of style keys applied while the pointer is over the node"),
+    ("hover", "object of style keys applied while the pointer is over the node (works in every style object in settings, built-in parts included)"),
+    ("hover_ms", "number: hover styles ease in and out over this many ms instead of switching at once (on nodes)"),
     ("active", "object of style keys applied while it's pressed"),
+    ("focus", "object of style keys applied while a `focusable` node has keyboard focus"),
     ("drag_over_item", "object of style keys applied while an accepted dragged item (see `drag` / `on.drop_item`) is over the node"),
     ("drag_over", "object of style keys applied while files are dragged over the node (pair with `on.drop`)"),
 ];
@@ -252,12 +265,65 @@ pub fn refine(s: &mut StyleRefinement, style: &Map<String, Value>, theme: &Map<S
                 }
             }
             "truncate" => {
-                if v.as_bool() == Some(true) {
-                    s.overflow.x = Some(Overflow::Hidden);
-                    s.text.white_space = Some(WhiteSpace::Nowrap);
-                    s.text.text_overflow = Some(TextOverflow::Truncate("…".into()));
+                let ellipsis: SharedString = style.get("ellipsis").and_then(Value::as_str).unwrap_or("…").to_string().into();
+                match v {
+                    Value::Bool(true) => {
+                        s.overflow.x = Some(Overflow::Hidden);
+                        s.text.white_space = Some(WhiteSpace::Nowrap);
+                        s.text.text_overflow = Some(TextOverflow::Truncate(ellipsis));
+                    }
+                    Value::Number(n) if n.as_u64().unwrap_or(0) > 0 => {
+                        s.overflow.x = Some(Overflow::Hidden);
+                        s.overflow.y = Some(Overflow::Hidden);
+                        s.text.line_clamp = n.as_u64().map(|n| n as usize);
+                        s.text.text_overflow = Some(TextOverflow::Truncate(ellipsis));
+                    }
+                    _ => {}
                 }
             }
+            "line_clamp" => {
+                if let Some(n) = v.as_u64().filter(|n| *n > 0) {
+                    s.overflow.y = Some(Overflow::Hidden);
+                    s.text.line_clamp = Some(n as usize);
+                }
+            }
+            "white_space" => s.text.white_space = Some(if v.as_str() == Some("nowrap") { WhiteSpace::Nowrap } else { WhiteSpace::Normal }),
+            "text_decoration" => {
+                let c = style.get("decoration_color").and_then(|c| color(c, theme));
+                let (under, wavy, through) = match v.as_str() {
+                    Some("underline") => (true, false, false),
+                    Some("wavy") => (true, true, false),
+                    Some("line_through" | "line-through" | "strikethrough") => (false, false, true),
+                    _ => (false, false, false),
+                };
+                s.text.underline = under.then(|| UnderlineStyle { thickness: px(1.), color: c, wavy });
+                s.text.strikethrough = through.then(|| StrikethroughStyle { thickness: px(1.), color: c });
+            }
+            "aspect_ratio" => s.aspect_ratio = num(Some(v)),
+            "display" => {
+                s.display = match v.as_str() {
+                    Some("grid") => Some(Display::Grid),
+                    Some("block") => Some(Display::Block),
+                    Some("none") => Some(Display::None),
+                    _ => Some(Display::Flex),
+                }
+            }
+            "grid_cols" | "grid_rows" => {
+                if let Some(n) = v.as_u64().filter(|n| *n > 0) {
+                    let t = Some(GridTemplate { repeat: n as u16, min_size: GridTemplateMinSize::Zero });
+                    if k == "grid_cols" { s.grid_cols = t } else { s.grid_rows = t }
+                    if style.get("display").is_none() {
+                        s.display = Some(Display::Grid);
+                    }
+                }
+            }
+            "col_span" | "row_span" => {
+                if let Some(n) = v.as_u64().filter(|n| *n > 0) {
+                    let span = GridPlacement::Span(n as u16)..GridPlacement::Span(n as u16);
+                    if k == "col_span" { s.grid_location_mut().column = span } else { s.grid_location_mut().row = span }
+                }
+            }
+            "border_style" => s.border_style = Some(if v.as_str() == Some("dashed") { BorderStyle::Dashed } else { BorderStyle::Solid }),
             "overflow" | "overflow_x" | "overflow_y" => {
                 let o = match v.as_str() {
                     Some("hidden") => Overflow::Hidden,
@@ -313,6 +379,22 @@ pub fn refine(s: &mut StyleRefinement, style: &Map<String, Value>, theme: &Map<S
             _ => {}
         }
     }
+    if let Some(g) = style.get("gradient").and_then(|g| gradient(g, theme)) {
+        s.background = Some(g.into());
+    }
+    if let Some(w) = num(style.get("outline")).filter(|w| *w > 0.) {
+        let c = style.get("outline_color").cloned().unwrap_or_else(|| Value::from("@accent"));
+        let ring = BoxShadow { color: color(&c, theme).unwrap_or(hsla(0.6, 0.9, 0.6, 1.)), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(w), inset: false };
+        s.box_shadow.get_or_insert_with(Vec::new).push(ring);
+    }
+}
+
+/** `{angle, from, to, from_at, to_at}`: a linear gradient (angle in degrees, stops 0..1). */
+fn gradient(g: &Value, theme: &Map<String, Value>) -> Option<Background> {
+    let from = color(g.get("from")?, theme)?;
+    let to = color(g.get("to")?, theme)?;
+    let at = |k: &str, d: f32| num(g.get(k)).unwrap_or(d);
+    Some(linear_gradient(at("angle", 180.), linear_color_stop(from, at("from_at", 0.)), linear_color_stop(to, at("to_at", 1.))))
 }
 
 /** `apply` for elements that can't hold children (images): no `background_image`. */
@@ -321,15 +403,50 @@ pub fn apply_plain<E: Styled>(mut el: E, style: &Map<String, Value>, theme: &Map
     el
 }
 
-pub fn apply<E: Styled + ParentElement>(mut el: E, style: &Map<String, Value>, theme: &Map<String, Value>) -> E {
+/** What `apply` styles: divs, whose `hover` and `drag_over` objects apply too, and `active` once they have an id. */
+pub trait Target: Styled + ParentElement + InteractiveElement {
+    fn when_active(self, _: StyleRefinement) -> Self {
+        self
+    }
+}
+
+impl Target for Div {}
+
+impl Target for Stateful<Div> {
+    fn when_active(self, a: StyleRefinement) -> Self {
+        self.active(move |_| a)
+    }
+}
+
+fn sub_style(style: &Map<String, Value>, k: &str, theme: &Map<String, Value>) -> Option<StyleRefinement> {
+    let o = style.get(k)?.as_object()?;
+    let mut r = StyleRefinement::default();
+    refine(&mut r, o, theme);
+    Some(r)
+}
+
+pub fn apply<E: Target>(mut el: E, style: &Map<String, Value>, theme: &Map<String, Value>) -> E {
     refine(el.style(), style, theme);
+    if let Some(h) = sub_style(style, "hover", theme) {
+        el = el.hover(move |_| h);
+    }
+    if let Some(d) = sub_style(style, "drag_over", theme) {
+        el = el.drag_over::<ExternalPaths>(move |_, _, _, _| d.clone());
+    }
+    if let Some(a) = sub_style(style, "active", theme) {
+        el = el.when_active(a);
+    }
     // `background_image` (any node, any style map): a picture behind the node's content, cut to its corners.
     if let Some(src) = style.get("background_image").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         let fit = style.get("background_fit").and_then(Value::as_str).unwrap_or("cover");
         let opacity = style.get("background_opacity").and_then(Value::as_f64).unwrap_or(1.) as f32;
         let radius = match style.get("radius") {
-            Some(Value::Number(n)) => n.as_f64().unwrap_or(0.) as f32,
-            _ => 0.,
+            Some(Value::Number(n)) => {
+                let r = n.as_f64().unwrap_or(0.) as f32;
+                [r, r, r, r]
+            }
+            Some(Value::Object(o)) => ["top_left", "top_right", "bottom_right", "bottom_left"].map(|k| num(o.get(k)).unwrap_or(0.)),
+            _ => [0.; 4],
         };
         if style.get("position").is_none() {
             el.style().position = Some(Position::Relative);
@@ -341,7 +458,10 @@ pub fn apply<E: Styled + ParentElement>(mut el: E, style: &Map<String, Value>, t
                 .top_0()
                 .left_0()
                 .size_full()
-                .rounded(px(radius))
+                .rounded_tl(px(radius[0]))
+                .rounded_tr(px(radius[1]))
+                .rounded_br(px(radius[2]))
+                .rounded_bl(px(radius[3]))
                 .overflow_hidden()
                 .child(div().size_full().opacity(opacity).child(crate::workspace::media_element(src, fit)))
                 .when_some(dim, |d, c| d.child(div().absolute().inset_0().bg(c)))

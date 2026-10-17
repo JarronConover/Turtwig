@@ -3,39 +3,33 @@
 skills use (worktrees, sidebar sections and labels, discussion tabs), backed
 by git worktrees, `wt`, and the agent-box state repo instead of the Mac app.
 
-Sections and labels live in ~/.agent-box/state/sc.json (sc-mac.json on the Mac);
-the dashboard shows them. A discussion tab becomes a Remote Control chat (bin/chat).
+Sections and labels live in ~/.agent-box/state/<this host's sc_store> (sc.json on the
+box, sc-mac.json on the Mac); the dashboard shows them. A discussion tab becomes a
+Remote Control chat (bin/chat). Repos, their worktree folders and tools come from the
+app's `daemon` settings (bin/abxcfg.py).
 """
 
 import fcntl
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
+import abxcfg  # noqa: E402
+
 HOME = Path.home()
-ON_BOX = bool(os.environ.get("CODER_AGENT_URL"))
 STATE_DIR = HOME / ".agent-box" / "state"
-STORE = STATE_DIR / ("sc.json" if ON_BOX else "sc-mac.json")
+STORE = STATE_DIR / abxcfg.host()["sc_store"]
 CHAT = Path(__file__).resolve().parent.parent / "bin" / "chat"
-WT = HOME / "redo-monorepo-worktrees" / "bin" / "wt" if ON_BOX else Path(shutil.which("wt") or "wt")
-REPOS = {
-    "redo": HOME / "dev" / "redo",
-    "internal-tools": HOME / "dev" / "redotech-internal-tools",
-    "redo-data": HOME / "dev" / "redo-data",
-}
-WORKTREE_BASE = {
-    "redo": HOME / "dev" / "redo-worktrees",
-    "internal-tools": HOME / "dev" / "redotech-internal-tools-worktrees",
-    "redo-data": HOME / "dev" / "redo-data-worktrees",
-}
+REPOS = {k: p for k in abxcfg.repos() if (p := abxcfg.primary(k))}
 WORKSPACE = "box"
-# Worktrees a.box (wt) or super.engineering made; any other is "external".
-MANAGED_BASES = {repo: [WORKTREE_BASE[repo], HOME / ".superconductor" / "worktrees"] for repo in REPOS}
+# Worktrees a.box (its worktree folders) or a foreign tool (super.engineering) made; any other is "external".
+_FOREIGN = [Path(abxcfg.expand(b)) for b in (abxcfg.foreign_tools() or {}).get("managed_bases") or []]
+MANAGED_BASES = {repo: [abxcfg.worktrees_base(repo)] + _FOREIGN for repo in REPOS}
 BUILT_IN = [
     {"section_id": "pinned", "name": "Pinned", "kind": "manual", "rules": [], "priority": None,
      "collapsed": False, "built_in": True},
@@ -83,10 +77,11 @@ class Store:
     def __exit__(self, *exc):
         if self.dirty and not exc[0]:
             STORE.write_text(json.dumps(self.data, indent=2) + "\n")
+            branch = abxcfg.state_branch()
             git("add", STORE.name, cwd=STATE_DIR)
             git("commit", "-q", "-m", f"sc: {self.message}", cwd=STATE_DIR)
-            git("pull", "-q", "--rebase", "--autostash", "origin", "state", cwd=STATE_DIR)
-            git("push", "-q", "origin", "HEAD:state", cwd=STATE_DIR)
+            git("pull", "-q", "--rebase", "--autostash", "origin", branch, cwd=STATE_DIR)
+            git("push", "-q", "origin", f"HEAD:{branch}", cwd=STATE_DIR)
         fcntl.flock(self.lock, fcntl.LOCK_UN)
 
 
@@ -125,6 +120,7 @@ def items(store):
                 "agent_status": "idle", "attention": None, "pr": None, "local": {},
                 "section": meta.get("section"),
                 "order": meta.get("order"),
+                "target_branch": meta.get("target_branch"),
                 "external": not primary and not any(real(path).startswith(real(b) + os.sep) for b in MANAGED_BASES[repo]),
             })
     rank = {name: i for i, name in enumerate(store.data.get("project_order", []))}
@@ -194,6 +190,8 @@ def section_cmd(args):
                 sec["kind"] = "manual"
             if flag(args, "--name"):
                 sec["name"] = flag(args, "--name")
+            if flag(args, "--collapsed") is not None:
+                sec["collapsed"] = flag(args, "--collapsed").lower() in ("1", "true", "yes", "on")
             s.save(f"section edit {sec['name']}")
             out("section", sec)
         elif sub == "move":
@@ -233,14 +231,15 @@ def worktree_cmd(args):
             branch = git("branch", "--show-current", cwd=path).stdout.strip()
             stat = git("diff", "--shortstat", "HEAD", cwd=path).stdout
             changed = int(stat.split()[0]) if stat.strip() else 0
-            out("worktree_status", {"branch": branch, "target_branch": s.wt(path).get("target_branch", "main"),
+            target = s.data["worktrees"].get(real(path), {}).get("target_branch") or abxcfg.default_base(path)
+            out("worktree_status", {"branch": branch, "target_branch": target,
                                     "files_changed": changed, "insertions": 0, "deletions": 0})
         elif sub == "rename-branch":
             path = caller_worktree()
             git("branch", "-m", args[1], cwd=path, check=True)
             out("worktree_branch", {"branch": args[1]})
         elif sub == "set-target-branch":
-            path = caller_worktree()
+            path = caller_worktree() if len(args) < 3 else find_item(s, args[2])["path"]
             s.wt(path)["target_branch"] = args[1]
             s.save(f"target {Path(path).name} -> {args[1]}")
             out("worktree_target_branch", {"target_branch": args[1]})
@@ -276,11 +275,12 @@ def worktree_cmd(args):
                 die("refusing to delete a primary checkout")
             if git("status", "--porcelain", cwd=it["path"]).stdout.strip() and "--force" not in args:
                 die(f"{it['path']} has uncommitted changes")
-            if it["project_id"] == "redo" and it["branch"]:
-                r = subprocess.run([str(WT), "remove", it["branch"]] + (["--force"] if "--force" in args else []),
-                                   capture_output=True, text=True,
-                                   env=dict(os.environ, WT_PRIMARY=str(REPOS["redo"]),
-                                            WT_BASE=str(WORKTREE_BASE["redo"])))
+            tool = abxcfg.worktree_tool(it["project_id"])
+            values = {"path": it["path"], "branch": it["branch"] or "", "force": "--force" if "--force" in args else ""}
+            argv = tool and it["branch"] and abxcfg.tool_argv(it["project_id"], tool, "remove", **values)
+            if argv:
+                r = subprocess.run(argv, capture_output=True, text=True, cwd=REPOS[it["project_id"]],
+                                   env=abxcfg.tool_env(it["project_id"], tool, **values))
             else:
                 r = subprocess.run(["git", "worktree", "remove", it["path"]] + (["--force"] if "--force" in args else []),
                                    cwd=REPOS[it["project_id"]], capture_output=True, text=True)
@@ -294,27 +294,35 @@ def worktree_cmd(args):
 
 
 def worktree_create(args):
-    repo = flag(args, "--project") or "redo"
+    repo = flag(args, "--project") or abxcfg.default_repo()
     if repo not in REPOS:
-        die(f"unknown project {repo!r} (box projects: {', '.join(REPOS)})")
+        repo = abxcfg.repo_for_folder(repo)
+    if repo not in REPOS:
+        die(f"unknown project {repo!r} (projects here: {', '.join(REPOS)})")
     if "--prompt" in args or "--stdin" in args or "--from-file" in args:
         die("sc worktree create --prompt isn't supported on the agent box; use `chat new --branch`")
-    name = flag(args, "--worktree-name") or f"sc-{uuid.uuid4().hex[:6]}"
+    name = flag(args, "--worktree-name") or abxcfg.subst(abxcfg.option("worktree_name", "sc-{hex6}"),
+                                                         {"hex6": uuid.uuid4().hex[:6], "repo": repo})
     branch = flag(args, "--existing-branch") or flag(args, "--branch") or name
     checkout = REPOS[repo]
     git("fetch", "-q", "origin", cwd=checkout)
-    if repo == "redo":
-        env = dict(os.environ, WT_PRIMARY=str(checkout), WT_BASE=str(WORKTREE_BASE["redo"]))
-        r = subprocess.run([str(WT), branch, "--no-start"], capture_output=True, text=True, env=env)
-        path = WORKTREE_BASE["redo"] / branch.replace("/", "-")
+    path = abxcfg.worktree_path(repo, branch, name)
+    tool = abxcfg.worktree_tool(repo)
+    exists = git("rev-parse", "-q", "--verify", f"refs/heads/{branch}", cwd=checkout).returncode == 0
+    on_origin = git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}", cwd=checkout).returncode == 0
+    base = flag(args, "--base") or abxcfg.default_base(checkout)
+    if tool and tool.get("create"):
+        if not exists and not on_origin and flag(args, "--base"):
+            git("branch", "-q", "--no-track", branch, f"origin/{base}", cwd=checkout, check=True)
+        values = {"branch": branch, "path": str(path), "name": name}
+        r = subprocess.run(abxcfg.tool_argv(repo, tool, "create", **values), capture_output=True, text=True,
+                           cwd=checkout, env=abxcfg.tool_env(repo, tool, **values))
         if not path.exists():
-            die(r.stderr.strip() or "wt failed")
+            die(r.stderr.strip() or f"{tool['bin']} failed")
     else:
-        path = WORKTREE_BASE[repo] / name
-        exists = git("rev-parse", "-q", "--verify", f"refs/heads/{branch}", cwd=checkout).returncode == 0
-        on_origin = git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}", cwd=checkout).returncode == 0
+        path.parent.mkdir(parents=True, exist_ok=True)
         cmd = ["worktree", "add", str(path)]
-        cmd += [branch] if exists or on_origin else ["-b", branch, "origin/main"]
+        cmd += [branch] if exists or on_origin else ["-b", branch, f"origin/{base}"]
         git(*cmd, cwd=checkout, check=True)
     resp = {"id": item_id(path, False), "path": str(path), "branch": branch, "worktree": path.name,
             "project_id": repo, "workspace_id": WORKSPACE}
@@ -357,23 +365,25 @@ def layout_cmd(args):
         die(f"sc layout {sub}: not supported on the agent box (only `run tabs` and `capabilities`)")
 
 
-INSTRUCTIONS = """On the agent box, `sc` is a compatibility shim over git worktrees, `wt`, and
-the agent-box registry; there is no super.engineering app here. Supported:
+INSTRUCTIONS = """On the agent box, `sc` is a compatibility shim over git worktrees, each repo's
+worktree tool, and the agent-box registry; there is no super.engineering app here. Supported:
   sc workspace list --json
-  sc section list|create NAME --manual|edit SECTION --manual|assign SECTION|unassign|delete SECTION [--json]
-  sc worktree create --workspace box --project redo|internal-tools|redo-data [--worktree-name N]
-                     [--branch B | --existing-branch B] [--background] --json
-  sc worktree status|rename-branch NEW|set-target-branch B [--json]   (act on the caller's worktree;
-                     SUPER_ENGINEERING_WORKTREE_PATH overrides, as in the app)
+  sc section list|create NAME --manual|edit SECTION [--manual] [--name N] [--collapsed true|false]
+             |assign SECTION|unassign|delete SECTION [--json]
+  sc worktree create --workspace box --project {repos} [--worktree-name N]
+                     [--branch B | --existing-branch B] [--base B] [--background] --json
+  sc worktree status|rename-branch NEW|set-target-branch B [ITEM_ID] [--json]   (act on the caller's
+                     worktree; SUPER_ENGINEERING_WORKTREE_PATH overrides, as in the app)
   sc worktree set-label ITEM_ID LABEL|delete ITEM_ID [--force] [--json]
   sc worktree move ITEM_ID [--section SECTION|none] [--before ITEM_ID | --index N] [--json]
   sc section move SECTION --index N [--json]
-  sc project move redo|internal-tools|redo-data --index N [--json]
-  sc layout run tabs --label L [--prompt TEXT] [--worktree PATH]   (starts a Remote Control chat TJ
-                     sees on his dashboard and phone)
+  sc project move {repos} --index N [--json]
+  sc layout run tabs --label L [--prompt TEXT] [--worktree PATH]   (starts a Remote Control chat you
+                     see on the dashboard and phone)
   sc layout capabilities --output json
 Everything else (`sc chat`, `sc agent`, other layout commands, reviews, browser) is unavailable.
-Redo worktrees are created with `wt --no-start`; services never run on the box."""
+Worktrees are made with each repo's worktree_tool (redo: `wt --no-start`), or `git worktree add`.""".replace(
+    "{repos}", "|".join(REPOS))
 
 
 def main():

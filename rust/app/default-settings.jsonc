@@ -61,6 +61,16 @@
     "danger": "#d8566c",
     "merged": "#8b5cf6",
     "success": "#3fb950",
+    // The second line of the drag preview ("Move to …").
+    "drag_preview_note": { "font_size": 11.5, "color": "@accent" },
+    // Font files to load (absolute, ~/, or in the settings folder); use them by family name in font_family.
+    "fonts": [],
+    // Style objects over tooltips (background, color, padding, radius, font_size...) and the button of a
+    // `select` node; `menu`: {min_width, max_height, scrollable} for menus. tooltip_delay_ms: wait before
+    // a tooltip shows (unset: the built-in delay).
+    "tooltip": {},
+    "menu": {},
+    "select": { "direction": "row", "align": "center", "gap": 6, "padding": [4, 10], "radius": 6, "border": 1, "border_color": "@line", "background": "@pill", "font_size": 12.5, "hover": { "background": "@pill_hover" } },
     "drag_preview": { "padding": [5, 10], "radius": 8, "background": "#2b2f38", "border": 1, "border_color": "#488efc", "color": "#f5f5f7", "font_size": 13, "shadow": "lg", "opacity": 0.95 }
   },
 
@@ -1799,7 +1809,9 @@
     "pending": { "show": true },
     // Tool step summaries are cut to this many characters.
     "summary_chars": 140,
+    // Counted labels may have KEY_one / KEY_other forms (e.g. "steps_one"); {s} is `plural` unless n is 1.
     "labels": {
+      "plural": "s",
       "steps": "{n} step{s}{failed}", "steps_failed": ", {n} failed", "earlier_steps": "{n} earlier step{s}",
       "thinking": "Thinking", "thought": "Thought", "pending_thinking": "Thinking", "pending_working": "Working",
       "activity_thinking": "Thinking", "activity_writing": "Writing", "more_lines": "… {n} more lines",
@@ -1808,8 +1820,26 @@
       "skill_subject": "the {skill} skill", "background_finished": "A background task finished", "another_session": "another session"
     },
     // Per tool name (or "*"): { "doing", "done", "failed", "icon", "activity" }; any field overrides the built-in table.
+    // "subject": what follows the prefix, as jq or a {{ }} template over .input, .summary, .name.
+    // "detail": what an open step shows: diff | command | result | json | markdown, or a component (gets
+    // .props {input, result, is_error, name, id}).
     "tools": {},
+    // Replace a transcript part with a component name or node; it gets the item as .props: user and
+    // assistant {kind, text, index, chat, key, uploads, raw}, notice, step {kind: tool | thinking, id, title,
+    // icon, running, error, open, tool, input, result, summary, text}; waiting (the `waiting` node's card)
+    // {chat, message, questions, options: [{label, index, do}], cancel: {label, do}, tool}. null: built in.
+    "render": { "user": null, "assistant": null, "step": null, "notice": null, "waiting": null },
+    // A scrollbar on the transcript: never | scrolling | hover | always.
+    "scrollbar": "never",
+    // Each run of thinking and tool calls as one row (false: a row per step); fold_running: a long run
+    // folds its earlier steps while it's still going.
+    "group_steps": true, "fold_running": true,
+    // Show thinking as Markdown instead of plain text.
+    "thinking_markdown": false,
+    // A failed step's line: style keys over trace_line.
+    "trace_line_error": { "color": "@danger" },
     "tool_names": { "strip": "mcp__", "separator": " · " },
+    // icons may also set pending_thinking / pending_working (each falls back to pending).
     "step_line": {
       "icon_size": 14, "chevron_size": 12, "pulse_ms": 1400, "pulse_min": 0.35, "pulse_max": 1,
       "icons": { "pending": "brain", "thinking": "brain", "fold": "list-checks", "open": "chevron-down", "closed": "chevron-right" }
@@ -1817,18 +1847,27 @@
     "step_detail": {
       "removed": "@diff_del", "removed_background": "@diff_del_bg", "added": "@diff_add", "added_background": "@diff_add_bg",
       "error": "@danger", "removed_prefix": "- ", "added_prefix": "+ ", "command_prefix": "$ ", "json_fallback": true,
-      "tab_width": 4, "padding_x": 8, "padding_bottom": 12
+      "tab_width": 4, "padding_x": 8, "padding_bottom": 12,
+      // The "… N more lines" row: style keys over italic.
+      "more": {}
     },
+    // strip_prefix_min_digits: how many leading digits before a dash make a timestamp to hide, for step
+    // titles, chips, and files in sent messages (or one number for all). on_click: an action with
+    // .path, .agent_path, .name, .index, .chat.
     "attachments": {
       "size": 64, "image_width_factor": 2.5, "image_extensions": ["png", "jpg", "jpeg", "gif", "webp"], "strip_prefix": true,
-      "file_icon": "file", "name_size": 10, "uploading_overlay": "#00000073", "failed_border": "@danger",
-      "remove": { "size": 18, "icon_size": 11, "icon": "x", "top": 3, "right": 3, "background": "#000000a6", "color": "#ffffff" }
+      "strip_prefix_min_digits": { "steps": 10, "chips": 10, "messages": 1 },
+      "file_icon": "file", "file_icon_size": 18, "gap": 4, "padding": 4, "name_size": 10, "uploading_overlay": "#00000073",
+      "failed_border": "@danger", "failed_border_width": 2, "on_click": null,
+      "remove": { "size": 18, "icon_size": 11, "icon": "x", "top": 3, "right": 3, "background": "#000000a6", "color": "#ffffff", "hover": {} }
     },
+    // The file icon in a sent message's file chips (`file` styles the chip).
+    "file_icon_size": 14,
     // ---- Chips over the transcript ----
     "jump_icon": "arrow-down", "jump_icon_size": 13, "jump_bottom": 14,
     // The "Loading earlier messages…" chip (its look falls back to `jump`), and how close to the top loads more.
     "loading_chip_top": 10, "load_earlier_within": 0,
-    "drop_overlay_icon": "paperclip",
+    "drop_overlay_icon": "paperclip", "drop_overlay_icon_size": 22,
     // ---- The message box ----
     "composer_lines": { "min": 1, "max": 10 }, "composer_gap": 6, "composer_radius": 6,
     "suggestion_hint": "   ⇥ Tab",
@@ -1887,7 +1926,9 @@
     "type_to_focus": true,
     // Claude Code's suggested next prompt shows in the empty message box; Tab fills it in (doesn't send).
     "suggestions": true,
-    // Copy and Fork under each message while you hover it.
+    // Copy and Fork under each message while you hover it. An object sets buttons (["copy", "fork"], or
+    // {icon, tooltip, do, id?} with templates over .text .chat .index), show (hover | always), designer (true:
+    // also in the designer), icons, tooltips, icon_size, padding, radius, height, gap, color, hover.
     "message_actions": true,
     // Select and copy message text with the mouse.
     "selectable": true,
@@ -1906,6 +1947,11 @@
       "table_cell": { "padding": [6, 10] }
     },
     "completion_triggers": ["/"],
+    // What each trigger offers: commands (slash_commands), skills (skill_dirs), files (the worktree's, up to
+    // completion_files_max). Names starting with a skip prefix are left out. rank: default (prefix, then
+    // contains, then description) or fuzzy (letters in order).
+    "completion_sources": { "/": ["commands", "skills"], "@": ["files"] },
+    "completion_skip_prefixes": ["_", "."], "completion_rank": "default", "completion_files_max": 5000,
     // What "/" offers: these commands, then the skills and commands in skill_dirs ({worktree}: the chat's
     // worktree; box worktrees read this Mac's checkout of the same repo).
     "slash_commands": [
@@ -1919,6 +1965,7 @@
       { "name": "resume", "description": "Resume an earlier conversation" },
       { "name": "init", "description": "Write a CLAUDE.md for this repo" }
     ],
+    // Each a path, or {path, kind: skill | command, source: project | personal}.
     "skill_dirs": ["{worktree}/.claude/skills", "{worktree}/.claude/commands", "{worktree}/.agents/skills", "~/.claude/skills", "~/.claude/commands", "~/.agents/skills"],
     // Selecting a worktree opens its live chat, if any: "open" (default) shows no chat when none is
     // running; "recent" shows the chat with the newest activity even when it isn't; "first" its first tab.
@@ -1951,14 +1998,32 @@
     "notice": { "font_size": 12.5, "color": "@danger" },
     "empty": { "color": "@text_muted", "width": "full", "padding": [0, 32], "text_align": "center", "line_height": 1.5 },
     "waiting": { "padding": 12, "radius": 10, "border": 1, "border_color": "@warning", "background": "@waiting_bg", "font_size": 13 },
-    "waiting_option": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "background": "@pill", "hover": { "background": "@pill_hover" }, "font_size": 12.5, "align": "center" }
+    "waiting_option": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "background": "@pill", "hover": { "background": "@pill_hover" }, "font_size": 12.5, "align": "center" },
+    // The row of answer buttons in the waiting card.
+    "waiting_row": { "gap": 6, "wrap": true }
   },
 
   "diff": {
     "row_height": 20, "gutter_width": 44, "sign_width": 14, "note_font_size": 12,
-    "header": { "font_family": ".SystemUIFont", "font_size": 12.5 },
+    "header": { "font_family": "@font_ui", "font_size": 12.5 },
+    // Style objects over the built-in rows: a file's header, a hunk's @@ line, and each code line.
+    // gutter is the line numbers (click opens the line); its hover applies while pointed at.
+    "file_header": {}, "hunk": {}, "line": {}, "gutter": { "hover": { "opacity": 0.7 } },
+    "tab_width": 4,
+    "icons": { "open": "chevron-down", "closed": "chevron-right" },
+    // {n} is the count. context_sign is shown for unchanged lines; expand/collapse name header clicks for agents.
+    "labels": { "add_sign": "+", "del_sign": "−", "context_sign": " ", "arrow": "→", "added": "+{n}", "removed": "−{n}", "expand": "Expand", "collapse": "Collapse" },
+    // Long lines wrap instead of scrolling sideways (rows then size to their text).
+    "wrap": false,
+    // Where the file list sits: "left", "right", or "hidden".
+    "file_list_side": "left",
+    // A component name (or node) to draw instead of a built-in part, with the item as .props:
+    // file_row {path, old_path, status, adds, dels, dir, name, binary, collapsed, index, worktree, base};
+    // line {kind: add|del|context|meta, old, new, text, file, sign, row, worktree, base}. null: built in.
+    "render": { "file_row": null, "line": null },
     "max_lines_per_file": 4000, "refresh_ms": 2000,
-    // Each a color or @token.
+    // Each a color or @token. status_A, status_D, status_M, status_R... color a file's status letter
+    // (unset: A uses add, D uses del, the rest muted).
     "colors": { "add_bg": "@diff_add_bg", "del_bg": "@diff_del_bg", "add": "@diff_add", "del": "@diff_del", "muted": "@text_faint", "hunk_bg": "@diff_hunk_bg", "file_bg": "@diff_file_bg", "hover": "@hover" },
     // The line link for Mac worktrees (open_url is for box ones); both take {host} {machine} {path} {line}.
     "open_url_local": "cursor://file{path}:{line}",
@@ -1975,8 +2040,16 @@
     // The 16 ANSI colors, normal then bright.
     "palette": ["#1e1e1f", "#e5534b", "#3fb950", "#d29922", "#488efc", "#bc8cff", "#39c5cf", "#d6d6d8",
                 "#6e7681", "#ff7b72", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff"],
-    // shape: block | bar | underline | hollow | app; optional "color".
-    "cursor": { "shape": "block", "focused_alpha": 0.75, "unfocused_alpha": 0.3 },
+    // shape: block | bar | underline | hollow | app; optional "color"; thickness: bar/underline points;
+    // blink_ms: blink half-period while focused (0: steady).
+    "cursor": { "shape": "block", "focused_alpha": 0.75, "unfocused_alpha": 0.3, "thickness": 2, "blink_ms": 0 },
+    // Bold text's weight; bold_is_bright draws bold base colors (0-7) in their bright twins; dim text's opacity.
+    "bold_weight": 700, "bold_is_bright": false, "dim_alpha": 0.66,
+    // OSC-8 links programs print: underlined (in color, when set); a click with modifier (cmd | ctrl | alt |
+    // shift | none) opens them. inspect.json lists the ones on screen.
+    "links": { "enabled": true, "modifier": "cmd", "color": null },
+    // Cmd combos go to the app; true (or a list like ["cmd-b"]) sends them to the shell as meta (ESC + key).
+    "cmd_passthrough": false,
     "size": { "cols": 100, "rows": 30 },
     "scrollback": 10000,
     // The wheel: "auto" (to the program when it asks for the mouse; in a tmux shell, tmux's own history,
@@ -1992,7 +2065,9 @@
     "foreground": "#f5f5f7",
     "background": "#1e1e1f",
     // Mac-style editing: each combo sends this text to the shell (readline/zsh codes). Use opt or alt,
-    // cmd, ctrl, shift. {"paste": true} pastes the clipboard; null hands the combo back to the app.
+    // cmd, ctrl, shift. {"paste": true} pastes the clipboard; {"do": ...} (or {"action": ...}) runs an app
+    // action; null hands the combo back to the app. A `terminal` node's props font_size, font_family,
+    // line_height and padding override these for that view.
     "keys": {
       "cmd-backspace": "\u0015",
       "alt-backspace": "\u001b\u007f",
@@ -2185,7 +2260,7 @@
     "waiting_pattern": "(?i)Enter to select|Esc to cancel|Do you want to proceed|❯ 1\\. Yes",
     "waiting_pane_lines": 25,
     "suggestion_prompt": "❯\u00a0", "suggestion_rule": "──", "suggestion_placeholder_prefix": "Try \"",
-    "diff_max_bytes": 3000000, "diff_max_untracked": 200, "diff_include_untracked": true, "diff_default_base": "origin/main",
+    "diff_max_bytes": 3000000, "diff_max_untracked": 200, "diff_include_untracked": true, "diff_default_base": null,  // null: origin/HEAD, else origin/<default_base>
     // Moving a chat between the Mac and the box takes along: "section" (every worktree in its sidebar
     // section and all their chats, so a section lives in one place), "worktree" (its worktree's chats)
     // or "chat" (just it). A section move rebuilds the section on the other machine and removes it here
@@ -2210,20 +2285,108 @@
     // A new Codex chat's session id: bin/chat watches for its rollout this long after launch or a send.
     "session_wait_secs": 180, "session_poll_secs": 1,
     "codex_state_tail_kb": 512,          // how much of a rollout's end is read for its newest turn event
+    // Machines (bin/abxcfg.py resolves these for the daemon and every script). A host is AGENT_BOX_HOST, else
+    // ~/.agent-box/host, else the first entry whose `detect` matches ({env: VAR}, {os: darwin|linux},
+    // {hostname: regex}). Per host: label, ssh (how the others reach it; null: they can't), home, agent_box_dir,
+    // sc_store (its sidebar file), sessions_branch (default from `sessions_branch`), supervise (keep its chats
+    // running), relay_app_actions, sync_transcripts ("all" | "registry": only its registry chats), stacks
+    // (stack-start allowed), foreign_sessions (report super.engineering's running sessions), build_unwatched,
+    // env, agent_env, claude_settings (merged into ~/.claude/settings.json), agent_bin_dirs, boot ({kill_patterns,
+    // packages, install, claude_onboarding, git_insteadof, bashrc_hook, tmux_status_off, services: [{name, cmd,
+    // build}]}). Entries merge over the built-in box and mac; null removes one.
+    "hosts": {
+      "box": { "label": "box", "detect": { "env": "CODER_AGENT_URL" }, "agent_box_dir": "~/agent-box", "sc_store": "sc.json",
+               "supervise": true, "relay_app_actions": true, "sync_transcripts": "all", "stacks": false },
+      "mac": { "label": "Mac", "detect": { "os": "darwin" }, "ssh": null, "agent_box_dir": "~/dev/agent-box", "sc_store": "sc-mac.json",
+               "supervise": false, "relay_app_actions": false, "sync_transcripts": "registry", "stacks": true, "foreign_sessions": true }
+    },
+    // The box's ssh name for the daemon and scripts (null: the app's connection.ssh_host, else $AGENT_BOX_SSH);
+    // `remote_host` is the host id it names.
+    "ssh_host": null, "remote_host": "box",
+    "registry_default_host": "box",       // the host of a registry chat that names none
+    // Repos: primary checkout, worktrees (a path template: {branch_slug} {branch} {name} {repo}), names (other
+    // folder names for it), hue, forge ("gitlab" | "github" | "command" with forge_cmd | "none"; default from the
+    // origin's host), forge_project (default: origin's path), worktree_tool ({bin, bin_paths, create, remove,
+    // delete, list, start: argv templates with {bin} {branch} {path} {name} {primary} {worktrees_base} {force};
+    // env}; none: git worktree). A repo not listed is keyed by its folder name with a hue from it.
+    "repos": {
+      "redo": { "primary": "~/dev/redo", "worktrees": "~/dev/redo-worktrees/{branch_slug}", "hue": 210, "forge_project": "redo/redoapp/product/redo",
+                "worktree_tool": { "bin": "wt", "bin_paths": ["~/redo-monorepo-worktrees/bin/wt", "~/dev/redo-monorepo-worktrees/bin/wt"],
+                                   "create": ["{bin}", "{branch}", "--no-start"], "remove": ["{bin}", "remove", "{path}", ["{force}"]],
+                                   "delete": ["{bin}", "remove", "{path}", "--force", "--purge-cache"], "list": ["{bin}", "list"],
+                                   "start": ["{bin}", "start", "{branch}", "-d"], "partial_note": "run `wt adopt {path}` before starting its stack",
+                                   "env": { "WT_PRIMARY": "{primary}", "WT_BASE": "{worktrees_base}" } } },
+      "internal-tools": { "primary": "~/dev/redotech-internal-tools", "worktrees": "~/dev/redotech-internal-tools-worktrees/{name}", "hue": 120,
+                          "forge_project": "redo/redoapp/internal/redotech-internal-tools", "names": ["redotech-internal-tools", "internal-tools"] },
+      "redo-data": { "primary": "~/dev/redo-data", "worktrees": "~/dev/redo-data-worktrees/{name}", "hue": 30, "forge_project": "redo/redoapp/product/redo-data" }
+    },
+    "default_repo": "redo", "default_base": "main", "forge": null, "forge_cmd": null,
+    // Folders that are the same checkout on each host ({host: path}, or [mac path, box path]).
+    "path_aliases": [{ "mac": "~/dev/redo", "box": "~/project" }],
+    // Where the state and sessions branches live (null: this checkout's origin) and who commits to them.
+    "state_repo_url": null, "state_branch": "state", "sessions_branch": "sessions/{host}",
+    "git_author": { "name": "agent-box ({host})", "email": "tj@getredo.com" },
+    // New chats: kinds, the kinds that get a worktree of their own (orchestrator_branch: {slug} {id4}), what a
+    // fork of each kind becomes; sc worktree create's default folder name ({hex6}).
+    "chat_kinds": ["orchestrator", "feature", "primary"], "branch_kinds": ["orchestrator"], "fork_kinds": { "orchestrator": "feature" },
+    "orchestrator_branch": "sc-{slug}-{id4}", "worktree_name": "sc-{hex6}",
+    "tmux_prefix": "chat-", "tmux_id_chars": 8, "supervise_session": "agent-box",
+    // super.engineering, sharing this machine's sessions and worktrees (null: no such tool).
+    "foreign_tools": { "sc_bin": "~/.super.engineering/bin/sc", "managed_bases": ["~/.superconductor/worktrees"],
+                       "env_prefixes": ["SUPER_ENGINEERING_", "SUPERCONDUCTOR_"], "path_drop": ["~/.super.engineering/bin"] },
+    // What bin/agent-env gives every agent (hosts.HOST.agent_env adds to it).
+    "agent_env": { "secrets_file": "~/.config/agent-box/secrets.env", "path_prepend": [], "set": {}, "unset_prefixes": [] },
+    // bin/env-push (from the Mac): paths [{path, two_way, replace, exclude}], memory, skills_link, hooks_match
+    // {matcher (exact), command (regex)}, hosts (null: every other host with ssh).
+    "env_push": {
+      "hosts": null,
+      "paths": [
+        { "path": "~/.agents/skills/", "two_way": true, "exclude": [".git", "__pycache__"] },
+        { "path": "~/.claude/CLAUDE.md", "two_way": true },
+        { "path": "~/.agent-box/uploads/" },
+        { "path": "~/.config/redo/cursor-environments.json" },
+        { "path": "~/.config/redo/cursor-typecheck-agents.json" },
+        { "path": "~/.claude/hooks/block-squash.py", "replace": true }
+      ],
+      "memory": true, "skills_link": true,
+      "hooks_match": { "matcher": "mcp__.+__save_issue", "command": "block-squash" }
+    },
+    // Logs log_tail may read.
+    "logs": { "boxd": "~/.agent-box/boxd.log", "agent-box": "~/.agent-box/log/agent-box.log", "supervisor": "~/.agent-box/log/supervisor.log",
+              "boxd-build": "~/.agent-box/log/boxd-build.log", "dashboard": "~/.agent-box/log/dashboard.log", "ttyd": "~/.agent-box/log/ttyd.log" },
+    "log_tail_lines": 200, "hook_events_limit": 1000, "subscribe_replay_max": 1000,
+    "app_files": ["inspect.json", "activity.log", "problems.txt", "snapshot.png"],
+    "exec_allowed": true,                // the exec call (any shell command on this host)
+    "usage_size_bounds": [100000, 128000, 200000, 272000, 400000, 1000000],
+    // Timeouts (seconds) and polls.
+    "exec_timeout_secs": 120, "sc_timeout_secs": 600, "sc_list_timeout_secs": 60, "chat_new_timeout_secs": 900,
+    "chat_start_timeout_secs": 300, "chat_timeout_secs": 120, "chat_send_timeout_secs": 60, "chat_session_timeout_secs": 10,
+    "chat_move_timeout_secs": 1800, "wip_timeout_secs": 120, "hooks_timeout_secs": 60, "env_push_timeout_secs": 300,
+    "git_timeout_secs": 30, "forge_timeout_secs": 30, "tmux_timeout_secs": 5, "db_busy_ms": 3000, "app_action_poll_ms": 300,
+    // Script retries and waits.
+    "state_push_tries": 3, "state_push_wait_secs": 2, "stop_elsewhere_wait_secs": 5, "stop_elsewhere_kill_secs": 15,
+    "fork_chain_max": 50, "rc_scan_lines": 200, "wip_fetch_tries": 3, "abx_call_secs": 15,
     // The agent CLIs a chat can run (bin/chat launches them; the app shows name, icon, color; tab_icon puts
     // the icon on its tabs). Templates are argv: {bin} {id} (chat) {session} (the agent's) {from} (a fork's
     // source session) {name} {model} {prompt} {dir} {realdir}; a nested list drops when one of its values is
     // empty. session: "assigned" (the chat id) or "discovered" (found under sessions_dir after launch).
-    // transcripts: "claude" | "codex". turn_events: rollout events that set working/idle. Claude's
-    // prompt_char and waiting_pattern are the top-level keys above. The app presses interrupt_keys to stop
-    // a turn and cancel_keys to cancel a question (default ["Escape"]), and answer_key ("{n}") to pick option n.
+    // transcripts: "claude" | "codex" | "jsonl" (jsonl_fields {type, role, text, timestamp: JSON pointers}, roles,
+    // transcript_path {id} {session} {dir} {dir_slug}). turn_events: rollout events that set working/idle. trust:
+    // "claude" or {file, path, value}. rc_url_pattern, process_names + process_session_pattern (group 1: the
+    // session), transcripts_root + backup_dir (backed up by sync-worker; backup: false skips), hooks_file +
+    // hook_events (bin/agent-hooks), provider, limits_field. Claude's prompt_char and waiting_pattern are the
+    // top-level keys above. The app presses interrupt_keys to stop a turn and cancel_keys to cancel a question
+    // (default ["Escape"]), and answer_key ("{n}") to pick option n.
     "agents": {
       "claude": {
         "name": "Claude", "icon": "asterisk", "color": "@claude", "tab_icon": false,
         "bin": "claude", "session": "assigned", "transcripts": "claude", "trust": "claude", "remote_control": true, "stop_elsewhere": true,
         "new": ["{bin}", "--session-id", "{id}", "--remote-control", "{name}", ["--model", "{model}"], ["{prompt}"]],
         "resume": ["{bin}", "--resume", "{session}", "--remote-control", "{name}", ["--model", "{model}"]],
-        "fork": ["{bin}", "--resume", "{from}", "--fork-session", "--session-id", "{id}", "--remote-control", "{name}", ["--model", "{model}"]]
+        "fork": ["{bin}", "--resume", "{from}", "--fork-session", "--session-id", "{id}", "--remote-control", "{name}", ["--model", "{model}"]],
+        "rc_url_pattern": "https://claude\\.ai/code/session_[A-Za-z0-9]+", "provider": "anthropic",
+        "transcripts_root": "~/.claude/projects", "backup_dir": "projects", "hooks_file": "~/.claude/settings.json",
+        "process_names": ["claude"], "process_session_pattern": "--(?:resume|session-id)[ =]([0-9a-f]{8}-[0-9a-f-]{27})"
       },
       "codex": {
         "name": "Codex", "icon": "aperture", "color": "@text", "tab_icon": true,
@@ -2233,7 +2396,9 @@
         "fork": ["{bin}", "fork", "{from}", "-c", "check_for_update_on_startup=false", "-c", "projects={\"{realdir}\"={trust_level=\"trusted\"}}", ["--model", "{model}"]],
         "prompt_char": "›",
         "waiting_pattern": "(?i)Would you like to|Trust this folder|Hooks need review|enter to (confirm|continue|select)|esc to (cancel|skip|quit)|Allow .* to run",
-        "turn_events": { "task_started": "working", "task_complete": "idle", "turn_aborted": "idle" }
+        "turn_events": { "task_started": "working", "task_complete": "idle", "turn_aborted": "idle" },
+        "provider": "openai", "transcripts_root": "~/.codex/sessions", "backup_dir": "codex-sessions",
+        "hooks_file": "~/.codex/hooks.json", "hooks_home_env": "CODEX_HOME"
       }
     }
   }

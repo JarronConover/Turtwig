@@ -1,17 +1,34 @@
 #!/usr/bin/env bash
-# wip-restore [--fresh] <worktree> [host]: put another host's latest WIP for
+# wip-restore [--fresh] <worktree> [--from HOST | HOST]: put another host's latest WIP for
 # this branch into a clean worktree: its unpushed commits, plus its
-# uncommitted changes left uncommitted. host defaults to the other machine.
+# uncommitted changes left uncommitted. HOST defaults to the other machine
+# (when there is just one).
 # --fresh: the worktree was just created, so move its branch to the WIP's
 # head even when that isn't a fast-forward.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 
-fresh=0
-[ "${1:-}" = --fresh ] && { fresh=1; shift; }
-[ $# -ge 1 ] || { echo "usage: wip-restore [--fresh] <worktree> [box|mac]" >&2; exit 2; }
-top=$(git -C "$1" rev-parse --show-toplevel)
-from=${2:-$([ "$AGENT_HOST" = box ] && echo mac || echo box)}
+fresh=0 from= dir=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fresh) fresh=1; shift ;;
+    --from) from=${2:-}; shift 2 ;;
+    *) if [ -z "$dir" ]; then dir=$1; else from=$1; fi; shift ;;
+  esac
+done
+[ -n "$dir" ] || { echo "usage: wip-restore [--fresh] <worktree> [--from HOST]" >&2; exit 2; }
+top=$(git -C "$dir" rev-parse --show-toplevel)
+if [ -z "$from" ]; then
+  others=$(cfg hosts | jq -r --arg me "$AGENT_HOST" 'keys_unsorted[] | select(. != $me)' 2> /dev/null)
+  if [ -z "$others" ]; then
+    others=$([ "$AGENT_HOST" = box ] && echo mac || echo box)
+  fi
+  [ "$(printf '%s\n' "$others" | wc -l)" -eq 1 ] || { echo "more than one other host ($(echo $others)); pass --from HOST" >&2; exit 2; }
+  from=$others
+fi
+from_branch=$(cfg host "$from" | jq -r '.sessions_branch // empty' 2> /dev/null)
+from_branch=${from_branch:-sessions/$from}
+fetch_tries=$(opt wip_fetch_tries); fetch_tries=${fetch_tries:-3}
 key=$(wip_key "$top") || { echo "not on a branch with an origin: $top" >&2; exit 1; }
 
 if [ -n "$(git -C "$top" status --porcelain)" ]; then
@@ -20,7 +37,7 @@ if [ -n "$(git -C "$top" status --porcelain)" ]; then
 fi
 
 ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"
-git -C "$AGENT_SESSIONS_DIR" fetch -q origin "sessions/$from"
+git -C "$AGENT_SESSIONS_DIR" fetch -q origin "$from_branch"
 if ! meta=$(git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.json" 2> /dev/null); then
   echo "no WIP from $from for $key" >&2
   exit 1
@@ -33,7 +50,7 @@ head=$(jq -r .head <<< "$meta")
 snap=$(jq -r .snap <<< "$meta")
 # Other sessions fetch in the same repo and hold ref locks; retry, then go on
 # (the bundle fetch below fails clearly if a needed commit is still missing).
-for i in 1 2 3; do
+for i in $(seq 1 "$fetch_tries"); do
   git -C "$top" fetch -q origin 2> /dev/null && break
   sleep $((i * 3))
 done

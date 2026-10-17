@@ -74,6 +74,8 @@ pub struct MotionStore {
     snap_frame: u64,
     /** Where nodes with their own `id` ended up this frame, for `inspect.json`. */
     pub bounds: HashMap<String, [f32; 4]>,
+    /** Nodes whose bounds a `Track` recorded (they don't move), by the frame it last did. */
+    tracked: HashMap<String, u64>,
 }
 
 impl Default for MotionStore {
@@ -89,6 +91,7 @@ impl Default for MotionStore {
             viewport: Size::default(),
             snap_frame: 0,
             bounds: HashMap::new(),
+            tracked: HashMap::new(),
         }
     }
 }
@@ -106,8 +109,9 @@ impl MotionStore {
     pub fn prune(&mut self) {
         let frame = self.frame;
         self.entries.retain(|_, e| e.seen + 2 >= frame);
-        let live: std::collections::HashSet<&String> = self.entries.keys().collect();
-        self.bounds.retain(|k, _| live.contains(k));
+        self.tracked.retain(|_, seen| *seen + 2 >= frame);
+        let (entries, tracked) = (&self.entries, &self.tracked);
+        self.bounds.retain(|k, _| entries.contains_key(k) || tracked.contains_key(k));
     }
 
     fn offset(&mut self, key: &str, origin: Point<Pixels>, window: &mut Window) -> Point<f32> {
@@ -195,6 +199,58 @@ impl Element for Motion {
             self.child.prepaint(window, cx);
         });
         self.store.borrow_mut().stack.pop();
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+        self.child.paint(window, cx);
+    }
+}
+
+/** Records where a node that doesn't glide ended up (`inspect.json` layout), without moving it. */
+pub struct Track {
+    key: String,
+    child: AnyElement,
+    store: Rc<RefCell<MotionStore>>,
+}
+
+impl Track {
+    pub fn new(key: String, child: AnyElement, store: Rc<RefCell<MotionStore>>) -> Self {
+        Self { key, child, store }
+    }
+}
+
+impl IntoElement for Track {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Track {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+        {
+            let mut store = self.store.borrow_mut();
+            let frame = store.frame;
+            store.tracked.insert(self.key.clone(), frame);
+            let b = [f32::from(bounds.origin.x), f32::from(bounds.origin.y), f32::from(bounds.size.width), f32::from(bounds.size.height)];
+            store.bounds.insert(self.key.clone(), b);
+        }
+        self.child.prepaint(window, cx);
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {

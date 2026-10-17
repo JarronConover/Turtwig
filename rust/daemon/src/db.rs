@@ -1,14 +1,13 @@
 use agent_box_protocol::HookEvent;
 use rusqlite::{params, Connection};
 use std::io::Read;
-use std::time::Duration;
 
 use crate::util;
 
 pub fn open() -> rusqlite::Result<Connection> {
     let _ = std::fs::create_dir_all(util::agent_home());
     let conn = Connection::open(util::db_path())?;
-    conn.busy_timeout(Duration::from_secs(3))?;
+    conn.busy_timeout(crate::config::ms("db_busy_ms", 3000))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS events (
@@ -53,6 +52,20 @@ pub fn since(conn: &Connection, seq: i64, limit: i64) -> Vec<HookEvent> {
         Err(_) => return vec![],
     };
     st.query_map(params![seq, limit], row).map(|it| it.flatten().collect()).unwrap_or_default()
+}
+
+/** Events after `from_seq`, at or after `since`, of one session, oldest first. */
+pub fn query(conn: &Connection, session: Option<&str>, from_seq: Option<i64>, since: Option<f64>, limit: i64) -> Vec<HookEvent> {
+    let mut st = match conn.prepare(
+        "SELECT seq, at, event, session_id, payload FROM events
+         WHERE seq > ?1 AND at >= ?2 AND (?3 IS NULL OR session_id = ?3) ORDER BY seq LIMIT ?4",
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    st.query_map(params![from_seq.unwrap_or(0), since.unwrap_or(0.0), session, limit], row)
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default()
 }
 
 /** The most recent event of each session, oldest first. */

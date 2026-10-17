@@ -24,10 +24,9 @@ REGISTRY = HOME / ".agent-box" / "state" / "registry" / "chats"
 PROJECTS = HOME / ".claude" / "projects"
 CHAT = ROOT / "bin" / "chat"
 SC = ROOT / "shim" / "sc"
-REPOS = {"redo": ("redo", "redo/redoapp/product/redo"),
-         "internal-tools": ("redotech-internal-tools", "redo/redoapp/internal/redotech-internal-tools"),
-         "redo-data": ("redo-data", "redo/redoapp/product/redo-data")}
 sys.path.insert(0, str(ROOT / "lib"))
+sys.path.insert(0, str(ROOT / "bin"))
+import abxcfg  # noqa: E402
 import sidebar as sidebar_lib  # noqa: E402
 
 API = {
@@ -79,14 +78,15 @@ def waiting(session):
 
 def chats():
     alive = tmux_sessions()
-    host = "box" if os.environ.get("CODER_AGENT_URL") else "mac"
+    host = abxcfg.host_id()
+    prefix, chars = abxcfg.option("tmux_prefix", "chat-"), int(abxcfg.option("tmux_id_chars", 8))
     result = []
     for path in sorted(REGISTRY.glob("*.json")) if REGISTRY.exists() else []:
         c = read_json(path)
         if not c or c.get("status") == "archived":
             continue
-        session = f"chat-{c['id'][:8]}"
-        c["alive"] = c.get("host") == host and session in alive
+        session = f"{prefix}{c['id'][:chars]}"
+        c["alive"] = c.get("host", "box") == host and session in alive
         # A Codex chat's rollout, else its Claude Code session file.
         t = Path(c["transcript"]) if c.get("transcript") else PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", c.get("dir") or "") / f"{c['id']}.jsonl"
         c["last_ts"] = t.stat().st_mtime if t.exists() else None
@@ -141,7 +141,7 @@ def glab_json(path):
 def _mr(key):
     """The newest MR for a branch, shaped like super.engineering's: {state, number, url, checks}."""
     repo, branch = key
-    project = REPOS.get(repo, (None, None))[1]
+    project = (abxcfg.repos().get(repo) or {}).get("forge_project")
     if not project or not branch:
         return None
     pid = project.replace("/", "%2F")
@@ -177,21 +177,20 @@ def sidebar():
     for c in cs:
         if c.get("dir"):
             by_dir.setdefault(os.path.realpath(c["dir"]), []).append(c)
-    repo_of = {name: key for key, (name, _) in REPOS.items()}
-    box = sidebar_lib.build(sc_json("workspace", "list"), sc_json("section", "list"), "box")
+    box = sidebar_lib.build(sc_json("workspace", "list"), sc_json("section", "list"), abxcfg.host_id())
     for group in box["projects"] + box["sections"]:
         for it in group["items"]:
             it["chats"] = by_dir.get(os.path.realpath(it["path"]), [])
             it["local"] = LOCAL.get(it["path"]) or {}
             if not it["is_primary"]:
-                it["pr"] = MRS.get((repo_of.get(it.get("project")), it.get("branch")))
+                it["pr"] = MRS.get((abxcfg.repo_for_folder(it.get("project") or ""), it.get("branch")))
             if any(c["working"] for c in it["chats"]):
                 it["agent_status"] = "working"
             elif any(c["waiting"] for c in it["chats"]):
                 it["agent_status"] = "waiting"
             it["age"] = max([c["last_ts"] or 0 for c in it["chats"]] + [it.get("age") or 0]) or None
     return {"generated_at": iso(now()), "hosts": [box],
-            "ssh_host": os.environ.get("AGENT_BOX_SSH_HOST", "coder.tj-agents")}
+            "ssh_host": os.environ.get("AGENT_BOX_SSH_HOST") or abxcfg.host().get("ssh") or ""}
 
 
 def shell_session(path):
