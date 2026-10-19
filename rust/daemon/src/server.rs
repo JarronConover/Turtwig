@@ -58,13 +58,7 @@ impl Shared {
     }
 
     fn apply_event(&self, e: &agent_box_protocol::HookEvent) {
-        if e.event == "Notification" && !model::needs_user(&e.payload) {
-            return;
-        }
-        if let (Some(sid), Some(state)) = (&e.session_id, model::state_for_event(&e.event)) {
-            let waiting = (state == "waiting").then(|| e.payload.clone());
-            self.states.lock().unwrap().insert(sid.clone(), (state, waiting));
-        }
+        model::apply_hook(&mut self.states.lock().unwrap(), e);
     }
 }
 

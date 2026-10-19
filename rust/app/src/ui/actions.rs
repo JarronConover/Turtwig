@@ -38,7 +38,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("section.rename", "{id, name?}: rename (asks when name is missing)"),
     ("section.delete", "{id}"),
     ("section.move", "{id?, index? | target: section id with zone}: reorder a section (id defaults to `dragged`)"),
-    ("worktree.move", "{path?, section?: id|null, before?: path | target: path with zone: before|after}: move a worktree into a section (null: under its project), next to another or last (path defaults to `dragged`; drops supply `zone`)"),
+    ("worktree.move", "{path?, section?: id|null, before?: path | target: path with zone: before|after}: move a worktree into a section (null: under its project), next to another or last (path defaults to `dragged`; drops supply `zone`); a project listing several machines' worktrees keeps its order in `state.worktree_order:REPO`"),
     ("project.move", "{repo?, index? | target: repo with zone}: reorder a project (repo defaults to `dragged`)"),
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
     ("worktree.delete", "{path}"),
@@ -119,6 +119,22 @@ impl Workspace {
             }
         }
         None
+    }
+
+    /** After a move within a project that lists several machines' worktrees: saves the order the sidebar
+    shows now (`state.worktree_order:REPO`) and returns where the worktree's own machine puts it (before the
+    next of its own worktrees in that order; none: last). */
+    fn keep_worktree_order(&mut self, path: &str) -> Option<String> {
+        let (i, p) = self.model.projects.iter().enumerate().find(|(_, p)| p.items.iter().any(|w| w.path == path))?;
+        let at = p.items.iter().position(|w| w.path == path)?;
+        let host = p.items[at].host.clone();
+        let next = p.items[at + 1..].iter().find(|w| w.host == host).map(|w| w.path.clone());
+        if self.project_hosts.get(i).is_some_and(|h| h.len() > 1) {
+            let order = p.items.iter().map(|w| Value::String(w.path.clone())).collect();
+            let key = format!("worktree_order:{}", p.repo);
+            self.set_state(key, Value::Array(order));
+        }
+        next
     }
 
     /** Applies a worktree move to the local model at once, so the sidebar settles before the box confirms. */
@@ -771,6 +787,7 @@ impl Workspace {
                     };
                     if before.as_deref() != Some(path.as_str()) {
                         self.move_worktree_now(&path, s("section").as_deref(), before.as_deref());
+                        let before = if s("section").is_none() { self.keep_worktree_order(&path) } else { before };
                         self.call(Call::WorktreeMove { path, section: s("section"), before }, cx);
                     }
                 }

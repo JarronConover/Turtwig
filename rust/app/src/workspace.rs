@@ -1753,6 +1753,12 @@ impl Workspace {
             }
             merged.chats.extend(m.chats.iter().cloned());
         }
+        for (p, hosts) in merged.projects.iter_mut().zip(&project_hosts) {
+            if let Some(saved) = self.state.get(&format!("worktree_order:{}", p.repo)).and_then(Value::as_array).filter(|_| hosts.len() > 1) {
+                let saved: Vec<&str> = saved.iter().filter_map(Value::as_str).collect();
+                apply_order(&mut p.items, &saved);
+            }
+        }
         self.model = merged;
         self.apply_just_sent();
         self.project_hosts = project_hosts;
@@ -4617,6 +4623,24 @@ pub(crate) fn decode_image(media_type: &str, data: &str) -> Option<std::sync::Ar
     Some(std::sync::Arc::new(Image::from_bytes(format, bytes)))
 }
 
+/** A merged project's worktrees in `saved` order (`state.worktree_order:REPO`, kept by dragging, since each
+machine orders only its own). One not in it stays by its machine's order: after the one its machine lists
+before it, else before the one after it. */
+pub(crate) fn apply_order(items: &mut Vec<Worktree>, saved: &[&str]) {
+    let rank = |w: &Worktree| saved.iter().position(|p| *p == w.path);
+    let machine = std::mem::take(items);
+    let mut placed: Vec<&Worktree> = machine.iter().filter(|w| rank(w).is_some()).collect();
+    placed.sort_by_key(|w| rank(w));
+    for (i, w) in machine.iter().enumerate().filter(|(_, w)| rank(w).is_none()) {
+        let same = |x: &&Worktree| x.host == w.host;
+        let after = machine[..i].iter().rev().filter(same).find_map(|p| placed.iter().position(|x| x.path == p.path)).map(|at| at + 1);
+        let before = || machine[i + 1..].iter().filter(same).find_map(|n| placed.iter().position(|x| x.path == n.path));
+        let at = after.or_else(before).unwrap_or(placed.len());
+        placed.insert(at, w);
+    }
+    *items = placed.into_iter().cloned().collect();
+}
+
 /** A waiting chat's choices: the first question's options (or `chat.waiting_options`), and the text of
 every question when there are several (`chat.waiting_all_questions`). */
 pub(crate) fn waiting_options(w: &Value, settings: &Settings) -> (Vec<String>, Vec<String>) {
@@ -4735,4 +4759,29 @@ fn block_sig(items: &[Item], b: &crate::ui::trace_view::Block) -> u64 {
         Block::Pending(t) => t.hash(&mut h),
     }
     h.finish()
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::apply_order;
+    use agent_box_protocol::Worktree;
+
+    fn w(path: &str, host: &str) -> Worktree {
+        Worktree { path: path.into(), host: host.into(), ..Default::default() }
+    }
+
+    fn paths(items: &[Worktree]) -> Vec<&str> {
+        items.iter().map(|w| w.path.as_str()).collect()
+    }
+
+    #[test]
+    fn a_saved_order_mixes_machines_and_new_worktrees_keep_their_machines_place() {
+        let mut items = vec![w("m1", "mac"), w("m2", "mac"), w("m3", "mac"), w("b1", "box"), w("b2", "box")];
+        apply_order(&mut items, &["m1", "b1", "m3", "m2"]);
+        // m1 b1 m3 m2 saved; b2 follows b1 on the box.
+        assert_eq!(paths(&items), ["m1", "b1", "b2", "m3", "m2"]);
+        let mut items = vec![w("m0", "mac"), w("m1", "mac"), w("b1", "box")];
+        apply_order(&mut items, &["b1", "m1", "gone"]);
+        assert_eq!(paths(&items), ["b1", "m0", "m1"]);
+    }
 }

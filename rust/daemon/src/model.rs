@@ -250,6 +250,22 @@ fn sc(args: &[&str]) -> Value {
 /** Chat state from its latest hook: (state, waiting_on). */
 pub type ChatStates = HashMap<String, (String, Option<Value>)>;
 
+/** A hook event's effect on its chat's state. Claude Code follows a PermissionRequest (the tool and its
+input: a question's options) with a bare "needs your permission" Notification, so that one keeps what the
+first said it waits on. */
+pub fn apply_hook(states: &mut ChatStates, e: &agent_box_protocol::HookEvent) {
+    if e.event == "Notification" && !needs_user(&e.payload) {
+        return;
+    }
+    let Some((sid, state)) = e.session_id.as_ref().zip(state_for_event(&e.event)) else { return };
+    let named = |w: &Option<Value>| w.as_ref().is_some_and(|w| w.get("tool_input").is_some());
+    if e.event == "Notification" && states.get(sid).is_some_and(|(st, w)| st == "waiting" && named(w)) {
+        return;
+    }
+    let waiting = (state == "waiting").then(|| e.payload.clone());
+    states.insert(sid.clone(), (state, waiting));
+}
+
 /** The chat state a hook event puts a chat in; `hook_states` ({event: state, or null to ignore it})
 overrides these. */
 pub fn state_for_event(event: &str) -> Option<String> {
@@ -756,6 +772,19 @@ mod tests {
         assert_eq!(suggestion(&pane("")), None);
         assert_eq!(suggestion(&pane("com\x1b[2mmit this\x1b[0m")), None);
         assert_eq!(suggestion(&pane("\x1b[2mTry \"fix lint errors\"\x1b[0m")), None);
+    }
+
+    #[test]
+    fn a_permission_notification_keeps_the_question_it_follows() {
+        let ev = |event: &str, payload: serde_json::Value| agent_box_protocol::HookEvent { seq: 0, at: 0., event: event.into(), session_id: Some("s".into()), payload };
+        let mut states = super::ChatStates::new();
+        let ask = json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Dev only?"}]}});
+        super::apply_hook(&mut states, &ev("PermissionRequest", ask.clone()));
+        super::apply_hook(&mut states, &ev("Notification", json!({"notification_type": "permission_prompt", "message": "Claude needs your permission"})));
+        assert_eq!(states["s"], ("waiting".into(), Some(ask)));
+        super::apply_hook(&mut states, &ev("PostToolUse", json!({})));
+        super::apply_hook(&mut states, &ev("Notification", json!({"notification_type": "permission_prompt", "message": "Claude needs your permission"})));
+        assert_eq!(states["s"].1.as_ref().and_then(|w| w.get("message")).and_then(|m| m.as_str()), Some("Claude needs your permission"));
     }
 
     #[test]
