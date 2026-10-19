@@ -50,10 +50,12 @@ def ssh_mux():
 
 
 def ssh(host, *command, stdin=False):
+    remote_called()
     return ["ssh", *([] if stdin else ["-n"]), *ssh_mux(), ssh_to(host), *command]
 
 
 def rsync():
+    remote_called()
     return ["rsync", "-e", shlex.join(["ssh", *ssh_mux()])]
 
 # How an agent's `trust` pre-accepts a folder: set `path` (keys; {dir} is the folder) to `value` in `file`.
@@ -136,7 +138,14 @@ def now():
 def run(cmd, **kw):
     kw.setdefault("check", True)
     kw.setdefault("text", True)
-    return subprocess.run(cmd, **kw)
+    if not os.environ.get("ABX_TIMING"):
+        return subprocess.run(cmd, **kw)
+    # ABX_TIMING=1: how long each command took, on stderr (finding what makes a move slow).
+    start = time.time()
+    try:
+        return subprocess.run(cmd, **kw)
+    finally:
+        print(f"[{time.time() - start:6.2f}s] {shlex.join(map(str, cmd))[:160]}", file=sys.stderr)
 
 
 def git_state(*args, check=True):
@@ -154,10 +163,24 @@ class StateLock:
         self.f.close()
 
 
-def pull_state():
+# When this process last pulled the state branch; a call to another machine (which may write it) makes
+# the next pull_state really pull.
+PULLED = {"at": 0.0}
+
+
+def pull_state(force=False):
+    """Bring in the other machines' state writes. Skipped when this process pulled within
+    `state_pull_reuse_secs` and called no other machine since (each pull is a GitLab round trip)."""
     if not abxcfg.state_repo_url():
         return
+    if not force and time.time() - PULLED["at"] < option("state_pull_reuse_secs", 20):
+        return
     git_state("pull", "-q", "--rebase", "--autostash", "origin", abxcfg.state_branch(), check=False)
+    PULLED["at"] = time.time()
+
+
+def remote_called():
+    PULLED["at"] = 0.0
 
 
 def commit_state(message):
@@ -168,11 +191,14 @@ def commit_state(message):
         git_state("commit", "-q", "-m", message)
     if not abxcfg.state_repo_url():
         return
-    for _ in range(max(1, int(option("state_push_tries", 3)))):
-        pull_state()
+    # Push first: a pull is only needed when another machine pushed since this one last pulled.
+    for i in range(max(1, int(option("state_push_tries", 3)))):
+        if i:
+            pull_state(force=True)
         if git_state("push", "-q", "origin", f"HEAD:{abxcfg.state_branch()}", check=False).returncode == 0:
             return
-        time.sleep(option("state_push_wait_secs", 2))
+        if i:
+            time.sleep(option("state_push_wait_secs", 2))
     print("warning: state push failed; it will go out with the next write", file=sys.stderr)
 
 
@@ -840,8 +866,10 @@ def take_over(chat, directory):
     chat["host"] = HOST
     chat["dir"] = str(directory)
     chat["status"] = "running"
-    launch(chat, resume=True)
+    # The Remote Control link takes seconds to show up; `_rc` records it once it does.
+    launch(chat, resume=True, wait_rc=False)
     save(chat, f"chat moved to {HOST}: {chat['name']}", wait=True)
+    background("_rc", chat["id"])
 
 
 def prepare_here(chat, frm):
@@ -996,7 +1024,10 @@ def on_host(host, *args):
     """Run this script's command on a machine; returns its stdout."""
     if host == HOST:
         return run([sys.executable, __file__, *args], capture_output=True).stdout
-    out = run(ssh(host, remote_tool(host, "bin/chat") + " " + shlex.join(args)), check=False, capture_output=True)
+    timing = "ABX_TIMING=1 " if os.environ.get("ABX_TIMING") else ""
+    out = run(ssh(host, timing + remote_tool(host, "bin/chat") + " " + shlex.join(args)), check=False, capture_output=True)
+    if timing and out.stderr:
+        print("\n".join(f"  {label(host)} {l}" for l in out.stderr.splitlines() if l.startswith("[")), file=sys.stderr)
     if out.returncode != 0:
         sys.exit(f"{label(host)}: {out.stderr.strip() or out.stdout.strip()}")
     return out.stdout
@@ -1104,7 +1135,8 @@ def move_worktree(folder, branch, repo, chats, src, dst):
             take_over(c, Path(new))
             if status[c["id"]] == "stopped":
                 set_status(find(c["id"]), "stopped")
-    pull_state()
+    if src == HOST:
+        pull_state()
     return new
 
 
@@ -1231,6 +1263,7 @@ def cmd__drop_worktree(args):
     """Take a worktree a move left behind off this machine: remove (the folder goes, wt frees its slot;
     the branch and its commits stay) or delete (also its bazel cache and local branch). Main checkouts
     and folders a chat still uses here are left alone."""
+    pull_state()
     path = os.path.realpath(args.dir)
     common = run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"], check=False, capture_output=True).stdout.strip()
     repo = repo_of(Path(common).parent) if common else None
@@ -1279,6 +1312,13 @@ def leave_behind(src, folders):
                 print(on_host(src, "_drop_worktree", folder, mode).strip())
         except (SystemExit, subprocess.CalledProcessError, subprocess.TimeoutExpired) as err:
             print(f"left {folder} on the {label(src)}: {err}", file=sys.stderr)
+
+
+def cmd__leave_behind(args):
+    out = subprocess.run([sys.executable, __file__, "_leave_behind_now", args.src, *args.folders], capture_output=True, text=True)
+    with open(AGENT_HOME / "log" / "agent-box.log", "a") as log:
+        for line in (out.stdout + out.stderr).strip().splitlines():
+            log.write(f"{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%dT%H:%M:%SZ} [chat move] {line}\n")
 
 
 def is_orchestrator(chat):
@@ -1347,8 +1387,10 @@ def cmd_move(args):
     if section:
         move_section(section, src, dst, moved, labels)
     note_moved(every, src, dst, section, moved)
-    pull_state()
-    leave_behind(src, [f for f, b, *_ in groups if b and f])
+    leftovers = [f for f, b, *_ in groups if b and f]
+    if leftovers and option("move_leftovers", "hide") != "keep":
+        # The move is done; tidying what it left on src needn't hold it up (agent-box.log has the outcome).
+        background("_leave_behind", src, *leftovers)
     what = f"section {section['name']}" if section else chat["name"]
     print(f"moved {what} to the {label(dst)}: {len(every)} chat(s), {len(groups)} worktree(s)")
     for a, b in moved.items():
@@ -1618,6 +1660,11 @@ def main():
     h.add_argument("chats", nargs="*")
     h.add_argument("--dir")
     h.set_defaults(fn=cmd__release)
+    for name, fn in [("_leave_behind", cmd__leave_behind), ("_leave_behind_now", lambda a: leave_behind(a.src, a.folders))]:
+        h = sub.add_parser(name)
+        h.add_argument("src")
+        h.add_argument("folders", nargs="+")
+        h.set_defaults(fn=fn)
     h = sub.add_parser("_receive")
     h.add_argument("spec", help="JSON: {repo, branch, from, chats: [{id, stopped}]}")
     h.set_defaults(fn=cmd__receive)
