@@ -2,7 +2,6 @@ mod behavior;
 mod completions;
 mod designer;
 mod diff;
-mod jsc;
 mod logo;
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]

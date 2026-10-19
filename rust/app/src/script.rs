@@ -1,104 +1,15 @@
-/*! Live abilities: JavaScript (JavaScriptCore, macOS's JIT engine) loaded from settings and `scripts/NAME.js`, reloaded on every change.
-Scripts add actions and event handlers and reach the app, the box, the shell, and files through `ab`. */
+/*! Live abilities: Rust scripts (settings `scripts` and `scripts/NAME.rs`) compiled to WebAssembly and run
+by wasmtime, rebuilt on every change. Each reaches the app through the `ab` crate's JSON messages. */
 
 use crate::settings;
 use serde_json::{json, Map, Value};
-use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::io::{Read as _, Write as _};
 use std::rc::Rc;
 use std::time::Duration;
 
-/** The JS side of the bridge: everything goes out through `__send(json)` and comes back in through
-`__deliver(json)`; `__call` runs the synchronous natives (files, environment). */
-const PRELUDE: &str = r#"
-(() => {
-  const handlers = { action: {}, event: {}, timer: {}, reply: {}, proc: {} };
-  let next = 1;
-  // What this delivery has set (ab.set, ab.data), visible to ab.context() before the app applies it.
-  let overlay = { state: {}, data: {} };
-  let cached = null;
-  const send = (m) => __send(JSON.stringify(m));
-  const wait = (m, cb) => { const id = next++; if (cb) handlers.reply[id] = cb; send({ ...m, id }); return id; };
-  const call = (name, args, cb) => wait({ type: "call", name, args: args || {} }, cb);
-  const callSync = (name, args) => {
-    const r = JSON.parse(__call(name, JSON.stringify(args || {})));
-    if (r.error) throw new Error(name + ": " + r.error);
-    return r.value;
-  };
-  const noteDo = (action) => {
-    if (action && action.do === "state.set" && typeof action.key === "string") { overlay.state[action.key] = action.value; cached = null; }
-  };
-  globalThis.ab = {
-    action(name, fn) { handlers.action[name] = fn; send({ type: "register", name }); },
-    on(event, fn) { (handlers.event[event] ||= []).push(fn); },
-    do(action) { noteDo(action); send({ type: "do", action }); },
-    context() {
-      if (!cached) cached = JSON.parse(__context());
-      const c = { ...cached, state: { ...cached.state, ...overlay.state }, data: { ...cached.data, ...overlay.data } };
-      return c;
-    },
-    get state() { return this.context().state; },
-    set(key, value) { this.do({ do: "state.set", key, value }); },
-    data(name, value) { overlay.data[name] = value; send({ type: "data", name, value }); },
-    notify(text) { send({ type: "do", action: { do: "notify", text: String(text) } }); },
-    every(ms, fn) { const id = next++; handlers.timer[id] = fn; send({ type: "timer", id, ms, repeat: true }); return id; },
-    after(ms, fn) { const id = next++; handlers.timer[id] = fn; send({ type: "timer", id, ms, repeat: false }); return id; },
-    cancel(id) { delete handlers.timer[id]; send({ type: "cancel", id }); },
-    shell(cmd, cb, opts) { return wait({ type: "shell", cmd, ...(opts || {}) }, cb); },
-    box(method, params, cb, opts) { return wait({ type: "box", method, params: params || {}, host: opts && opts.host }, cb); },
-    http(req, cb) { return call("http", req, cb); },
-    fetch(url, cb, opts) { return call("http", { url, ...(opts || {}) }, cb); },
-    read(path) { const r = __read(String(path)); return r === undefined ? null : r; },
-    write(path, text, cb) { return wait({ type: "write", path: String(path), text: String(text) }, cb && ((_, err) => cb(err || null))); },
-    emit(event, payload) { send({ type: "emit", event, payload }); },
-    log(...parts) { send({ type: "log", text: parts.map((p) => typeof p === "string" ? p : JSON.stringify(p)).join(" ") }); },
-    call, callSync,
-    clipboard: { read(cb) { return call("clipboard.read", {}, cb); }, write(text, cb) { return call("clipboard.write", { text: String(text) }, cb); } },
-    fs: {
-      list(path) { return callSync("fs.list", { path }); },
-      exists(path) { return callSync("fs.exists", { path }); },
-      stat(path) { return callSync("fs.stat", { path }); },
-      mkdir(path) { return callSync("fs.mkdir", { path }); },
-      remove(path) { return callSync("fs.remove", { path }); },
-      watch(path, fn) { const id = next++; handlers.proc[id] = { change: fn }; send({ type: "call", name: "fs.watch", args: { path, watch: id }, id: next++ }); return id; },
-    },
-    spawn(cmd, opts, on) {
-      const id = next++;
-      handlers.proc[id] = on || {};
-      send({ type: "call", name: "proc.spawn", args: { cmd, ...(opts || {}), proc: id }, id: next++ });
-      return { id, write: (data) => call("proc.write", { proc: id, data: String(data) }), kill: () => call("proc.kill", { proc: id }) };
-    },
-    inspect(cb) { return call("inspect", {}, cb); },
-    patch(ops) { send({ type: "patch", ops: Array.isArray(ops) ? ops : [ops] }); },
-    key(key, action, opts) { send({ type: "key", key: { key, do: action, ...(opts || {}) } }); },
-    command(label, action, opts) { send({ type: "command", command: { label, do: action, ...(opts || {}) } }); },
-  };
-  globalThis.console = { log: ab.log, error: ab.log, warn: ab.log };
-  globalThis.__deliver = (raw) => {
-    const m = JSON.parse(raw);
-    overlay = { state: {}, data: {} };
-    cached = null;
-    try {
-      if (m.type === "action") return handlers.action[m.name]?.(m.args || {}, ab.context());
-      if (m.type === "event") return (handlers.event[m.name] || []).forEach((fn) => fn(m.payload, ab.context()));
-      if (m.type === "timer") { const fn = handlers.timer[m.id]; if (fn) fn(); if (!m.repeat) delete handlers.timer[m.id]; return; }
-      if (m.type === "reply") { const fn = handlers.reply[m.id]; delete handlers.reply[m.id]; return fn?.(m.result, m.error); }
-      if (m.type === "proc") {
-        const h = handlers.proc[m.proc] || {};
-        if (m.stream && h[m.stream]) h[m.stream](m.data);
-        if ("exit" in m) { delete handlers.proc[m.proc]; h.exit?.(m.exit); }
-        return;
-      }
-      if (m.type === "eval") return (new Function("args", "ctx", "ab", m.code))(m.args || {}, ab.context(), ab);
-    } catch (e) {
-      send({ type: "error", text: String(e && e.stack || e) });
-    }
-  };
-})();
-"#;
-
-/** Everything `ab.call(name, args, cb)` reaches, for SETTINGS.md. The `fs.*` ones also run at once
-with `ab.callSync` (and `ab.fs.list` and the rest). */
+/** Everything `ab::call(name, args, f)` reaches, for SETTINGS.md; the `fs.*` and `env` ones also answer at once with `ab::call_sync`. */
 pub const CALLS: &[(&str, &str)] = &[
     ("http", "{url, method?, headers?, body? (text, or JSON sent as such), timeout_secs?, args?}: an HTTP request (curl, no shell): `{status, ok, headers, body, code, stdout, stderr}`"),
     ("clipboard.read", "the clipboard's text: `{text}`"),
@@ -108,101 +19,428 @@ pub const CALLS: &[(&str, &str)] = &[
     ("fs.stat", "{path}: `{size, dir, modified}` or null"),
     ("fs.mkdir", "{path}: make the folder (and its parents)"),
     ("fs.remove", "{path}: remove a file or an empty folder"),
-    ("fs.watch", "{path}: (via `ab.fs.watch(path, fn)`) fn(paths) runs when anything under path changes"),
-    ("proc.spawn", "(via `ab.spawn(cmd, {cwd, env, stdin, shell}, {stdout, stderr, exit})`) a process on the Mac whose output streams in line by line; the handle's `write(data)` and `kill()` reach it"),
+    ("fs.watch", "{path}: (via `ab::fs::watch(path, f)`) f(paths) runs when anything under path changes"),
+    ("proc.spawn", "(via `ab::spawn(cmd, json!({cwd, env, stdin, shell}), f)`) a process on the Mac whose output streams in line by line to f; the returned handle's `write(data)` and `kill()` reach it"),
     ("proc.write / proc.kill", "{proc, data?}: write to a spawned process's stdin, or end it"),
     ("inspect", "what inspect.json holds right now (layout, transcripts, terminals, scripts, dialog, ...)"),
     ("env", "{name}: an environment variable of the app's process"),
 ];
 
-pub struct Scripts {
-    engine: crate::jsc::Engine,
-    outbox: Rc<RefCell<Vec<Value>>>,
-    context_json: Rc<RefCell<Rc<str>>>,
-    pub actions: Vec<String>,
-    pub errors: Vec<String>,
+/** One script's WebAssembly instance: its store (with the host side of the bridge) and the exports the
+app calls. */
+struct Instance {
+    name: String,
+    store: wasmtime::Store<Host>,
+    alloc: wasmtime::TypedFunc<u32, u32>,
+    deliver: wasmtime::TypedFunc<(u32, u32), ()>,
+    memory: wasmtime::Memory,
+    /** The script's own ids (timers, replies, processes) -> the ids the app sees. */
+    ids: HashMap<u64, u64>,
 }
 
-pub fn scripts_dir() -> std::path::PathBuf {
+#[derive(Default)]
+struct Host {
+    outbox: Vec<Value>,
+    context: Rc<str>,
+    /** A sync call's answer, until the script `take`s it. */
+    answer: Vec<u8>,
+}
+
+/** A script still to compile: where its source goes, and what its build is cached under. */
+pub struct Build {
+    pub name: String,
+    pub source: String,
+    pub hash: String,
+}
+
+/** Where scripts build and how: from settings `scripts_options` (and `app.source_dir` for the `ab` crate). */
+#[derive(Clone)]
+pub struct Options {
+    pub build_dir: PathBuf,
+    pub sdk_dir: PathBuf,
+    pub dependencies: Map<String, Value>,
+    pub time_limit_ms: u64,
+    pub path: String,
+}
+
+pub struct Scripts {
+    instances: Vec<Instance>,
+    /** App-side id -> (instance, the script's id). */
+    owners: HashMap<u64, (usize, u64)>,
+    next_id: u64,
+    builds: Vec<Build>,
+    options: Options,
+    pub actions: Vec<String>,
+    action_owner: HashMap<String, usize>,
+    pub errors: Vec<String>,
+    /** Scripts still compiling, by name. */
+    pub building: Vec<String>,
+    /** Bumped on every (re)load, so a build that finishes for an older load is dropped. */
+    pub generation: u64,
+}
+
+pub fn scripts_dir() -> PathBuf {
     settings::dir().join("scripts")
 }
 
+const TICK_MS: u64 = 10;
+
+/** One engine for every load: compiled code is reused, and a ticker thread lets a running script be cut off. */
+fn engine() -> &'static wasmtime::Engine {
+    static ENGINE: std::sync::OnceLock<wasmtime::Engine> = std::sync::OnceLock::new();
+    ENGINE.get_or_init(|| {
+        let mut config = wasmtime::Config::new();
+        config.epoch_interruption(true);
+        let engine = wasmtime::Engine::new(&config).expect("the WebAssembly engine");
+        let ticker = engine.clone();
+        std::thread::Builder::new()
+            .name("script-epoch".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(TICK_MS));
+                ticker.increment_epoch();
+            })
+            .ok();
+        engine
+    })
+}
+
+fn sanitize(name: &str) -> String {
+    let stem = name.strip_suffix(".rs").unwrap_or(name);
+    let s: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
+    if s.is_empty() { "script".into() } else { s }
+}
+
+fn hash_of(parts: &[&str]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    parts.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 impl Scripts {
-    /** Loads `settings.scripts` (name -> source) and every `scripts/NAME.js`, in name order. */
-    pub fn load(inline: &serde_json::Map<String, Value>) -> Option<Scripts> {
-        let mut engine = crate::jsc::Engine::new();
-        let outbox = Rc::new(RefCell::new(vec![]));
-        let context_json: Rc<RefCell<Rc<str>>> = Rc::new(RefCell::new(Rc::from("{}")));
+    /** Loads `settings.scripts` (name -> Rust source) and every `scripts/NAME.rs`: built ones start now,
+    the rest wait in `take_builds` for the app to compile them in the background. */
+    pub fn load(inline: &Map<String, Value>, options: Options, generation: u64) -> Option<Scripts> {
         let mut sources: Vec<(String, String)> = inline.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect();
-        let mut files: Vec<_> = std::fs::read_dir(scripts_dir()).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "js")).collect();
+        let mut files: Vec<_> = std::fs::read_dir(scripts_dir()).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "rs")).collect();
         files.sort();
         for f in files {
             if let Ok(src) = std::fs::read_to_string(&f) {
                 sources.push((f.file_name().unwrap_or_default().to_string_lossy().into_owned(), src));
             }
         }
-        let out = outbox.clone();
-        engine.define("__send", Box::new(move |args| {
-            if let Some(v) = args.first().and_then(|s| serde_json::from_str::<Value>(s).ok()) {
-                out.borrow_mut().push(v);
-            }
-            None
-        }));
-        let cj = context_json.clone();
-        engine.define("__context", Box::new(move |_| Some(cj.borrow().to_string())));
-        engine.define("__read", Box::new(|args| args.first().and_then(|p| std::fs::read_to_string(expand(p)).ok())));
-        engine.define("__call", Box::new(|args| {
-            let name = args.first().map(String::as_str).unwrap_or("");
-            let a = args.get(1).and_then(|s| serde_json::from_str::<Value>(s).ok()).unwrap_or(Value::Null);
-            let out = match pure_call(name, &a) {
-                Some(Ok(v)) => json!({"value": v}),
-                Some(Err(e)) => json!({"error": e}),
-                None => json!({"error": format!("{name} can't run synchronously; use ab.call")}),
-            };
-            Some(out.to_string())
-        }));
-        let mut errors = vec![];
-        if let Err(e) = engine.eval(PRELUDE, "prelude.js") {
-            errors.push(format!("script prelude: {e}"));
-        }
-        for (name, src) in &sources {
-            if let Err(e) = engine.eval(src, name) {
-                errors.push(format!("script {name}: {e}"));
+        let sdk = std::fs::read_to_string(options.sdk_dir.join("src/lib.rs")).unwrap_or_default();
+        let deps = Value::Object(options.dependencies.clone()).to_string();
+        let mut s = Scripts {
+            instances: vec![],
+            owners: HashMap::new(),
+            next_id: 0,
+            builds: vec![],
+            options,
+            actions: vec![],
+            action_owner: HashMap::new(),
+            errors: vec![],
+            building: vec![],
+            generation,
+        };
+        for (name, source) in sources {
+            let hash = hash_of(&[&source, &sdk, &deps]);
+            match std::fs::read(s.cached(&name, &hash)) {
+                Ok(wasm) => {
+                    s.start(&name, &wasm, Rc::from("{}"));
+                }
+                Err(_) => {
+                    s.building.push(name.clone());
+                    s.builds.push(Build { name, source, hash });
+                }
             }
         }
-        let mut s = Scripts { engine, outbox, context_json, actions: vec![], errors };
-        s.collect_registrations();
         Some(s)
     }
 
-    fn collect_registrations(&mut self) {
-        let mut keep = vec![];
-        for m in self.outbox.borrow_mut().drain(..) {
+    fn cached(&self, name: &str, hash: &str) -> PathBuf {
+        self.options.build_dir.join("cache").join(format!("{}-{hash}.wasm", sanitize(name)))
+    }
+
+    /** The scripts that need compiling (each once), with what `build` needs for them. */
+    pub fn take_builds(&mut self) -> Vec<(Build, Options)> {
+        let opts = self.options.clone();
+        self.builds.drain(..).map(|b| (b, opts.clone())).collect()
+    }
+
+    /** A build finished: start the script (its `init` runs; what it sends comes back), or note why not. */
+    pub fn built(&mut self, name: &str, result: Result<Vec<u8>, String>, context: Rc<str>) -> Vec<Value> {
+        self.building.retain(|n| n != name);
+        match result {
+            Ok(wasm) => self.start(name, &wasm, context),
+            Err(e) => {
+                self.errors.push(format!("script {name}: {e}"));
+                vec![]
+            }
+        }
+    }
+
+    fn start(&mut self, name: &str, wasm: &[u8], context: Rc<str>) -> Vec<Value> {
+        match self.instantiate(name, wasm, context) {
+            Ok(mut inst) => {
+                let index = self.instances.len();
+                let out: Vec<Value> = std::mem::take(&mut inst.store.data_mut().outbox);
+                self.instances.push(inst);
+                self.route_out(index, out)
+            }
+            Err(e) => {
+                self.errors.push(format!("script {name}: {e}"));
+                vec![]
+            }
+        }
+    }
+
+    fn instantiate(&self, name: &str, wasm: &[u8], context: Rc<str>) -> Result<Instance, String> {
+        use wasmtime::{Caller, Extern, Linker, Module, Store};
+        let engine = engine();
+        let module = Module::new(engine, wasm).map_err(|e| e.to_string())?;
+        let mut linker: Linker<Host> = Linker::new(engine);
+        fn memory(caller: &mut Caller<'_, Host>) -> Option<wasmtime::Memory> {
+            match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => Some(m),
+                _ => None,
+            }
+        }
+        fn text(caller: &mut Caller<'_, Host>, ptr: u32, len: u32) -> String {
+            let Some(mem) = memory(caller) else { return String::new() };
+            let mut buf = vec![0u8; len as usize];
+            let _ = mem.read(&*caller, ptr as usize, &mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        linker
+            .func_wrap("ab", "send", |mut caller: Caller<'_, Host>, ptr: u32, len: u32| {
+                let t = text(&mut caller, ptr, len);
+                if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                    caller.data_mut().outbox.push(v);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        linker
+            .func_wrap("ab", "sync", |mut caller: Caller<'_, Host>, np: u32, nl: u32, ap: u32, al: u32| -> u32 {
+                let name = text(&mut caller, np, nl);
+                let args: Value = serde_json::from_str(&text(&mut caller, ap, al)).unwrap_or(Value::Null);
+                let answer = match name.as_str() {
+                    "context" => caller.data().context.to_string(),
+                    "read" => std::fs::read_to_string(expand(args["path"].as_str().unwrap_or(""))).map(|t| Value::String(t).to_string()).unwrap_or_else(|_| "null".into()),
+                    other => match pure_call(other, &args) {
+                        Some(Ok(v)) => json!({"value": v}).to_string(),
+                        Some(Err(e)) => json!({"error": e}).to_string(),
+                        None => json!({"error": format!("{other} can't answer at once; use ab::call")}).to_string(),
+                    },
+                };
+                caller.data_mut().answer = answer.into_bytes();
+                caller.data().answer.len() as u32
+            })
+            .map_err(|e| e.to_string())?;
+        linker
+            .func_wrap("ab", "take", |mut caller: Caller<'_, Host>, ptr: u32| {
+                let answer = std::mem::take(&mut caller.data_mut().answer);
+                if let Some(mem) = memory(&mut caller) {
+                    let _ = mem.write(&mut caller, ptr as usize, &answer);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        let mut store = Store::new(engine, Host { context, ..Default::default() });
+        store.set_epoch_deadline(self.ticks());
+        let instance = linker.instantiate(&mut store, &module).map_err(|e| e.to_string())?;
+        let memory = instance.get_memory(&mut store, "memory").ok_or("the script exports no memory")?;
+        let alloc = instance.get_typed_func::<u32, u32>(&mut store, "ab_alloc").map_err(|e| format!("{e} (is `fn init()` defined?)"))?;
+        let deliver = instance.get_typed_func::<(u32, u32), ()>(&mut store, "ab_deliver").map_err(|e| e.to_string())?;
+        let init = instance.get_typed_func::<(), ()>(&mut store, "ab_init").map_err(|e| e.to_string())?;
+        store.set_epoch_deadline(self.ticks());
+        init.call(&mut store, ()).map_err(|e| self.trap_text(&e))?;
+        Ok(Instance { name: name.to_string(), store, alloc, deliver, memory, ids: HashMap::new() })
+    }
+
+    fn ticks(&self) -> u64 {
+        (self.options.time_limit_ms / TICK_MS).max(1)
+    }
+
+    fn trap_text(&self, e: &wasmtime::Error) -> String {
+        if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt) {
+            format!("ran longer than {} ms (scripts_options.time_limit_ms) and was stopped", self.options.time_limit_ms)
+        } else {
+            format!("{e:#}")
+        }
+    }
+
+    /** What a script sent, with its ids swapped for app-wide ones and its actions noted as its own. */
+    fn route_out(&mut self, index: usize, out: Vec<Value>) -> Vec<Value> {
+        let mut back = vec![];
+        for mut m in out {
             if m["type"] == "register" {
                 if let Some(n) = m["name"].as_str() {
                     if !self.actions.iter().any(|a| a == n) {
                         self.actions.push(n.to_string());
                     }
+                    self.action_owner.insert(n.to_string(), index);
                 }
-            } else {
-                keep.push(m);
+                continue;
             }
+            if m["type"] == "error" {
+                let name = self.instances.get(index).map(|i| i.name.clone()).unwrap_or_default();
+                if let Some(t) = m["text"].as_str() {
+                    m["text"] = json!(format!("script {name}: {t}"));
+                }
+            }
+            for field in ["id"] {
+                if let Some(local) = m[field].as_u64() {
+                    m[field] = json!(self.global(index, local));
+                }
+            }
+            for field in ["proc", "watch"] {
+                if let Some(local) = m["args"][field].as_u64() {
+                    m["args"][field] = json!(self.global(index, local));
+                }
+            }
+            back.push(m);
         }
-        self.outbox.borrow_mut().extend(keep);
+        back
     }
 
-    /** Hands a message to the scripts with `context` visible to `ab.context()`; returns what they sent back. */
-    pub fn deliver(&mut self, message: Value, context: Rc<str>) -> Vec<Value> {
-        *self.context_json.borrow_mut() = context;
-        if let Err(e) = self.engine.call("__deliver", &message.to_string()) {
-            self.errors.push(e);
+    fn global(&mut self, index: usize, local: u64) -> u64 {
+        if let Some(g) = self.instances.get(index).and_then(|i| i.ids.get(&local)) {
+            return *g;
         }
-        self.collect_registrations();
-        self.outbox.borrow_mut().drain(..).collect()
+        self.next_id += 1;
+        let g = self.next_id;
+        self.owners.insert(g, (index, local));
+        if let Some(i) = self.instances.get_mut(index) {
+            i.ids.insert(local, g);
+        }
+        g
+    }
+
+    /** Hands a message to the scripts it's for (an action to its owner, an event to all, a reply or timer
+    or process line to the one that asked) with `context` visible to `ab::context()`; returns what they sent. */
+    pub fn deliver(&mut self, message: Value, context: Rc<str>) -> Vec<Value> {
+        let targets: Vec<(usize, Value)> = match message["type"].as_str().unwrap_or("") {
+            "action" => message["name"].as_str().and_then(|n| self.action_owner.get(n)).map(|i| vec![(*i, message.clone())]).unwrap_or_default(),
+            "event" => (0..self.instances.len()).map(|i| (i, message.clone())).collect(),
+            kind => {
+                let field = if kind == "proc" { "proc" } else { "id" };
+                let Some((i, local)) = message[field].as_u64().and_then(|g| self.owners.get(&g).copied()) else { return vec![] };
+                let mut m = message.clone();
+                m[field] = json!(local);
+                vec![(i, m)]
+            }
+        };
+        let mut out = vec![];
+        for (i, m) in targets {
+            out.extend(self.deliver_to(i, &m, context.clone()));
+        }
+        out
+    }
+
+    /** Delivers to the script named `name` only (its `start` after a late build). */
+    pub fn deliver_named(&mut self, name: &str, message: Value, context: Rc<str>) -> Vec<Value> {
+        match self.instances.iter().position(|i| i.name == name) {
+            Some(i) => self.deliver_to(i, &message, context),
+            None => vec![],
+        }
+    }
+
+    fn deliver_to(&mut self, index: usize, message: &Value, context: Rc<str>) -> Vec<Value> {
+        let ticks = self.ticks();
+        let Some(inst) = self.instances.get_mut(index) else { return vec![] };
+        let bytes = message.to_string().into_bytes();
+        inst.store.data_mut().context = context;
+        inst.store.set_epoch_deadline(ticks);
+        let result = (|| -> Result<(), wasmtime::Error> {
+            let ptr = inst.alloc.call(&mut inst.store, bytes.len() as u32)?;
+            inst.memory.write(&mut inst.store, ptr as usize, &bytes)?;
+            inst.deliver.call(&mut inst.store, (ptr, bytes.len() as u32))
+        })();
+        let out = std::mem::take(&mut inst.store.data_mut().outbox);
+        let name = inst.name.clone();
+        if let Err(e) = result {
+            let text = self.trap_text(&e);
+            self.errors.push(format!("script {name}: {text}"));
+        }
+        self.route_out(index, out)
     }
 
     pub fn has_action(&self, name: &str) -> bool {
         self.actions.iter().any(|a| a == name)
+    }
+}
+
+/** Compiles a script to WebAssembly (blocking; run it off the UI thread): a small crate per script in
+`build_dir`, all sharing one target folder, so a rebuild after an edit takes seconds. */
+pub fn build(b: &Build, o: &Options) -> Result<Vec<u8>, String> {
+    let crate_name = format!("abx_{}", sanitize(&b.name));
+    let dir = o.build_dir.join(sanitize(&b.name));
+    std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
+    let mut deps = format!("ab = {{ path = {:?} }}\n", o.sdk_dir.to_string_lossy());
+    for (k, v) in &o.dependencies {
+        let spec = match v {
+            Value::String(s) => format!("{s:?}"),
+            other => toml_inline(other),
+        };
+        deps.push_str(&format!("{k} = {spec}\n"));
+    }
+    let manifest = format!(
+        "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\npath = \"src/lib.rs\"\n\n[dependencies]\n{deps}\n[profile.release]\nopt-level = 2\nincremental = true\ncodegen-units = 16\npanic = \"abort\"\ndebug = false\n\n[workspace]\n"
+    );
+    std::fs::write(dir.join("Cargo.toml"), manifest).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("src/script.rs"), &b.source).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("src/lib.rs"), "#![allow(unused_imports, dead_code)]\nuse ab::{json, Value};\ninclude!(\"script.rs\");\nab::script!(init);\n").map_err(|e| e.to_string())?;
+    let target = o.build_dir.join("target");
+    let run = || {
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.args(["build", "--release", "--quiet", "--target", "wasm32-unknown-unknown", "--message-format", "short", "--manifest-path"])
+            .arg(dir.join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", &target)
+            .env("PATH", &o.path);
+        run_output(cmd, None, Some(Duration::from_secs(600)))
+    };
+    let mut out = run().map_err(|e| format!("couldn't run cargo: {e}"))?;
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() && (err.contains("may not be installed") || err.contains("can't find crate for `core`") || err.contains("can't find crate for `std`")) {
+        let mut add = std::process::Command::new("rustup");
+        add.args(["target", "add", "wasm32-unknown-unknown"]).env("PATH", &o.path);
+        let _ = run_output(add, None, Some(Duration::from_secs(600)));
+        out = run().map_err(|e| format!("couldn't run cargo: {e}"))?;
+    }
+    if !out.status.success() {
+        let shown = format!("scripts/{}", b.name);
+        let src_path = dir.join("src/script.rs").to_string_lossy().into_owned();
+        let lines: Vec<String> = String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .filter(|l| l.contains("error") || l.contains("warning: unused"))
+            .filter(|l| !l.starts_with("error: could not compile"))
+            .map(|l| l.replace(&src_path, &shown).replace("src/script.rs", &shown))
+            .take(12)
+            .collect();
+        return Err(if lines.is_empty() { String::from_utf8_lossy(&out.stderr).trim().to_string() } else { lines.join("\n") });
+    }
+    let wasm_path = target.join("wasm32-unknown-unknown/release").join(format!("{crate_name}.wasm"));
+    let wasm = std::fs::read(&wasm_path).map_err(|e| format!("{}: {e}", wasm_path.display()))?;
+    let cache = o.build_dir.join("cache");
+    let _ = std::fs::create_dir_all(&cache);
+    if let Ok(old) = std::fs::read_dir(&cache) {
+        for f in old.flatten() {
+            if f.file_name().to_string_lossy().starts_with(&format!("{}-", sanitize(&b.name))) {
+                let _ = std::fs::remove_file(f.path());
+            }
+        }
+    }
+    let _ = std::fs::write(cache.join(format!("{}-{}.wasm", sanitize(&b.name), b.hash)), &wasm);
+    Ok(wasm)
+}
+
+/** A JSON object as a TOML inline table (for `scripts_options.dependencies` entries like `{"version": "1", "features": [...]}`). */
+fn toml_inline(v: &Value) -> String {
+    match v {
+        Value::Object(o) => format!("{{ {} }}", o.iter().map(|(k, v)| format!("{k} = {}", toml_inline(v))).collect::<Vec<_>>().join(", ")),
+        Value::Array(a) => format!("[{}]", a.iter().map(toml_inline).collect::<Vec<_>>().join(", ")),
+        Value::String(s) => format!("{s:?}"),
+        other => other.to_string(),
     }
 }
 
@@ -404,6 +642,52 @@ mod tests {
         assert_eq!(list[0]["name"], "f.txt");
         assert_eq!(pure_call("fs.exists", &json!({"path": format!("{d}/nope")})).unwrap().unwrap(), json!(false));
         assert!(pure_call("clipboard.read", &json!({})).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /** Compiles and runs a real script (needs cargo and the wasm32 target): `cargo test -- --ignored`. */
+    #[test]
+    #[ignore]
+    fn a_rust_script_builds_registers_and_answers() {
+        let dir = std::env::temp_dir().join(format!("abx-script-{}", std::process::id()));
+        let home = std::env::var("HOME").unwrap_or_default();
+        let options = Options {
+            build_dir: dir.clone(),
+            sdk_dir: std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../script-sdk"),
+            dependencies: Map::new(),
+            time_limit_ms: 200,
+            path: format!("{home}/.cargo/bin:/usr/bin:/bin"),
+        };
+        let source = r#"
+fn init() {
+    ab::action("greet", |args, ctx| {
+        ab::set("greeting", format!("hi {} from {}", args["who"].as_str().unwrap_or("?"), ctx["host"].as_str().unwrap_or("?")));
+        ab::shell("echo hi", json!({}), |r, _| ab::data("echo", r["stdout"].clone()));
+    });
+    ab::action("spin", |_, _| loop {});
+    ab::on("start", |_, _| ab::log("started"));
+}
+"#;
+        let mut inline = Map::new();
+        inline.insert("hello.rs".into(), json!(source));
+        let mut s = Scripts::load(&inline, options.clone(), 1).unwrap();
+        let (b, o) = s.take_builds().pop().expect("a build");
+        let wasm = build(&b, &o).expect("it compiles");
+        let out = s.built("hello.rs", Ok(wasm), Rc::from("{}"));
+        assert!(out.is_empty(), "{out:?}");
+        assert!(s.has_action("greet"));
+        let out = s.deliver(json!({"type": "action", "name": "greet", "args": {"who": "tj"}}), Rc::from(r#"{"host":"mac"}"#));
+        assert_eq!(out[0]["action"], json!({"do": "state.set", "key": "greeting", "value": "hi tj from mac"}));
+        let id = out[1]["id"].as_u64().unwrap();
+        let out = s.deliver(json!({"type": "reply", "id": id, "result": {"stdout": "hi\n"}}), Rc::from("{}"));
+        assert_eq!(out[0], json!({"type": "data", "name": "echo", "value": "hi\n"}));
+        let out = s.deliver(json!({"type": "event", "name": "start"}), Rc::from("{}"));
+        assert_eq!(out[0]["text"], "started");
+        s.deliver(json!({"type": "action", "name": "spin"}), Rc::from("{}"));
+        assert!(s.errors.last().is_some_and(|e| e.contains("ran longer than 200 ms")), "{:?}", s.errors);
+        let again = Scripts::load(&inline, options, 2).unwrap();
+        assert!(again.building.is_empty(), "the second load uses the cached build");
+        assert!(again.has_action("greet"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

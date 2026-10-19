@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["protocol", "daemon", "app"]
+members = ["protocol", "daemon", "app", "script-sdk"]
 
 [workspace.package]
 edition = "2021"

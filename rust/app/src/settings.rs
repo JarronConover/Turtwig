@@ -31,7 +31,7 @@ pub struct Settings {
     /** Actions to run when something happens: chat.waiting, chat.finished, chat.stopped, designer.finished. */
     #[serde(default)]
     pub events: Map<String, Value>,
-    /** Inline JavaScript by name (more in `scripts/NAME.js`); see SETTINGS.md, Scripts. */
+    /** Inline Rust scripts by name (more in `scripts/NAME.rs`); see SETTINGS.md, Scripts. */
     #[serde(default)]
     pub scripts: Map<String, Value>,
     /** `badge`: a template for the Dock icon's badge (empty or null hides it). */

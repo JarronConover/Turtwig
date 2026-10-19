@@ -92,44 +92,53 @@ these by `bundle.sh`.
 
 ## Scripts
 
-Anything the built-in actions and data can't do, a script can: scripts are JavaScript, run by JavaScriptCore (the JIT-compiling engine Safari uses),
-loaded from `scripts` in settings (`{"name": "source"}`) and from every `scripts/<name>.js` next to the
-settings file. Saving one restarts all scripts at once (fresh state, old timers stopped). Errors go to
-`problems.txt`; `ab.log` writes `scripts.log`.
+Anything the built-in actions and data can't do, a script can. Scripts are Rust: `scripts/<name>.rs` next to
+the settings file (or `scripts` in settings, `{"name.rs": "source"}`), each with a `fn init()`. The app compiles
+each one to WebAssembly in the background (a few seconds after a save; the first build takes longer) and runs it
+with wasmtime: near-native speed, its own small memory, nothing running while idle. Saving one rebuilds it and
+restarts every script (fresh state, old timers stopped); until a changed script builds, the rest run.
+Compile errors and panics go to `problems.txt`; `ab::log` writes `scripts.log`. A script that runs longer than
+`scripts_options.time_limit_ms` (1000) in one go is stopped, so the app never freezes. Scripts can use crates
+from `scripts_options.dependencies` (`{"regex": "1"}`) besides `ab` and `serde_json` (`ab::json!`, `ab::Value`).
 
-```js
-// a new action, usable anywhere an action is (buttons, keys, palette, run.json, other scripts)
-ab.action("box.uptime", (args, ctx) => {
-  ab.box("exec", { cmd: "uptime -p" }, (r) => ab.data("uptime", r.stdout.trim()));
-});
-// react to things: start, model, settings events (chat.waiting, chat.finished, ...), and your own ab.emit
-ab.on("start", () => ab.every(60000, () => ab.do("box.uptime")));
-ab.on("chat.finished", (p) => ab.log("finished", p.chat.name));
+```rust
+fn init() {
+    // a new action, usable anywhere an action is (buttons, keys, palette, run.json, other scripts)
+    ab::action("box.uptime", |_args, _ctx| {
+        ab::daemon("exec", json!({"cmd": "uptime -p"}), |r, _err| {
+            ab::data("uptime", r["stdout"].as_str().unwrap_or("").trim());
+        });
+    });
+    // react to things: start, model, settings events (chat.waiting, chat.finished, ...), and your own ab::emit
+    ab::on("start", |_, _| { ab::every(60_000, || ab::run(json!("box.uptime"))); });
+    ab::on("chat.finished", |p, _| ab::log(format!("finished {}", p["chat"]["name"])));
+}
 ```
 
 Then show it with a patch: `{ "insert": { "type": "text", "props": { "text": "{{ .data.uptime }}" } }, "after": "status-pill" }`.
 
-| `ab.` | does |
+| `ab::` | does |
 | --- | --- |
-| `action(name, fn(args, ctx))` | define an action |
-| `on(event, fn(payload, ctx))` / `emit(event, payload)` | handle / raise events (`start` fires on every (re)load; `model` on every host update; every event in Events too, its fields as the payload) |
-| `do(action)` | run any action |
-| `context()` / `state` / `set(key, value)` | read the context and UI state; set state (what `set` and `data` change shows in `context()` at once) |
+| `action(name, \|args, ctx\| ..)` | define an action |
+| `on(event, \|payload, ctx\| ..)` / `emit(event, payload)` | handle / raise events (`start` fires on every (re)load; `model` on every host update; every event in Events too, its fields as the payload) |
+| `run(action)` | run any action (`json!({"do": ..})` or `json!("name")`) |
+| `context()` / `state()` / `set(key, value)` | read the context and UI state; set state (what `set` and `data` change shows in `context()` at once) |
 | `data(name, value)` | publish a value as `.data.<name>` for expressions (kept across script reloads unless `scripts_options.keep_data` is false) |
-| `every(ms, fn)` / `after(ms, fn)` / `cancel(id)` | timers |
-| `shell(cmd, cb(result), {cwd, host, timeout, env}?)` | run a command on the Mac (or on host's daemon): `{code, stdout, stderr}` |
-| `box(method, params, cb(result, error), {host}?)` | call a daemon (`exec` runs bash there: `{cmd, cwd?, timeout_secs?}`); host defaults to where the call belongs |
-| `http({url, method, headers, body, timeout_secs}, cb(result, error))` / `fetch(url, cb, opts)` | HTTP through curl without a shell: `{status, ok, headers, body}` (`stdout` is the body too) |
-| `read(path)` / `write(path, text, cb(error)?)` | files (`~/` allowed); read gives null when the file can't be read |
-| `call(name, args, cb(result, error))` / `callSync(name, args)` | the app's abilities by name (table below); callSync for the fs and env ones |
-| `clipboard.read(cb)` / `clipboard.write(text, cb?)` | the clipboard (`{text}`) |
-| `fs.list(path)` / `fs.exists` / `fs.stat` / `fs.mkdir` / `fs.remove` / `fs.watch(path, fn(paths))` | files and folders, at once (watch calls fn on changes) |
-| `spawn(cmd, {cwd, env, stdin}, {stdout(line), stderr(line), exit(code)})` | a process whose output streams in; returns `{id, write(data), kill()}` (cmd: a shell line, or a list run directly) |
-| `inspect(cb(doc))` | what inspect.json holds right now |
-| `patch(ops)` / `key(key, action, {if, not_in}?)` / `command(label, action, {if}?)` | change the UI at runtime (`patch` ops over the settings), add a key or a palette entry; undone when scripts reload |
-| `notify(text)` / `log(...)` | a notice in the window / a line in scripts.log |
+| `every(ms, f)` / `after(ms, f)` / `cancel(id)` | timers |
+| `shell(cmd, json!({cwd, host, timeout, env}), \|result, err\| ..)` | run a command on the Mac (or on host's daemon): `{code, stdout, stderr}` |
+| `daemon(method, params, f)` / `daemon_on(Some(host), method, params, f)` | call a daemon (`exec` runs bash there: `{cmd, cwd?, timeout_secs?}`) |
+| `http(json!({url, method, headers, body, timeout_secs}), f)` / `fetch(url, f)` | HTTP through curl without a shell: `{status, ok, headers, body}` |
+| `read(path)` / `write(path, text, \|err\| ..)` | files (`~/` allowed); read gives None when the file can't be read |
+| `call(name, args, f)` / `call_sync(name, args)` | the app's abilities by name (table below); call_sync for the fs and env ones |
+| `clipboard::read(f)` / `clipboard::write(text)` | the clipboard (`{text}`) |
+| `fs::list(path)` / `fs::exists` / `fs::stat` / `fs::mkdir` / `fs::remove` / `fs::watch(path, \|paths\| ..)` | files and folders, at once (watch calls f on changes) |
+| `spawn(cmd, json!({cwd, env, stdin}), \|what, data\| ..)` | a process whose output streams in (`Proc::Stdout`/`Stderr` lines, then `Proc::Exit`); returns a handle with `write(data)` and `kill()` |
+| `inspect(f)` | what inspect.json holds right now |
+| `patch(ops)` / `key(key, action, json!({if, not_in}))` / `command(label, action, json!({if}))` | change the UI at runtime, add a key or a palette entry; undone when scripts reload |
+| `notify(text)` / `log(text)` | a notice in the window / a line in scripts.log |
 
-Inline in a node: `"on": { "click": { "do": "js", "code": "ab.notify('hi ' + ctx.selected.worktree.title)" } }`.
+The `ab` crate is `rust/script-sdk` in a.box's source (`app.source_dir`); builds live in `scripts_options.build_dir`
+(`~/.agent-box/script-build`) and need `cargo` with the `wasm32-unknown-unknown` target (added on first build).
 
 ## Patch
 

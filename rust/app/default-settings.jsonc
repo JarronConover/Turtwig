@@ -2234,7 +2234,9 @@
   },
 
   // keep_data: what scripts publish (.data) survives a script reload.
-  "scripts_options": { "context_cache_ms": 250, "min_timer_ms": 16, "keep_data": true },
+  // Scripts (Rust, compiled to WebAssembly; see SETTINGS.md, Scripts): one run is stopped after time_limit_ms;
+  // dependencies are crates every script may use ({"regex": "1"}); build_dir holds builds (null: ~/.agent-box/script-build).
+  "scripts_options": { "context_cache_ms": 250, "min_timer_ms": 16, "keep_data": true, "time_limit_ms": 1000, "dependencies": {}, "build_dir": null },
   "settings_options": { "reload_debounce_ms": 80 },
 
   // Each machine's daemon and scripts (sent to it on connect and when settings change; kept in

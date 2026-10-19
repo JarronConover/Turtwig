@@ -1,0 +1,9 @@
+[package]
+name = "ab"
+edition.workspace = true
+version.workspace = true
+description = "What a.box scripts (scripts/NAME.rs, compiled to WebAssembly) use to reach the app"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

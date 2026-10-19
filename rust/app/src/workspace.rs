@@ -353,6 +353,8 @@ pub struct Workspace {
     /** Agents' requests (run.json, run.d, relayed): run in order, each with its result written. */
     pending_requests: Vec<(crate::behavior::Request, Option<String>)>,
     pub(crate) pending_script: Vec<Value>,
+    /** Which load of the scripts is current (a build for an older one is dropped). */
+    pub(crate) script_generation: u64,
     /** Banners' own click actions (`notify.system {do}`), by notification id. */
     pub(crate) notify_actions: HashMap<String, Value>,
     overlay: ScriptOverlay,
@@ -592,6 +594,7 @@ impl Workspace {
             pending_events: vec![("app.start".into(), Map::new())],
             pending_requests: vec![],
             pending_script: vec![],
+            script_generation: 0,
             notify_actions: HashMap::new(),
             overlay: Default::default(),
             settings_base: None,
@@ -720,7 +723,8 @@ impl Workspace {
         apply_appearance(&self.settings, window.appearance(), cx);
     }
 
-    /** (Re)starts the scripts: a fresh JS context, so edits take effect at once and old timers stop. */
+    /** (Re)starts the scripts: fresh instances, so edits take effect at once and old timers stop; scripts that
+    changed are compiled in the background (`flush` starts them) and start when built. */
     pub(crate) fn load_scripts(&mut self) {
         self.script_timers.clear();
         self.procs.drain().for_each(|(_, p)| kill_pid(p.pid));
@@ -734,7 +738,8 @@ impl Workspace {
         if had_overlay {
             self.apply_overlay();
         }
-        self.scripts = crate::script::Scripts::load(&self.settings.scripts);
+        self.script_generation += 1;
+        self.scripts = crate::script::Scripts::load(&self.settings.scripts, self.script_options(), self.script_generation);
         self.pending_script.push(json!({"type": "event", "name": "start", "payload": null}));
     }
 
@@ -766,6 +771,7 @@ impl Workspace {
     /** Runs queued script messages, events, requests, and actions now, so the app keeps working while its
     window is hidden and not rendering (agents drive it then too). */
     pub(crate) fn flush(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.spawn_script_builds(window, cx);
         if std::mem::take(&mut self.hosts_dirty) {
             self.sync_hosts(window, cx);
         }
@@ -1220,7 +1226,7 @@ impl Workspace {
                         let _ = tx.send(false);
                     } else if p.extension().is_some_and(|e| e == "svg") {
                         let _ = tx.send(false);
-                    } else if p.extension().is_some_and(|e| e == "js") && p.parent().is_some_and(|d| d.ends_with("scripts")) {
+                    } else if p.extension().is_some_and(|e| e == "rs") && p.parent().is_some_and(|d| d.ends_with("scripts")) {
                         let _ = tx.send(false);
                     } else if p.file_name().and_then(|n| n.to_str()) == Some("run.json") || (p.parent().is_some_and(|d| d.ends_with("run.d")) && p.extension().is_some_and(|e| e == "json")) {
                         let _ = tx.send(true);
@@ -1806,6 +1812,46 @@ impl Workspace {
     }
 
     /** `PATH` for everything the app runs (settings `app.path`). */
+    /** Settings `scripts_options` for building and running scripts. */
+    fn script_options(&self) -> crate::script::Options {
+        let build_dir = match self.settings.get("scripts_options.build_dir").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            Some(d) => crate::script::expand(d).into(),
+            None => std::path::PathBuf::from(crate::script::expand("~/.agent-box/script-build")),
+        };
+        crate::script::Options {
+            build_dir,
+            sdk_dir: settings::source_dir().join("rust/script-sdk"),
+            dependencies: self.settings.get("scripts_options.dependencies").and_then(Value::as_object).cloned().unwrap_or_default(),
+            time_limit_ms: self.settings.num("scripts_options.time_limit_ms", 1000.).max(10.) as u64,
+            path: self.path_env(),
+        }
+    }
+
+    /** Compiles waiting scripts off the UI thread; each starts (and gets `start`) when its build lands. */
+    fn spawn_script_builds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(scripts) = self.scripts.as_mut() else { return };
+        let generation = scripts.generation;
+        for (build, options) in scripts.take_builds() {
+            cx.spawn_in(window, async move |this, cx| {
+                let name = build.name.clone();
+                let result = cx.background_spawn(async move { crate::script::build(&build, &options) }).await;
+                this.update_in(cx, |ws, window, cx| {
+                    let ctx = ws.script_context();
+                    let Some(s) = ws.scripts.as_mut().filter(|s| s.generation == generation) else { return };
+                    let mut outs = s.built(&name, result, ctx.clone());
+                    outs.extend(s.deliver_named(&name, json!({"type": "event", "name": "start", "payload": null}), ctx));
+                    for m in outs {
+                        ws.script_out(m, window, cx);
+                    }
+                    ws.ctx_rev += 1;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
     pub(crate) fn path_env(&self) -> String {
         let home = std::env::var("HOME").unwrap_or_default();
         let list = self.settings.strings("app.path", DEFAULT_PATH);
@@ -3735,7 +3781,7 @@ impl Workspace {
             // rows around it are rebuilt (the list would otherwise snap to the start of the changed range).
             let reading = (!l.state.is_following_tail() && old > 0).then(|| l.state.logical_scroll_top());
             let anchor = reading.and_then(|t| l.blocks.get(t.item_ix).and_then(first_item).map(|i| (i, t.offset_in_item)));
-            let mut restore = false;
+            let restore;
             if len >= l.items && l.rev != u64::MAX {
                 // Re-measure only the rows whose content changed (a late tool result can change an older row):
                 // the unchanged run at the start and at the end keep their measured heights.

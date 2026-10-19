@@ -76,7 +76,6 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("composer.recall", "{chat?, by?: -1 | 1}: put an earlier message you sent back in the box (-1 older, 1 newer; past the newest empties it)"),
     ("focus", "{area: composer | terminal | none, chat?}: put typing in a chat's message box or the selected worktree's terminal"),
     ("chat.attach_clipboard", "{chat?}: attach the files or image on the clipboard to a chat"),
-    ("js", "{code, ...args}: run JavaScript with `args`, `ctx` (the context), and `ab` (see Scripts)"),
     ("<a script action>", "any name a script registers with ab.action(name, fn) works as an action everywhere"),
     ("app.snapshot", "{path?, then?}: capture the window to path (default snapshot.png in the settings folder, for agents to look at); then `then` runs with `.path`, and the `app.snapshot_done` event fires"),
     ("drop.preview", "{key, zone: before|inside|after, kind?, value?}: show a drop target's indicator without dragging (for styling), as if `value` were being dragged; cleared by the next drag"),
@@ -1233,13 +1232,6 @@ impl Workspace {
                 if let Some(id) = chat() {
                     self.recall_sent(&id, a.get("by").and_then(Value::as_i64).unwrap_or(-1), window, cx);
                 }
-            }
-            "js" => {
-                let code = s("code").unwrap_or_default();
-                let mut args = a.clone();
-                args.remove("code");
-                args.remove("do");
-                self.script_deliver(serde_json::json!({"type": "eval", "code": code, "args": args}), window, cx);
             }
             other if self.scripts.as_ref().is_some_and(|sc| sc.has_action(other)) => {
                 let msg = crate::script::action_message(other, a);
