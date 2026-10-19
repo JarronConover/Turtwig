@@ -1385,7 +1385,14 @@
               "style": { "gap": 10, "align": "start" },
               "children": [
                 { "type": "icon", "props": { "name": "{{ .p.icon }}", "size": 16, "color": "@accent" }, "style": { "margin": [2, 0, 0, 0] } },
-                { "type": "text", "props": { "text": "{{ .p.text }}" }, "style": { "font_size": 13, "line_height": 1.5, "shrink": 1, "min_width": 0 } }
+                {
+                  "type": "column",
+                  "style": { "gap": 1, "shrink": 1, "min_width": 0 },
+                  "children": [
+                    { "if": ".p.title", "type": "text", "props": { "text": "{{ .p.title }}" }, "style": { "font_size": 13, "font_weight": "semibold" } },
+                    { "type": "text", "props": { "text": "{{ .p.text }}" }, "style": { "font_size": 12.5, "color": "{{ if .p.title then \"@text_muted\" else \"@text\" end }}", "line_height": 1.45 } }
+                  ]
+                }
               ]
             }
           ]
@@ -2662,16 +2669,18 @@
   // it). command: what does its checks and steps (null: bin/setup in app.source_dir); tools: the CLIs its
   // Agents step looks for ({key: the name bin/setup check reports, name, about, required, install,
   // sign_in: commands it opens in Terminal}); tour: its stops ({id: a node id, or null for a card in the
-  // middle, title, text}).
+  // middle, title, text}); welcome.points: {icon, title?, text}.
   "setup": {
     "command": null,
     "welcome": {
       "title": "Welcome to a.box",
-      "text": "A box for your coding agents, shaped however you like. A few quick steps and you're set.",
+      "text": "A box for your coding agents, shaped however you like. What it's built on, then a few quick steps and you're set.",
       "points": [
-        { "icon": "messages-square", "text": "Run Claude Code and Codex chats side by side, each in its own git worktree, and see at a glance which ones need you." },
-        { "icon": "cloud", "text": "Keep chats going on a cloud box while your Mac sleeps, and move them to your Mac and back." },
-        { "icon": "wand-sparkles", "text": "Change anything: the layout, the colors, even what the buttons do. Ask the designer and watch it happen." }
+        { "icon": "box", "title": "Just a box", "text": "The app is a framework; the rest is liquid. Open the designer and shape its look and what it does, live, with no reloads." },
+        { "icon": "bot", "title": "Agents are full users", "text": "Everything in the app is open to agents: they can read it, drive it, and start and steer other chats." },
+        { "icon": "refresh-cw", "title": "Work syncs", "text": "Chats move between this Mac and a cloud box with their branch and uncommitted work, and outlive the app and the machine." },
+        { "icon": "git-branch", "title": "Git-native", "text": "Projects are repos; each task is a worktree on its branch, with its merge request and checks on its row." },
+        { "icon": "code", "title": "Ships as source", "text": "It builds and updates itself from its own git checkout, so agents can change a.box's code too." }
       ]
     },
     "tools": [

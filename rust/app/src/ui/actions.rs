@@ -1303,8 +1303,8 @@ mod tests {
     fn web_urls_from_remotes() {
         let t = "https://{host}/{path}";
         assert_eq!(super::web_url("git@gitlab.com:redo/redoapp/product/redo.git\n", t).as_deref(), Some("https://gitlab.com/redo/redoapp/product/redo"));
-        assert_eq!(super::web_url("ssh://git@gitlab.com:22/tj15/agent-box.git", t).as_deref(), Some("https://gitlab.com/tj15/agent-box"));
-        assert_eq!(super::web_url("https://gitlab.com/tj15/agent-box.git", t).as_deref(), Some("https://gitlab.com/tj15/agent-box"));
+        assert_eq!(super::web_url("ssh://git@gitlab.com:22/tj15/a.box.git", t).as_deref(), Some("https://gitlab.com/tj15/a.box"));
+        assert_eq!(super::web_url("https://gitlab.com/tj15/a.box.git", t).as_deref(), Some("https://gitlab.com/tj15/a.box"));
         assert_eq!(super::web_url("git@git.corp:team/app.git", "https://code.corp/{path}/-/tree/main").as_deref(), Some("https://code.corp/team/app/-/tree/main"));
         assert_eq!(super::web_url("", t), None);
     }

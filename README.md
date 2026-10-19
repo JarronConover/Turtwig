@@ -1,14 +1,36 @@
-# agent-box
+# a.box
 
-a.box: a Mac app for running Claude Code and Codex chats, on the Mac and on
-an always-on Coder workspace (the box), plus the tooling both machines share.
-Everything the app shows and does is settings, so it can be reshaped by you
-or by an agent.
+A Mac app for running Claude Code and Codex chats, on the Mac and on an
+always-on Coder workspace (the box), plus the tooling both machines share.
+
+## What it believes
+
+1. **Just a box.** This is just "a box" for an ADE (agentic development
+   environment). The app itself is a framework, built in Rust; otherwise the
+   software is liquid and takes whatever shape you want to give the box. Open
+   a designer chat to shape it, its look and what it does (with scripts),
+   live in the chat, with no reloads. Everything is configurable.
+2. **Agents are full users.** All app state is exposed, so agents can see and
+   drive the app and your chats directly. They're full users of the box: an
+   orchestrator chat creates sections, worktrees and other chats, sends them
+   messages, and moves them between machines.
+3. **Work syncs.** Work syncs seamlessly between a remote box you control and
+   your own machine. Chats outlive the app and the machine: closing the app
+   doesn't stop them, you can reach them from your phone, a move carries the
+   branch and uncommitted work along, and a new machine gets everything back
+   from your backups.
+4. **Git-native.** Projects are repos and the unit of work is a worktree on
+   its branch, with its merge request, checks and unpushed work right on its
+   row. How tasks map to worktrees, and how they're shown, is up to your
+   settings.
+5. **Ships as source.** The app builds from its own git checkout and updates
+   and rebuilds itself. Agents can change a.box's own code, not just its
+   settings.
 
 ## Install on a Mac
 
 ```bash
-git clone git@gitlab.com:tj15/agent-box.git ~/dev/agent-box
+git clone git@gitlab.com:tj15/a.box.git ~/dev/agent-box
 ~/dev/agent-box/bin/install
 ```
 
@@ -87,6 +109,6 @@ all over the same state:
 The setup guide does this for you; by hand:
 
 ```bash
-git clone https://gitlab.com/tj15/agent-box.git ~/agent-box
+git clone https://gitlab.com/tj15/a.box.git ~/agent-box
 ~/agent-box/bin/boot --force
 ```
