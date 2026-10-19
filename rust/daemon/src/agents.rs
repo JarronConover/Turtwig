@@ -24,6 +24,7 @@ fn builtin(agent: &str) -> Value {
             "prompt_char": "›",
             "waiting_pattern": CODEX_WAITING_PATTERN,
             "turn_events": { "task_started": "working", "task_complete": "idle", "turn_aborted": "idle" },
+            "title": { "index": "~/.codex/session_index.jsonl", "id": "id", "field": "thread_name" },
         }),
         "claude" => json!({
             "transcripts": "claude",
@@ -31,6 +32,7 @@ fn builtin(agent: &str) -> Value {
             "provider": "anthropic",
             "process_names": ["claude"],
             "process_session_pattern": r"--(?:resume|session-id)[ =]([0-9a-f]{8}-[0-9a-f-]{27})",
+            "title": { "records": [{ "type": "custom-title", "field": "customTitle" }, { "type": "ai-title", "field": "aiTitle" }] },
         }),
         _ => json!({ "transcripts": "claude" }),
     }

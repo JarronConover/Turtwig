@@ -321,6 +321,7 @@ impl Workspace {
                     prompt: s("prompt"),
                     model: s("model"),
                     agent: s("agent"),
+                    auto_name: s("name").is_none(),
                 };
                 self.start_chat(call, select, cx);
             }

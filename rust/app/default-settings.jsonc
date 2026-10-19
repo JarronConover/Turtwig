@@ -2838,6 +2838,11 @@
     // time; through Coder each takes seconds). An app not heard from in config_source_days stops counting
     // toward this machine's merged options (several apps can configure one daemon).
     "ssh_mux_secs": 120, "config_source_days": 30,
+    // A chat whose name nobody chose (made as default_chat_name, or brought from super.engineering) takes its
+    // agent's own title (agents.AGENT.title) as the agent updates it; renaming it yourself stops that.
+    // Orchestrators keep theirs (auto_title_keep: these kinds, or a name or folder matching).
+    "auto_title": true, "default_chat_name": "New chat",
+    "auto_title_keep": { "kinds": ["orchestrator"], "match": "(?i)ship.feature|orchestrat" },
     // The agent a new chat runs when chat.new names none.
     "default_agent": "claude",
     // A new Codex chat's session id: bin/chat watches for its rollout this long after launch or a send.
@@ -2896,19 +2901,21 @@
                        "env_prefixes": ["SUPER_ENGINEERING_", "SUPERCONDUCTOR_"], "path_drop": ["~/.super.engineering/bin"] },
     // What bin/agent-env gives every agent (hosts.HOST.agent_env adds to it).
     "agent_env": { "secrets_file": "~/.config/agent-box/secrets.env", "path_prepend": [], "set": {}, "unset_prefixes": [] },
-    // bin/env-push (from the Mac): paths [{path, two_way, replace, exclude}], memory, skills_link, hooks_match
-    // {matcher (exact), command (regex)}, hosts (null: every other host with ssh).
+    // bin/env-push (from the Mac): paths [{path, two_way, replace, exclude, deletes (a two-way folder's deletes
+    // carry over)}], memory (memory_deletes: theirs carry over too), max_deletes (more in one run are skipped,
+    // with a line in agent-box.log), skills_link, hooks_match {matcher (exact), command (regex)}, hosts (null:
+    // every other host with ssh).
     "env_push": {
       "hosts": null,
       "paths": [
-        { "path": "~/.agents/skills/", "two_way": true, "exclude": [".git", "__pycache__"] },
+        { "path": "~/.agents/skills/", "two_way": true, "deletes": true, "exclude": [".git", "__pycache__"] },
         { "path": "~/.claude/CLAUDE.md", "two_way": true },
         { "path": "~/.agent-box/uploads/" },
         { "path": "~/.config/redo/cursor-environments.json" },
         { "path": "~/.config/redo/cursor-typecheck-agents.json" },
         { "path": "~/.claude/hooks/block-squash.py", "replace": true }
       ],
-      "memory": true, "skills_link": true,
+      "memory": true, "memory_deletes": true, "max_deletes": 25, "skills_link": true,
       "hooks_match": { "matcher": "mcp__.+__save_issue", "command": "block-squash" }
     },
     // Logs log_tail may read.
@@ -2946,7 +2953,9 @@
         "fork": ["{bin}", "--resume", "{from}", "--fork-session", "--session-id", "{id}", "--remote-control", "{name}", ["--model", "{model}"]],
         "rc_url_pattern": "https://claude\\.ai/code/session_[A-Za-z0-9]+", "provider": "anthropic",
         "transcripts_root": "~/.claude/projects", "backup_dir": "projects", "hooks_file": "~/.claude/settings.json",
-        "process_names": ["claude"], "process_session_pattern": "--(?:resume|session-id)[ =]([0-9a-f]{8}-[0-9a-f-]{27})"
+        "process_names": ["claude"], "process_session_pattern": "--(?:resume|session-id)[ =]([0-9a-f]{8}-[0-9a-f-]{27})",
+        // Its own name for the chat (auto_title): the latest of the first record kind the transcript has.
+        "title": { "records": [{ "type": "custom-title", "field": "customTitle" }, { "type": "ai-title", "field": "aiTitle" }] }
       },
       "codex": {
         "name": "Codex", "icon": "aperture", "color": "@text", "tab_icon": true,
@@ -2958,6 +2967,8 @@
         "waiting_pattern": "(?i)Would you like to|Trust this folder|Hooks need review|enter to (confirm|continue|select)|esc to (cancel|skip|quit)|Allow .* to run",
         "turn_events": { "task_started": "working", "task_complete": "idle", "turn_aborted": "idle" },
         "provider": "openai", "transcripts_root": "~/.codex/sessions", "backup_dir": "codex-sessions",
+        // Codex names threads in its session index.
+        "title": { "index": "~/.codex/session_index.jsonl", "id": "id", "field": "thread_name" },
         "hooks_file": "~/.codex/hooks.json", "hooks_home_env": "CODEX_HOME"
       }
     }

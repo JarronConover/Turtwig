@@ -11,6 +11,7 @@ mod hosts;
 mod model;
 mod server;
 mod term;
+mod titles;
 mod usage;
 mod util;
 

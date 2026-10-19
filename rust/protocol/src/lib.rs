@@ -43,6 +43,9 @@ pub enum Call {
         /** Which agent CLI runs it (a key of the daemon's `agents`); None: the default (claude). */
         #[serde(default)]
         agent: Option<String>,
+        /** `name` is a placeholder: the chat takes its agent's own title (auto_title). */
+        #[serde(default)]
+        auto_name: bool,
     },
     ChatStart { chat_id: String },
     /** A new chat in the same folder that starts with a copy of this one's conversation; replies like ChatNew. */

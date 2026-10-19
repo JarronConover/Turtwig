@@ -130,14 +130,14 @@ ENV_PUSH = {
     # Target hosts (null: every other host with ssh); files only flow toward the newer copy.
     "hosts": None,
     "paths": [
-        {"path": "~/.agents/skills/", "two_way": True, "exclude": [".git", "__pycache__"]},
+        {"path": "~/.agents/skills/", "two_way": True, "deletes": True, "exclude": [".git", "__pycache__"]},
         {"path": "~/.claude/CLAUDE.md", "two_way": True},
         {"path": "~/.agent-box/uploads/"},
         {"path": "~/.config/redo/cursor-environments.json"},
         {"path": "~/.config/redo/cursor-typecheck-agents.json"},
         {"path": "~/.claude/hooks/block-squash.py", "replace": True},
     ],
-    "memory": True,
+    "memory": True, "memory_deletes": True, "max_deletes": 25,
     "skills_link": True,
     # PreToolUse hooks copied over (the remote's copies of them replaced): this exact matcher, or a command matching this regex.
     "hooks_match": {"matcher": "mcp__.+__save_issue", "command": "block-squash"},

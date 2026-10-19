@@ -588,8 +588,11 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             conn.watches.lock().unwrap().retain(|k, _| !k.starts_with(&chat_id));
             return Ok(json!({}));
         }
-        Call::ChatNew { name, kind, branch, base, dir, repo, prompt, model, agent } => {
+        Call::ChatNew { name, kind, branch, base, dir, repo, prompt, model, agent, auto_name } => {
             let mut args: Vec<String> = vec!["new".into(), name, "--kind".into(), kind];
+            if auto_name {
+                args.push("--auto-name".into());
+            }
             for (flag, v) in [("--branch", branch), ("--base", base), ("--dir", dir), ("--repo", repo),
                               ("--prompt", prompt), ("--model", model), ("--agent", agent)] {
                 if let Some(v) = v.filter(|v| !v.is_empty()) {

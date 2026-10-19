@@ -47,6 +47,31 @@ push_to() {
       [ -L ~/.claude/skills ] || ln -s ../.agents/skills ~/.claude/skills' 2> /dev/null
   fi
 
+  # Two-way folders whose deletes carry over (bin/env-deletes): "local<TAB>remote<TAB>excludes" lines.
+  local pairs
+  pairs=$(mktemp)
+  while IFS=$'\t' read -r p two_way replace ex deletes; do
+    [ -n "$p" ] || continue
+    rel=${p#\~/}
+    [ "$two_way" = true ] && [ "$deletes" = true ] && [ "${rel%/}" != "$rel" ] && printf '%s\t%s\t%s\n' "$HOME/$rel" "$rel" "$ex" >> "$pairs"
+  done < <(c '.paths // [] | .[] | [.path, (.two_way // false | tostring), (.replace // false | tostring), ((.exclude // []) | join(" ")), (.deletes // false | tostring)] | @tsv')
+
+  # Every project's memory, both ways (folders with nothing in them are skipped).
+  if [ "$(c '.memory // false')" = true ]; then
+    for dir in "$HOME"/.claude/projects/*/memory; do
+      [ -n "$(ls -A "$dir" 2> /dev/null)" ] || continue
+      box=$(map "$(basename "$(dirname "$dir")")" "$AGENT_HOST" "$to" "$HOME" "$box_home") || continue
+      [ -n "$box" ] && printf '%s\t%s\t\n' "$dir" ".claude/projects/$box/memory" >> "$pairs.memory"
+    done
+    for box in $(ssh -n "$host" 'for d in ~/.claude/projects/*/memory; do [ -n "$(ls -A "$d" 2> /dev/null)" ] && basename "$(dirname "$d")"; done' 2> /dev/null); do
+      mac=$(map "$box" "$to" "$AGENT_HOST" "$box_home" "$HOME") || continue
+      [ -n "$mac" ] && printf '%s\t%s\t\n' "$HOME/.claude/projects/$mac/memory" ".claude/projects/$box/memory" >> "$pairs.memory"
+    done
+    [ -f "$pairs.memory" ] && sort -u "$pairs.memory" > "$pairs.m" && mv "$pairs.m" "$pairs.memory"
+    [ "$(c '.memory_deletes // true')" = true ] && [ -f "$pairs.memory" ] && cat "$pairs.memory" >> "$pairs"
+  fi
+  python3 "$AGENT_BOX_DIR/bin/env-deletes" before "$host" < "$pairs" 2> /dev/null || true
+
   while IFS=$'\t' read -r p two_way replace ex; do
     [ -n "$p" ] || continue
     rel=${p#\~/}
@@ -70,22 +95,16 @@ push_to() {
     fi
   done < <(c '.paths // [] | .[] | [.path, (.two_way // false | tostring), (.replace // false | tostring), ((.exclude // []) | join(" "))] | @tsv')
 
-  if [ "$(c '.memory // false')" = true ]; then
-    # Every project's memory, both ways (folders with nothing in them are skipped).
-    for dir in "$HOME"/.claude/projects/*/memory; do
-      [ -n "$(ls -A "$dir" 2> /dev/null)" ] || continue
-      box=$(map "$(basename "$(dirname "$dir")")" "$AGENT_HOST" "$to" "$HOME" "$box_home") || continue
-      [ -n "$box" ] || continue
-      ssh -n "$host" "mkdir -p .claude/projects/$box/memory" 2> /dev/null
-      rsync -au "$dir/" "$host:.claude/projects/$box/memory/"
-    done
-    for box in $(ssh -n "$host" 'for d in ~/.claude/projects/*/memory; do [ -n "$(ls -A "$d" 2> /dev/null)" ] && basename "$(dirname "$d")"; done' 2> /dev/null); do
-      mac=$(map "$box" "$to" "$AGENT_HOST" "$box_home" "$HOME") || continue
-      [ -n "$mac" ] || continue
-      mkdir -p "$HOME/.claude/projects/$mac/memory"
-      rsync -au "$host:.claude/projects/$box/memory/" "$HOME/.claude/projects/$mac/memory/"
-    done
+  if [ -f "$pairs.memory" ]; then
+    while IFS=$'\t' read -r dir remote _; do
+      mkdir -p "$dir"
+      ssh -n "$host" "mkdir -p $(printf %q "$remote")" 2> /dev/null
+      rsync -au "$dir/" "$host:$remote/" < /dev/null
+      rsync -au "$host:$remote/" "$dir/" < /dev/null 2> /dev/null || true
+    done < "$pairs.memory"
   fi
+  python3 "$AGENT_BOX_DIR/bin/env-deletes" after "$host" < "$pairs" 2> /dev/null || true
+  rm -f "$pairs" "$pairs.memory"
 
   local matcher command
   matcher=$(c '.hooks_match.matcher // empty') command=$(c '.hooks_match.command // empty')

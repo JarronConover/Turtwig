@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Carry deletes across env-push's two-way folders (skills, memory), which rsync alone only adds to.
+
+  env-deletes before HOST < pairs   delete on each side what the other side deleted since the last sync
+  env-deletes after HOST < pairs    record what both sides have now, for the next run
+
+pairs: one per line, "LOCAL_DIR<TAB>REMOTE_DIR_UNDER_HOME<TAB>EXCLUDES" (excludes space-separated names).
+A file counts as deleted on one side when the last sync saw it and it's gone there, while the other side
+still has it unchanged since then (changed since: it was edited, so it stays and syncs back). Nothing is
+deleted the first time a folder syncs, when a side's folder is missing, or past env_push.max_deletes
+files in one run (a sign something else went wrong); agent-box.log lists what went.
+"""
+
+import datetime
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import abxcfg  # noqa: E402
+
+HOME = Path.home()
+LOG = abxcfg.agent_home() / "log" / "agent-box.log"
+
+# Lists (or deletes in) folders under the home it runs in; the same code runs on both machines.
+WALK = r"""
+import json, os, shutil, sys
+home = os.path.expanduser("~")
+def full(d):
+    return d if d.startswith("/") else os.path.join(home, d)
+req = json.loads(sys.stdin.read())
+if req["op"] == "list":
+    out = {}
+    for d, ex in req["dirs"]:
+        root = full(d)
+        if not os.path.isdir(root):
+            out[d] = None
+            continue
+        files = {}
+        for base, dirs, names in os.walk(root):
+            dirs[:] = [x for x in dirs if x not in ex]
+            for n in names:
+                if n in ex:
+                    continue
+                p = os.path.join(base, n)
+                try:
+                    files[os.path.relpath(p, root)] = os.path.getmtime(p)
+                except OSError:
+                    pass
+        out[d] = files
+    print(json.dumps(out))
+else:
+    for d, rels in req["delete"].items():
+        root = full(d)
+        for rel in rels:
+            p = os.path.join(root, rel)
+            try:
+                os.remove(p)
+            except OSError:
+                continue
+            parent = os.path.dirname(p)
+            while parent.startswith(root + os.sep) and os.path.isdir(parent) and not os.listdir(parent):
+                os.rmdir(parent)
+                parent = os.path.dirname(parent)
+"""
+
+
+def mux():
+    return ["-o", "ControlMaster=auto", "-o", f"ControlPath={HOME}/.ssh/abx-%C", "-o", "ControlPersist=120"]
+
+
+def here(req):
+    return subprocess.run([sys.executable, "-c", WALK], input=json.dumps(req), capture_output=True, text=True, check=True).stdout
+
+
+def there(host, req):
+    return subprocess.run(["ssh", *mux(), host, "python3 -c " + shlex.quote(WALK)], input=json.dumps(req),
+                          capture_output=True, text=True, check=True, timeout=120).stdout
+
+
+def log(line):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(f"{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%dT%H:%M:%SZ} [env-deletes] {line}\n")
+
+
+def main(mode, host):
+    pairs = []
+    for line in sys.stdin.read().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0]:
+            pairs.append((parts[0].rstrip("/"), parts[1].rstrip("/"), (parts[2] if len(parts) > 2 else "").split()))
+    if not pairs:
+        return
+    state = abxcfg.agent_home() / "env-push" / f"{host}.json"
+    try:
+        seen = json.loads(state.read_text())
+    except (OSError, ValueError):
+        seen = {}
+    try:
+        mine = json.loads(here({"op": "list", "dirs": [[l, ex] for l, _, ex in pairs]}))
+        theirs = json.loads(there(host, {"op": "list", "dirs": [[r, ex] for _, r, ex in pairs]}))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as e:
+        log(f"skipped: couldn't list both sides ({e})")
+        return
+    if mode == "after":
+        now = time.time()
+        for l, r, _ in pairs:
+            if mine.get(l) is not None and theirs.get(r) is not None:
+                seen[l] = {"at": now, "files": sorted(set(mine[l]) & set(theirs[r]))}
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps(seen))
+        return
+    gone_here, gone_there = {}, {}
+    for l, r, _ in pairs:
+        last, a, b = seen.get(l), mine.get(l), theirs.get(r)
+        if not last or a is None or b is None:
+            continue
+        at = last["at"] + 1
+        for rel in last["files"]:
+            if rel not in a and rel in b and b[rel] <= at:
+                gone_here.setdefault(r, []).append(rel)
+            elif rel not in b and rel in a and a[rel] <= at:
+                gone_there.setdefault(l, []).append(rel)
+    count = sum(map(len, gone_here.values())) + sum(map(len, gone_there.values()))
+    if not count:
+        return
+    cap = int((abxcfg.option("env_push", {}) or {}).get("max_deletes", 25))
+    if count > cap:
+        log(f"skipped {count} deletes (over env_push.max_deletes {cap}); sync both sides by hand or raise it")
+        return
+    if gone_here:
+        there(host, {"op": "delete", "delete": gone_here})
+        for r, rels in gone_here.items():
+            log(f"deleted on {host} (gone here): " + ", ".join(f"{r}/{x}" for x in rels))
+    if gone_there:
+        here({"op": "delete", "delete": gone_there})
+        for l, rels in gone_there.items():
+            log(f"deleted here (gone on {host}): " + ", ".join(f"{l}/{x}" for x in rels))
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3 or sys.argv[1] not in ("before", "after"):
+        sys.exit(__doc__)
+    main(sys.argv[1], sys.argv[2])

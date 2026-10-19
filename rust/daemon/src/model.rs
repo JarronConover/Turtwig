@@ -458,9 +458,17 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             _ => ("idle".to_string(), None),
         };
         let suggestion = if state == "idle" { pane.as_deref().and_then(suggestion) } else { None };
+        // A name nobody chose follows the agent's own title (auto_title), and the registry learns it.
+        let mut name = s("name").unwrap_or_default();
+        if config::flag("auto_title", true) && crate::titles::auto_named(&v) {
+            if let Some(t) = crate::titles::title(&v, &agent, transcript.as_deref()).filter(|t| *t != name) {
+                crate::titles::persist(&id, &t);
+                name = t;
+            }
+        }
         out.push(Chat {
             id,
-            name: s("name").unwrap_or_default(),
+            name,
             kind: s("kind").unwrap_or_else(|| "primary".into()),
             host,
             status,

@@ -672,6 +672,7 @@ def cmd_new(args):
     chat = {
         "id": chat_id,
         "name": args.name,
+        "name_source": "auto" if args.auto_name else "creator",
         "kind": args.kind,
         "parent": args.parent,
         "feature": args.feature,
@@ -712,7 +713,7 @@ def cmd_fork(args):
     chat_id = str(uuid.uuid4())
     chat = {k: src.get(k) for k in ("kind", "parent", "feature", "repo", "branch", "base", "dir", "model", "agent")}
     chat.update({"id": chat_id, "name": args.name or f"{src['name']} (fork)", "host": HOST, "status": "running",
-                 "created_at": now(), "forked_from": src["id"]})
+                 "name_source": "creator" if args.name else "auto", "created_at": now(), "forked_from": src["id"]})
     chat["kind"] = (option("fork_kinds", {"orchestrator": "feature"}) or {}).get(chat["kind"], chat["kind"])
     if not session_of(src):
         sys.exit(f"{src['name']} has no conversation to fork yet")
@@ -750,10 +751,28 @@ def cmd_stop(args):
     set_status(find(args.chat), "stopped")
 
 
+def auto_named(chat):
+    """Whether the chat's name may follow its agent's own title (`auto_title`): it was never chosen, by you
+    (a rename) or whoever made it (`name_source` user or creator). Chats from before name_source qualify
+    with the placeholder name (`default_chat_name`) or a name brought from super.engineering. Orchestrators
+    (`auto_title_keep`) keep theirs: their title drifts to whichever leg they're on."""
+    keep = option("auto_title_keep", {"kinds": ["orchestrator"], "match": r"(?i)ship.feature|orchestrat"}) or {}
+    if chat.get("kind") in (keep.get("kinds") or []) or (keep.get("match") and re.search(keep["match"], f"{chat.get('name', '')} {chat.get('dir') or ''}")):
+        return False
+    source = chat.get("name_source")
+    if source:
+        return source == "auto"
+    return bool(chat.get("imported_from")) or chat.get("name") == option("default_chat_name", "New chat")
+
+
 def cmd_rename(args):
     chat = find(args.chat)
-    old, chat["name"] = chat["name"], args.name
-    save(chat, f"chat rename: {old} -> {args.name}")
+    if args.auto and not (option("auto_title", True) and auto_named(chat)):
+        return
+    old, old_source = chat["name"], chat.get("name_source")
+    chat["name"], chat["name_source"] = args.name, "auto" if args.auto else "user"
+    if (old, old_source) != (args.name, chat["name_source"]):
+        save(chat, f"chat {'title' if args.auto else 'rename'}: {old} -> {args.name}")
 
 
 def cmd_archive(args):
@@ -1596,6 +1615,7 @@ def main():
 
     n = sub.add_parser("new", help="start a chat")
     n.add_argument("name")
+    n.add_argument("--auto-name", action="store_true", help="name is a placeholder: follow the agent's own title")
     n.add_argument("--kind", default="feature", help=f"one of option chat_kinds ({', '.join(chat_kinds())})")
     n.add_argument("--branch", help="run in this branch's worktree (made by the repo's worktree_tool)")
     n.add_argument("--base", help="new branch starts from origin/<base> instead of the default branch")
@@ -1626,6 +1646,7 @@ def main():
     rn = sub.add_parser("rename", help="rename a chat")
     rn.add_argument("chat")
     rn.add_argument("name")
+    rn.add_argument("--auto", action="store_true", help="the agent's own title: only for a chat whose name was never chosen")
     rn.set_defaults(fn=cmd_rename)
 
     se = sub.add_parser("send", help="type a message into a running chat")
