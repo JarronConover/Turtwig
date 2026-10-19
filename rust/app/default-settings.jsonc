@@ -2130,7 +2130,7 @@
   // host.connected, chat.added, chat.message, worktree.mr, select, hook, usage.level, ...). Each event:
   // {"if": jq, "do": action} or a list of them; the chat is .chat.
   "events": {
-    // A banner (notify.system without its own `do`) was clicked: bring the window up on its chat.
+    // A banner (notify.system without its own `on_click`) was clicked: bring the window up on its chat.
     "notification.click": { "do": ["app.activate", { "do": "chat.show", "chat": "{{ .chat.id }}" }] },
     // Typing with nothing focused (chat.type_to_focus): into the selected chat's message box.
     "type_to_focus": { "do": [{ "do": "focus", "area": "composer" }, { "do": "composer.type", "text": "{{ .text }}" }] },

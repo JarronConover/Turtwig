@@ -1440,7 +1440,7 @@ impl Workspace {
         self.pending_events.extend(events.into_iter().map(|(e, x)| (e.to_string(), x)));
     }
 
-    /** A banner was clicked: its own `do` (notify.system), else the `notification.click` event with the
+    /** A banner was clicked: its own `on_click` (notify.system), else the `notification.click` event with the
     chat it was about as `.chat` and the banner's id as `.id`. */
     fn on_notification_click(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let chat_id = id.split('#').next().unwrap_or("").to_string();

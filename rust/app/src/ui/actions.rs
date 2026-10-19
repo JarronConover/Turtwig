@@ -89,7 +89,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("settings.set", "{key, value} or {values: {key: value, ..}}: write values into your settings file and reload; a key is a dotted path (`daemon.state_repo_url`) or a list of keys, and the rest of the file (comments included) is left as it is"),
     ("settings.save / settings.close", "{text} / -: for a settings panel drawn by `views.settings`: write the settings file (and reload), close it"),
     ("notify", "{text}: a notification inside the window"),
-    ("notify.system", "{title, text, subtitle?, group?, chat?, sound?: bool | name, do?}: a macOS notification banner (sound: false for none, or a sound's name); clicking it runs `do`, else the `notification.click` event (`.chat`, `.id`)"),
+    ("notify.system", "{title, text, subtitle?, group?, chat?, sound?: bool | name, on_click?}: a macOS notification banner (sound: false for none, or a sound's name); clicking it runs `on_click`, else the `notification.click` event (`.chat`, `.id`)"),
     ("dock.bounce", "{critical?}: bounce the Dock icon once (critical: until the app is in front)"),
     ("sound", "{name, volume?}: play a macOS sound by name (Glass, Ping, Funk, Hero, Submarine...) or an audio file path"),
     ("open", "{url}: open a URL or app link"),
@@ -1093,7 +1093,7 @@ impl Workspace {
                     Some(Value::String(n)) if !n.is_empty() => Some(n.clone()),
                     _ => Some(String::new()),
                 };
-                if let Some(action) = a.get("do").filter(|d| !d.is_null()) {
+                if let Some(action) = a.get("on_click").filter(|d| !d.is_null()) {
                     self.notify_actions.insert(id.clone(), action.clone());
                 }
                 self.record_notice("system", &text, Some(&title));
