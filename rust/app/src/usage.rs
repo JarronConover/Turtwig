@@ -391,6 +391,8 @@ pub fn gauge_svg(name: &str) -> Option<String> {
 
 /** 1234.5 -> "1,234.50" */
 fn thousands(x: f64) -> String {
+    // Below half a cent rounds to 0.00, without the minus a tiny negative would keep.
+    let x = if x.abs() < 0.005 { 0. } else { x };
     let s = format!("{x:.2}");
     let (int, frac) = s.split_once('.').unwrap_or((&s, "00"));
     let neg = int.starts_with('-');
@@ -489,6 +491,7 @@ mod tests {
         assert_eq!(u.row_cost(&Default::default(), "openai", &long), Some(4.));
         assert_eq!(super::thousands(4454.333), "4,454.33");
         assert_eq!(super::thousands(1.6), "1.60");
+        assert_eq!(super::thousands(-0.0), "0.00");
         assert_eq!(super::parse_rfc3339("1970-01-02T00:00:01.5+00:00"), Some(86401.));
         u.rate_fallbacks.insert("output".into(), serde_json::json!(2));
         u.rates.insert("x".into(), serde_json::json!({"m": {"input": 1}}));
