@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # Make every queued worktree's WIP and all session transcripts durable on
 # the remote. Workers serialize on a lock; each drains the whole queue.
+# --snapshot-only: just snapshot the queued worktrees (a move sends them
+# across itself) and leave the backup to a full run.
 set -u
 . "$(dirname "$0")/env.sh"
+snapshot_only=0
+[ "${1:-}" = --snapshot-only ] && snapshot_only=1
 
 lock_wait=$(opt sync_lock_wait_secs); lock_wait=${lock_wait:-600}
 max_mb=$(opt sync_transcript_max_mb); max_mb=${max_mb:-95}
 warn_mb=$(opt sync_bundle_warn_mb); warn_mb=${warn_mb:-50}
 
 mkdir -p "$AGENT_HOME" "$AGENT_QUEUE_DIR"
-exec 9> "$AGENT_HOME/sync.lock"
-flock -w "$lock_wait" 9 || { log "lock timeout"; exit 1; }
+if [ "$snapshot_only" = 0 ]; then
+  exec 9> "$AGENT_HOME/sync.lock"
+  flock -w "$lock_wait" 9 || { log "lock timeout"; exit 1; }
+fi
 
 # Snapshot the worktree (tracked changes, untracked non-ignored files, and
 # unpushed commits) as a bundle. Never touches HEAD, the index, or a branch.
@@ -63,8 +69,9 @@ sync_sessions() {
   else
     # Only the chats that live here, not every local session.
     python3 "$AGENT_BOX_DIR/bin/chat" _backup_paths 2>> "$AGENT_LOG" | sort | while IFS=$'\t' read -r root dest rel; do
-      mkdir -p "$s/hosts/$AGENT_HOST/$dest/$(dirname "$rel")"
-      rsync -a --max-size="${max_mb}m" "$root/$rel" "$s/hosts/$AGENT_HOST/$dest/$(dirname "$rel")/"
+      # Claude Code's folder names start with "-", which dirname takes for an option without --.
+      mkdir -p "$s/hosts/$AGENT_HOST/$dest/$(dirname -- "$rel")"
+      rsync -a --max-size="${max_mb}m" "$root/$rel" "$s/hosts/$AGENT_HOST/$dest/$(dirname -- "$rel")/"
     done
   fi
   find "$s/hosts" -type f -size +"${max_mb}M" -print -delete 2> /dev/null | while read -r big; do log "too big for the remote, kept local only: $big"; done
@@ -105,14 +112,28 @@ sync_status() {
 
 ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"
 
-while :; do
+# Snapshots take their own lock, so a move's snapshot never waits behind a backup.
+drain_queue() {
+  exec 7> "$AGENT_HOME/snapshot.lock"
+  flock -w "$lock_wait" 7 || { log "snapshot lock timeout"; return 1; }
   shopt -s nullglob
   entries=("$AGENT_QUEUE_DIR"/*)
   shopt -u nullglob
   for entry in ${entries[@]+"${entries[@]}"}; do
+    [ -f "$entry" ] || continue
     snapshot_worktree "$(cat "$entry")"
     rm -f "$entry"
   done
+  exec 7>&-
+}
+
+if [ "$snapshot_only" = 1 ]; then
+  drain_queue
+  exit 0
+fi
+
+while :; do
+  drain_queue
   sync_sessions
   shopt -s nullglob
   remaining=("$AGENT_QUEUE_DIR"/*)

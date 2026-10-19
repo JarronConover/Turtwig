@@ -34,7 +34,7 @@ push_to() {
   host=$(cfg host "$to" | jq -r '.ssh // empty')
   [ -n "$host" ] || { echo "no ssh for $to" >&2; return 1; }
   # One shared connection for the dozen ssh and rsync calls below (each new one takes seconds through Coder).
-  local mux=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/abx-env-%C" -o ControlPersist=120)
+  local mux=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/abx-%C" -o ControlPersist=120)
   ssh() { command ssh "${mux[@]}" "$@"; }
   export RSYNC_RSH="ssh ${mux[*]}"
   box_home=$(ssh -n "$host" 'echo $HOME' 2> /dev/null | tail -1)

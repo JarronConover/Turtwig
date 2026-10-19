@@ -2834,6 +2834,10 @@
     "terminal_history_limit": null,
     "chat_tmux_cols": 220, "chat_tmux_rows": 60, "rc_url_wait_secs": 45, "chat_send_pause_secs": 0.5, "supervise_secs": 30,
     "sync_transcript_max_mb": 95, "sync_bundle_warn_mb": 50, "sync_lock_wait_secs": 600,
+    // How long scripts keep one ssh connection per machine open for the next call (0: a new one each
+    // time; through Coder each takes seconds). An app not heard from in config_source_days stops counting
+    // toward this machine's merged options (several apps can configure one daemon).
+    "ssh_mux_secs": 120, "config_source_days": 30,
     // The agent a new chat runs when chat.new names none.
     "default_agent": "claude",
     // A new Codex chat's session id: bin/chat watches for its rollout this long after launch or a send.

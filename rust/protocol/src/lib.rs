@@ -87,8 +87,15 @@ pub enum Call {
         command: Option<String>,
     },
     /** The app's `daemon` settings for this host's daemon and scripts (timings, limits, parsing); sent on
-    connect and whenever settings change. */
-    Configure { options: Value },
+    connect and whenever settings change. `own` is what that app's user set themselves and `app` names the
+    app, so several apps on one daemon merge instead of each replacing the others' (see config.rs). */
+    Configure {
+        options: Value,
+        #[serde(default)]
+        own: Option<Value>,
+        #[serde(default)]
+        app: Option<String>,
+    },
     /** Scrolls a terminal's tmux history without tmux mouse mode: positive lines go back (entering copy
     mode), negative come forward; 0 leaves copy mode. */
     TermScroll { session: String, lines: i32 },

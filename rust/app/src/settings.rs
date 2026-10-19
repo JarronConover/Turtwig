@@ -171,6 +171,11 @@ pub fn load() -> Result<Settings> {
     Ok(s)
 }
 
+/** The user's own settings file, parsed (an empty object when it's missing or doesn't parse). */
+pub fn user_value() -> Value {
+    std::fs::read_to_string(path()).ok().and_then(|t| serde_json_lenient::from_str(&t).ok()).unwrap_or_else(|| Value::Object(Map::new()))
+}
+
 /** Writes one value into the user's settings file (comments and layout kept); `key` is dotted
 (`daemon.state_repo_url`). */
 pub fn set_value(key: &[String], value: &Value) -> Result<()> {

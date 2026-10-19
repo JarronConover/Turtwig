@@ -5,13 +5,16 @@
 # (when there is just one).
 # --fresh: the worktree was just created, so move its branch to the WIP's
 # head even when that isn't a fast-forward.
+# --wip-dir DIR: read the WIP from DIR (what a move sent here) instead of
+# HOST's sessions branch.
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 
-fresh=0 from= dir=
+fresh=0 from= dir= wip_dir=
 while [ $# -gt 0 ]; do
   case "$1" in
     --fresh) fresh=1; shift ;;
+    --wip-dir) wip_dir=${2:-}; shift 2 ;;
     --from) from=${2:-}; shift 2 ;;
     *) if [ -z "$dir" ]; then dir=$1; else from=$1; fi; shift ;;
   esac
@@ -36,25 +39,44 @@ if [ -n "$(git -C "$top" status --porcelain)" ]; then
   exit 1
 fi
 
-ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"
-git -C "$AGENT_SESSIONS_DIR" fetch -q origin "$from_branch"
-if ! meta=$(git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.json" 2> /dev/null); then
-  echo "no WIP from $from for $key" >&2
-  exit 1
-fi
 bundle=$(mktemp)
 trap 'rm -f "$bundle"' EXIT
-git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.bundle" > "$bundle"
+if [ -n "$wip_dir" ]; then
+  if ! meta=$(cat "$wip_dir/$key.json" 2> /dev/null); then
+    echo "no WIP from $from for $key" >&2
+    exit 1
+  fi
+  cat "$wip_dir/$key.bundle" > "$bundle"
+else
+  ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"
+  git -C "$AGENT_SESSIONS_DIR" fetch -q origin "$from_branch"
+  if ! meta=$(git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.json" 2> /dev/null); then
+    echo "no WIP from $from for $key" >&2
+    exit 1
+  fi
+  git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.bundle" > "$bundle"
+fi
 
 head=$(jq -r .head <<< "$meta")
 snap=$(jq -r .snap <<< "$meta")
-# Other sessions fetch in the same repo and hold ref locks; retry, then go on
-# (the bundle fetch below fails clearly if a needed commit is still missing).
-for i in $(seq 1 "$fetch_tries"); do
-  git -C "$top" fetch -q origin 2> /dev/null && break
-  sleep $((i * 3))
-done
-git -C "$top" fetch -q "$bundle" refs/agent-box/wip
+# The bundle holds what isn't on origin; fetch from origin only when this
+# checkout lacks a commit it builds on: the branch and its base first, then
+# everything. Other sessions fetch in the same repo and hold ref locks, so
+# the full fetch retries.
+if ! git -C "$top" fetch -q "$bundle" refs/agent-box/wip 2> /dev/null; then
+  branch=$(jq -r .branch <<< "$meta")
+  base=$(git -C "$top" symbolic-ref -q --short refs/remotes/origin/HEAD 2> /dev/null | sed 's|^origin/||')
+  for b in "$branch" ${base:-main}; do
+    git -C "$top" fetch -q origin "+refs/heads/$b:refs/remotes/origin/$b" 2> /dev/null || true
+  done
+  if ! git -C "$top" fetch -q "$bundle" refs/agent-box/wip 2> /dev/null; then
+    for i in $(seq 1 "$fetch_tries"); do
+      git -C "$top" fetch -q origin 2> /dev/null && break
+      sleep $((i * 3))
+    done
+    git -C "$top" fetch -q "$bundle" refs/agent-box/wip
+  fi
+fi
 
 if [ "$(git -C "$top" rev-parse HEAD)" != "$head" ]; then
   # Only refuse when this branch has commits that exist nowhere else: not on

@@ -2710,7 +2710,14 @@ impl Workspace {
                 o.insert("ssh_host".into(), Value::String(self.ssh_host_of(&self.default_host())));
             }
         }
-        self.remote_for_host(host).send(Call::Configure { options });
+        // What this app's user set (their file's `daemon`, and the box's name when there is one): only that
+        // overrides what other apps on the same daemon set; the rest are defaults.
+        let mut own = settings::user_value().get("daemon").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+        if let (Value::Object(o), Some(ssh)) = (&mut own, options.get("ssh_host").and_then(Value::as_str).filter(|s| !s.is_empty())) {
+            o.entry("ssh_host").or_insert_with(|| json!(ssh));
+        }
+        let app = settings::dir().to_string_lossy().into_owned();
+        self.remote_for_host(host).send(Call::Configure { options, own: Some(own), app: Some(app) });
     }
 
     /** Whether a reply asks you something: it ends with one of `chat.asks_endings` ("?"). */

@@ -39,6 +39,23 @@ option = abxcfg.option
 fill = abxcfg.fill
 label = abxcfg.label
 
+
+def ssh_mux():
+    """ssh options sharing one connection per machine for `ssh_mux_secs` (Coder's ssh takes seconds to
+    connect, and a move makes dozens of calls)."""
+    secs = option("ssh_mux_secs", 120)
+    if not secs:
+        return []
+    return ["-o", "ControlMaster=auto", "-o", f"ControlPath={HOME}/.ssh/abx-%C", "-o", f"ControlPersist={secs}"]
+
+
+def ssh(host, *command, stdin=False):
+    return ["ssh", *([] if stdin else ["-n"]), *ssh_mux(), ssh_to(host), *command]
+
+
+def rsync():
+    return ["rsync", "-e", shlex.join(["ssh", *ssh_mux()])]
+
 # How an agent's `trust` pre-accepts a folder: set `path` (keys; {dir} is the folder) to `value` in `file`.
 TRUST = {"claude": {"file": "~/.claude.json", "path": ["projects", "{dir}", "hasTrustDialogAccepted"], "value": True}}
 
@@ -268,14 +285,16 @@ def make_worktree(repo, branch, wt_dir, base=None):
     """A worktree of `branch` at `wt_dir` (made from origin/<base or the default branch> when the branch is
     new), by the repo's worktree_tool or plain `git worktree add`."""
     primary = primary_of(repo)
-    run(["git", "-C", str(primary), "fetch", "-q", "origin"], check=False)
+    # Just this branch (and the base a new one starts from), not the whole remote: a monorepo fetch takes seconds.
+    fetch_branch(primary, branch)
     local = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/heads/{branch}"],
                 check=False, capture_output=True).returncode == 0
     remote = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}"],
                  check=False, capture_output=True).returncode == 0
     if not local and not remote:
-        run(["git", "-C", str(primary), "branch", "-q", "--no-track", branch,
-             f"origin/{base or abxcfg.default_base(primary)}"])
+        base = base or abxcfg.default_base(primary)
+        fetch_branch(primary, base)
+        run(["git", "-C", str(primary), "branch", "-q", "--no-track", branch, f"origin/{base}"])
     tool = abxcfg.worktree_tool(repo)
     if not tool or not tool.get("create"):
         wt_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -293,30 +312,38 @@ def make_worktree(repo, branch, wt_dir, base=None):
         print(f"warning: {Path(tool['bin']).name}: {last}" + (f" ({note})" if note else ""), file=sys.stderr)
 
 
-def ensure_worktree(chat, restore_from=None):
+def fetch_branch(checkout, branch):
+    run(["git", "-C", str(checkout), "fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+        check=False, capture_output=True)
+
+
+def ensure_worktree(chat, restore_from=None, incoming=False):
     """Create the chat's worktree if it's missing; returns its directory.
-    restore_from: also apply that host's latest WIP (the worktree must be clean)."""
+    restore_from: also apply that host's latest WIP (the worktree must be clean); incoming: the WIP that
+    host sent here for a move (send_wip), not its sessions branch."""
     if not chat.get("branch"):
         return Path(chat["dir"])
     repo = chat.get("repo") or default_repo()
     wt_dir = checked_out(primary_of(repo), chat["branch"]) or worktree_dir(chat)
     if wt_dir.exists():
         if restore_from:
-            wip_restore(wt_dir, restore_from)
+            wip_restore(wt_dir, restore_from, incoming=incoming)
         return wt_dir
     make_worktree(repo, chat["branch"], wt_dir, chat.get("base"))
     if restore_from:
-        wip_restore(wt_dir, restore_from, fresh=True)
+        wip_restore(wt_dir, restore_from, fresh=True, incoming=incoming)
     return wt_dir
 
 
-def wip_restore(directory, host, fresh=False):
+def wip_restore(directory, host, fresh=False, incoming=False):
     # A worktree this machine handed off keeps the work it had then; stash that (recoverable, never
     # dropped) so the other machine's newer work can land.
     if not fresh and run(["git", "-C", str(directory), "status", "--porcelain"], check=False, capture_output=True).stdout.strip():
         run(["git", "-C", str(directory), "stash", "push", "-q", "-u", "-m", f"a.box: before restoring the {label(host)}'s work"], check=False)
         print(f"stashed {directory}'s local changes (git stash list) before restoring the {label(host)}'s work", file=sys.stderr)
     args = [str(Path(__file__).parent / "wip-restore")] + (["--fresh"] if fresh else []) + [str(directory), "--from", host]
+    if incoming:
+        args += ["--wip-dir", str(AGENT_HOME / "incoming" / host / "wip")]
     out = run(args, check=False, capture_output=True)
     text = (out.stdout + out.stderr).strip()
     if out.returncode != 0 and "no WIP from" not in text:
@@ -778,8 +805,7 @@ def sh_on(host, script, **kw):
     """Run a shell snippet on a host (in its home)."""
     if host == HOST:
         return run(["bash", "-c", script], check=False, capture_output=True, cwd=str(HOME), **kw)
-    return run(["ssh"] + ([] if kw.get("input") is not None else ["-n"]) + [ssh_to(host), script],
-               check=False, capture_output=True, **kw)
+    return run(ssh(host, script, stdin=kw.get("input") is not None), check=False, capture_output=True, **kw)
 
 
 def local_end(src, dst):
@@ -787,8 +813,17 @@ def local_end(src, dst):
         sys.exit(f"the {label(HOST)} can only copy to or from itself, not {label(src)} -> {label(dst)}")
 
 
-def release_here(chat):
-    """Stop the chat here and make its latest WIP and transcript durable."""
+def snapshot_now():
+    """Snapshot the queued worktrees' WIP now; the backup (transcripts, the push) follows in the background,
+    since a move sends the WIP straight to the other machine."""
+    worker = str(Path(__file__).parent / "sync-worker")
+    run([worker, "--snapshot-only"], check=False)
+    subprocess.Popen([worker], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def release_here(chat, snapshot=True):
+    """Stop the chat here and snapshot its WIP (snapshot False: the caller does, once for all)."""
     chat["status"] = "moving"
     save(chat, f"chat moving: {chat['name']}", wait=True)
     if tmux_alive(tmux_name(chat)):
@@ -797,7 +832,8 @@ def release_here(chat):
         queue = AGENT_HOME / "queue"
         queue.mkdir(parents=True, exist_ok=True)
         (queue / f"move-{chat['id']}").write_text(chat["dir"] + "\n")
-    run([str(Path(__file__).parent / "sync-worker")], check=False)
+    if snapshot:
+        snapshot_now()
 
 
 def take_over(chat, directory):
@@ -822,7 +858,54 @@ def real_dir(host, directory):
     return os.path.realpath(str(directory))
 
 
-def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id):
+def send_wip(src, dst):
+    """src's WIP snapshots straight to dst's incoming/<src>/wip, so a move needn't wait for them to go
+    through GitLab. Also makes incoming/<src>/claude there, for stage_transcript."""
+    local_end(src, dst)
+    inc = f".agent-box/incoming/{src}"
+    sh_on(dst, f"mkdir -p {inc}/wip {inc}/claude")
+    if src != HOST:
+        sh_on(src, "mkdir -p .agent-box/sessions/wip")
+    out = run([*rsync(), "-a", "--delete", endpoint(src, ".agent-box/sessions/wip/"), endpoint(dst, f"{inc}/wip/")],
+              check=False, capture_output=True)
+    if out.returncode != 0:
+        sys.exit(f"couldn't send the {label(src)}'s work to the {label(dst)}: {out.stderr.strip()}")
+
+
+def stage_transcript(src_dir, dst_host, chat_id):
+    """Copy a chat's transcript from here to dst's incoming/<here>/claude; `_receive` there files it under
+    the folder it gets, so the copy needs no round trip to learn that folder first."""
+    chat = load(chat_id)
+    if chat and agent_def(chat).get("session") == "discovered":
+        return copy_rollouts(HOST, dst_host, chat)
+    real = os.path.realpath(str(src_dir))
+    slugs = dict.fromkeys([project_slug(real), project_slug(src_dir)])
+    slug = next((s for s in slugs if (PROJECTS / s / f"{chat_id}.jsonl").exists()), None)
+    if not slug:
+        sys.exit(f"no conversation for {chat_id} here (looked in {', '.join(slugs)})")
+    run([*rsync(), "-a", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
+         f"{PROJECTS / slug}/", endpoint(dst_host, f".agent-box/incoming/{HOST}/claude/")], check=False, capture_output=True)
+
+
+def place_transcript(chat_id, directory, frm):
+    """File a staged transcript (stage_transcript) under the folder the chat now runs in."""
+    chat = load(chat_id)
+    if chat and agent_def(chat).get("session") == "discovered":
+        return
+    stage = AGENT_HOME / "incoming" / frm / "claude"
+    main = stage / f"{chat_id}.jsonl"
+    if not main.exists() or main.stat().st_size == 0:
+        sys.exit(f"the conversation didn't arrive from the {label(frm)}")
+    dest = PROJECTS / project_slug(os.path.realpath(str(directory)))
+    dest.mkdir(parents=True, exist_ok=True)
+    os.replace(main, dest / main.name)
+    sub = stage / chat_id
+    if sub.is_dir():
+        shutil.copytree(sub, dest / chat_id, dirs_exist_ok=True)
+        shutil.rmtree(sub, ignore_errors=True)
+
+
+def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id, src_real=None):
     """Copy a chat's transcript (and its subagent folder) between machines. Claude Code keeps a session
     under its folder's real path, so both ends use that (a box chat in ~/dev/redo lives under ~/project);
     the copy is checked, so a move never resumes a chat whose conversation didn't arrive."""
@@ -830,13 +913,13 @@ def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id):
     if chat and agent_def(chat).get("session") == "discovered":
         return copy_rollouts(src_host, dst_host, chat)
     local_end(src_host, dst_host)
-    src_real, dst_real = real_dir(src_host, src_dir), real_dir(dst_host, dst_dir)
+    src_real, dst_real = src_real or real_dir(src_host, src_dir), real_dir(dst_host, dst_dir)
     sources = [project_slug(src_real)] + ([project_slug(src_dir)] if project_slug(src_dir) != project_slug(src_real) else [])
     dst = f".claude/projects/{project_slug(dst_real)}/"
     sh_on(dst_host, f"mkdir -p {shlex.quote(dst)}")
     for slug in sources:
         src = f".claude/projects/{slug}/"
-        run(["rsync", "-a", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
+        run([*rsync(), "-a", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
              endpoint(src_host, src), endpoint(dst_host, dst)], check=False, capture_output=True)
         if sh_on(dst_host, f"test -s {shlex.quote(dst + chat_id + '.jsonl')}").returncode == 0:
             return
@@ -858,7 +941,7 @@ def copy_rollouts(src_host, dst_host, chat):
     rels = [os.path.relpath(p, src_home) for p in paths if p.startswith(src_home + "/")]
     for rel in rels:
         sh_on(dst_host, f"mkdir -p {shlex.quote(os.path.dirname(rel) or '.')}")
-        run(["rsync", "-a", endpoint(src_host, rel), endpoint(dst_host, rel)], check=False, capture_output=True)
+        run([*rsync(), "-a", endpoint(src_host, rel), endpoint(dst_host, rel)], check=False, capture_output=True)
     main = rels[0] if rels else None
     if not (main and sh_on(dst_host, f"test -s {shlex.quote(main)}").returncode == 0):
         sys.exit(f"{chat['name']}'s rollout didn't copy to the {label(dst_host)}")
@@ -890,7 +973,7 @@ def sc_on(host, *args, cwd=None):
         out = run(["python3", str(shim), *args, "--json"], cwd=cwd or str(HOME), capture_output=True, check=False)
     else:
         remote = (f"cd {shlex.quote(cwd)} && " if cwd else "") + f"python3 {remote_tool(host, 'shim/sc')} " + shlex.join([*args, "--json"])
-        out = run(["ssh", "-n", ssh_to(host), remote], capture_output=True, check=False)
+        out = run(ssh(host, remote), capture_output=True, check=False)
     if out.returncode != 0:
         raise SystemExit(f"sc {' '.join(args)} on the {label(host)}: {(out.stderr or out.stdout).strip()}")
     try:
@@ -913,8 +996,7 @@ def on_host(host, *args):
     """Run this script's command on a machine; returns its stdout."""
     if host == HOST:
         return run([sys.executable, __file__, *args], capture_output=True).stdout
-    out = run(["ssh", "-n", ssh_to(host), remote_tool(host, "bin/chat") + " " + shlex.join(args)], check=False,
-              capture_output=True)
+    out = run(ssh(host, remote_tool(host, "bin/chat") + " " + shlex.join(args)), check=False, capture_output=True)
     if out.returncode != 0:
         sys.exit(f"{label(host)}: {out.stderr.strip() or out.stdout.strip()}")
     return out.stdout
@@ -946,11 +1028,15 @@ def cmd__prepare_wt(args):
     print(json.dumps({"dir": str(directory)}))
 
 
-def cmd__snapshot_dir(args):
+def queue_snapshot(directory):
     queue = AGENT_HOME / "queue"
     queue.mkdir(parents=True, exist_ok=True)
-    (queue / f"snap-{hashlib.sha1(args.dir.encode()).hexdigest()[:10]}").write_text(args.dir + "\n")
-    run([str(Path(__file__).parent / "sync-worker")], check=False)
+    (queue / f"snap-{hashlib.sha1(directory.encode()).hexdigest()[:10]}").write_text(directory + "\n")
+
+
+def cmd__snapshot_dir(args):
+    queue_snapshot(args.dir)
+    snapshot_now()
 
 
 def move_group(chat, scope):
@@ -987,38 +1073,56 @@ def move_group(chat, scope):
 
 def move_worktree(folder, branch, repo, chats, src, dst):
     """Move one worktree's chats (or, with none, its WIP) from src to dst; returns its folder on dst.
-    One of them is this machine."""
+    One of them is this machine. The WIP and transcripts go straight across over ssh, and the far end does
+    its part in one call."""
     local_end(src, dst)
     status = {c["id"]: c["status"] for c in chats}
     if src == HOST:
         for c in chats:
             adopt_worktree_branch(c)
             # a.box's own process first, so only another program's copy (super.engineering) is left to stop.
-            release_here(c)
+            release_here(c, snapshot=False)
             stop_elsewhere(c)
         if not chats and branch:
-            cmd__snapshot_dir(argparse.Namespace(dir=folder))
-        new = json.loads(on_host(dst, "_prepare_wt", repo, branch or "", src))["dir"]
+            queue_snapshot(folder)
+        snapshot_now()
+        send_wip(src, dst)
         for c in chats:
-            copy_transcript(src, c["dir"], dst, new, c["id"])
-            on_host(dst, "_take", c["id"], new)
-            if status[c["id"]] == "stopped":
-                on_host(dst, "stop", c["id"])
+            stage_transcript(c["dir"], dst, c["id"])
+        spec = {"repo": repo, "branch": branch or "", "from": src,
+                "chats": [{"id": c["id"], "stopped": status[c["id"]] == "stopped"} for c in chats]}
+        new = json.loads(on_host(dst, "_receive", json.dumps(spec)))["dir"]
     else:
-        for c in chats:
-            on_host(src, "_release", c["id"])
-        if not chats and branch:
-            on_host(src, "_snapshot_dir", folder)
+        released = json.loads(on_host(src, "_release", *[c["id"] for c in chats],
+                                      *(["--dir", folder] if not chats and branch else [])) or "{}")
+        send_wip(src, dst)
         pull_state()
-        new = str(ensure_worktree({"branch": branch, "repo": repo}, restore_from=src) if branch else primary_of(repo))
+        new = str(ensure_worktree({"branch": branch, "repo": repo}, restore_from=src, incoming=True) if branch else primary_of(repo))
         for c in chats:
             c = find(c["id"])
-            copy_transcript(src, folder, dst, new, c["id"])
+            copy_transcript(src, folder, dst, new, c["id"], src_real=(released.get(c["id"]) or {}).get("real"))
             take_over(c, Path(new))
             if status[c["id"]] == "stopped":
                 set_status(find(c["id"]), "stopped")
     pull_state()
     return new
+
+
+def cmd__receive(args):
+    """A move's receiving end in one call: the worktree with the sender's WIP (send_wip), each chat's
+    staged transcript filed under it (stage_transcript), and the chats running here, or stopped as they were."""
+    spec = json.loads(args.spec)
+    pull_state()
+    if spec["branch"]:
+        new = ensure_worktree({"branch": spec["branch"], "repo": spec["repo"]}, restore_from=spec["from"], incoming=True)
+    else:
+        new = primary_of(spec["repo"])
+    for c in spec["chats"]:
+        place_transcript(c["id"], new, spec["from"])
+        take_over(find(c["id"]), Path(new))
+        if c.get("stopped"):
+            set_status(find(c["id"]), "stopped")
+    print(json.dumps({"dir": str(new)}))
 
 
 def put_back(chats, src):
@@ -1039,7 +1143,7 @@ def home_of(host):
         return str(HOME)
     if abxcfg.host(host).get("home"):
         return abxcfg.host(host)["home"]
-    return run(["ssh", "-n", ssh_to(host), "echo $HOME"], capture_output=True).stdout.strip().splitlines()[-1]
+    return run(ssh(host, "echo $HOME"), capture_output=True).stdout.strip().splitlines()[-1]
 
 
 REWRITE = r"""
@@ -1077,7 +1181,7 @@ def sync_files(src, dst, moved):
         if src == HOST and not (HOME / rel).exists():
             continue
         sh_on(dst, f"mkdir -p {shlex.quote(rel)}")
-        run(["rsync", "-a", "--update", endpoint(src, rel), endpoint(dst, rel)], check=False, capture_output=True)
+        run([*rsync(), "-a", "--update", endpoint(src, rel), endpoint(dst, rel)], check=False, capture_output=True)
     pairs = sorted(moved.items(), key=lambda kv: -len(kv[0]))
     pairs += [(a + "/", b + "/") for a, b in abxcfg.alias_pairs(src, dst, homes[src], homes[dst])]
     payload = json.dumps([roots, [list(p) for p in pairs if p[0] != p[1]]])
@@ -1113,14 +1217,13 @@ cp "$(git -C "$top" rev-parse --absolute-git-dir)/index" "$idx" 2> /dev/null || 
 GIT_INDEX_FILE=$idx git -C "$top" add -A 2> /dev/null
 tree=$(GIT_INDEX_FILE=$idx git -C "$top" write-tree)
 rm -f "$idx"
-git -C "$AGENT_SESSIONS_DIR" fetch -q origin "$SESSIONS_BRANCH" || exit 1
-[ "$(git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.json" | jq -r '.head + " " + .tree')" = "$head $tree" ]
+[ "$(jq -r '.head + " " + .tree' "$AGENT_SESSIONS_DIR/wip/$key.json" 2> /dev/null)" = "$head $tree" ]
 """
 
 
 def saved_remotely(path):
     """Whether everything in the worktree (unpushed commits, uncommitted and untracked files) is in the
-    WIP snapshot this machine pushed, the one the other machine restored."""
+    WIP snapshot this machine made last, the one a move sent and the other machine restored."""
     return run(["bash", "-c", SAVED_CHECK, str(Path(__file__).resolve()), path], check=False, capture_output=True).returncode == 0
 
 
@@ -1253,10 +1356,18 @@ def cmd_move(args):
 
 
 def cmd__release(args):
+    """Stop chats here for a move and snapshot their WIP (and --dir's, for a worktree without chats) in
+    one go; prints {id: {dir, real}}."""
     pull_state()
-    chat = find(args.chat)
-    release_here(chat)
-    print(json.dumps({"dir": chat["dir"]}))
+    out = {}
+    for cid in args.chats:
+        chat = find(cid)
+        release_here(chat, snapshot=False)
+        out[chat["id"]] = {"dir": chat.get("dir"), "real": os.path.realpath(chat["dir"]) if chat.get("dir") else None}
+    if args.dir:
+        queue_snapshot(args.dir)
+    snapshot_now()
+    print(json.dumps(out))
 
 
 def cmd__prepare(args):
@@ -1500,10 +1611,16 @@ def main():
     ss.add_argument("chat")
     ss.set_defaults(fn=cmd_stack_start)
 
-    for name, fn in [("_release", cmd__release), ("_snapshot", cmd__snapshot)]:
-        h = sub.add_parser(name)
-        h.add_argument("chat")
-        h.set_defaults(fn=fn)
+    h = sub.add_parser("_snapshot")
+    h.add_argument("chat")
+    h.set_defaults(fn=cmd__snapshot)
+    h = sub.add_parser("_release")
+    h.add_argument("chats", nargs="*")
+    h.add_argument("--dir")
+    h.set_defaults(fn=cmd__release)
+    h = sub.add_parser("_receive")
+    h.add_argument("spec", help="JSON: {repo, branch, from, chats: [{id, stopped}]}")
+    h.set_defaults(fn=cmd__receive)
     h = sub.add_parser("_snapshot_branch")
     h.add_argument("branch")
     h.set_defaults(fn=cmd__snapshot_branch)
