@@ -214,7 +214,7 @@ impl Workspace {
     fn pending_text(&self, chat_id: &str, fallback: String) -> String {
         let Some(chat) = self.chat(chat_id) else { return fallback };
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
-        let (mut text, quiet_since) = match &chat.activity {
+        let (mut text, quiet_since) = match &chat.status_line {
             Some(a) => {
                 let mut t = label("pending_status", "{verb}", &[("verb", &a.verb)]);
                 if let Some(since) = a.since {

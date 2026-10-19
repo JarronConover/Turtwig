@@ -571,7 +571,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             forked_from: s("forked_from"),
             launched_at: v.get("launched_at").and_then(Value::as_f64),
             transcript: transcript.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            activity,
+            status_line: activity,
         });
     }
     out

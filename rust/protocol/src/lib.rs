@@ -388,7 +388,7 @@ pub struct Chat {
     pub transcript: Option<String>,
     /** What the agent's own status line says while it works, read from its pane. */
     #[serde(default)]
-    pub activity: Option<Activity>,
+    pub status_line: Option<Activity>,
 }
 
 /** A working agent's status line, like Claude Code's "✻ Concocting… (4m 17s · ↓ 6.5k tokens)". */
