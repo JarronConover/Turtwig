@@ -36,11 +36,14 @@ detach() {
   fi
 }
 
-# Clone one branch of the agent-box repo into $1, or start it as an orphan
-# when the branch doesn't exist on the remote yet.
+# Clone one branch of the state repo into $1 (or point an existing clone at it), or start
+# it as an orphan when the branch doesn't exist on the remote yet.
 ensure_branch_clone() {
   local dir=$1 branch=$2
-  [ -d "$dir/.git" ] && return 0
+  if [ -d "$dir/.git" ]; then
+    [ "$(git -C "$dir" remote get-url origin 2> /dev/null)" = "$AGENT_BOX_REPO_URL" ] || git -C "$dir" remote set-url origin "$AGENT_BOX_REPO_URL"
+    return 0
+  fi
   mkdir -p "$(dirname "$dir")"
   if git ls-remote --exit-code --heads "$AGENT_BOX_REPO_URL" "$branch" > /dev/null 2>&1; then
     git clone -q --single-branch --branch "$branch" "$AGENT_BOX_REPO_URL" "$dir"
