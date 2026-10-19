@@ -1,8 +1,21 @@
 # agent-box
 
-Tooling and durable state for TJ's remote agent box (one always-on Coder
-workspace running Claude Code chats under Remote Control). Design:
-`~/.local/state/redo/designs/remote-agent-workspace/design.md`.
+a.box: a Mac app for running Claude Code and Codex chats, on the Mac and on
+an always-on Coder workspace (the box), plus the tooling both machines share.
+Everything the app shows and does is settings, so it can be reshaped by you
+or by an agent.
+
+## Install on a Mac
+
+```bash
+git clone git@gitlab.com:tj15/agent-box.git ~/dev/agent-box
+~/dev/agent-box/bin/install
+```
+
+It needs Rust (`bin/install` says how to get it). The app opens on a setup
+guide: your agents, an optional Coder workspace to run chats on (it installs
+a.box there for you), and a private repo for backups. "Set up a.box…" in the
+command palette (⌘K) brings the guide back; `bin/setup` is what it runs.
 
 ## Branches
 
@@ -70,6 +83,8 @@ all over the same state:
   chats, sections (create/rename/delete/assign), worktree delete, terminals.
 
 ## Setup on a new box
+
+The setup guide does this for you; by hand:
 
 ```bash
 git clone https://gitlab.com/tj15/agent-box.git ~/agent-box

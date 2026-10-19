@@ -61,7 +61,8 @@ pub fn host_specs(raw: &Value) -> Vec<HostSpec> {
             out.insert(0, s);
         }
     }
-    if !has_own(&default_host) && base.is_object() {
+    // With no other machine (default_host is this one), `connection` describes nothing.
+    if !has_own(&default_host) && default_host != local_host && base.is_object() {
         if let Some(s) = spec(&default_host, base) {
             out.push(s);
         }
@@ -231,12 +232,16 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_connect_the_box_over_ssh_and_this_mac_locally() {
-        let specs = host_specs(&defaults());
-        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["mac", "box"]);
+    fn the_defaults_run_on_this_mac_until_a_box_is_set_up() {
+        let names = |v: &Value| host_specs(v).into_iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names(&defaults()), ["mac"]);
+        let mut v = defaults();
+        v["app"]["default_host"] = json!("box");
+        v["connection"]["ssh_host"] = json!("coder.me");
+        let specs = host_specs(&v);
+        assert_eq!(names(&v), ["mac", "box"]);
         assert_eq!(specs[0].ssh_host, "");
-        assert_eq!(specs[1].ssh_host, "coder.tj-agents");
+        assert_eq!(specs[1].ssh_host, "coder.me");
         assert_eq!(specs[1].retry_secs, 3);
         assert!(specs[1].ssh_options.contains(&"ServerAliveInterval=15".to_string()));
     }

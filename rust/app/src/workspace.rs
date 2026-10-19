@@ -397,6 +397,7 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let fresh = !settings::path().exists();
         let (settings, settings_error) = match settings::load() {
             Ok(s) => (s, None),
             Err(e) => (Settings::default(), Some(format!("{e:#}"))),
@@ -485,10 +486,15 @@ impl Workspace {
         let clicks: Option<Task<()>> = None;
         let mut transcripts: HashMap<String, Transcript> = HashMap::new();
         transcripts.entry(crate::designer::CHAT_ID.into()).or_default().append(0, &crate::designer::past_entries());
-        let user_state = load_state();
+        let mut user_state = load_state();
+        // A fresh install opens the setup guide (the Setup component); the palette's "Set up a.box" reopens it.
+        if fresh && !user_state.contains_key("setup_step") {
+            user_state.insert("setup_step".into(), json!("welcome"));
+            let _ = std::fs::write(settings::dir().join("ui-state.json"), serde_json::to_string_pretty(&user_state).unwrap_or_default());
+        }
         let mut state = settings.state.clone();
         state.extend(user_state.clone());
-        let connecting = settings.text("connecting", "Connecting to the box…");
+        let connecting = settings.text("connecting", "Connecting…");
         let ws = Self {
             conns: HashMap::new(),
             remotes: HashMap::new(),

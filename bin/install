@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Install a.box on this Mac from this checkout: build the app and its daemon, put the app in
+# ~/Applications, and open it. The app's setup guide does the rest. Safe to run again to update.
+set -euo pipefail
+dir="$(cd "$(dirname "$0")/.." && pwd)"
+if ! command -v cargo > /dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+  echo "a.box is built with Rust. Install it first, then run this again:"
+  echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+  exit 1
+fi
+if [ "$dir" != "$HOME/dev/agent-box" ]; then
+  echo "note: a.box looks for its source at ~/dev/agent-box (settings app.source_dir); this checkout is $dir"
+fi
+echo "Building a.box (the first build takes a few minutes)…"
+"$dir/rust/app/bundle.sh"
+open "$HOME/Applications/a.box.app"

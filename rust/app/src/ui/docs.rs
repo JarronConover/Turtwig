@@ -74,6 +74,7 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `connection` | The default host's connection: `ssh_host`, `daemon` path, `retry_seconds`, `ssh_options`, `watch_ms`, `env_push_seconds`, `env_push_command` (null: `bin_dir`'s env-push). `local` is this Mac's daemon (`enabled`, `daemon`). |
 | `input` | `press_dedupe_ms` (50): how long one press counts as the same press for every node under it. |
 | `scripts_options` | `context_cache_ms`, `min_timer_ms`, `keep_data` (true: `.data` survives a script reload). |
+| `setup` | The setup guide a fresh install opens with (components `Setup`, state `setup_step`): `command` (null: `bin/setup` in `app.source_dir`), `welcome`, `tools` (the CLIs it checks for), `tour` (its stops: `{id, title, text}`). "Set up a.box…" in the palette reopens it. |
 | `settings_agent` | `command`: the `settings.agent` run (`{dir}`, `{claude}`, `$REQUEST`; null: the built-in one). |
 
 ## Logo

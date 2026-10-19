@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build the native app in release mode and install it as ~/Applications/a.box.app.
+# Build the native app and this Mac's daemon in release mode and install the app as ~/Applications/a.box.app.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo build --release -p agent-box-app
+cargo build --release -p agent-box-app -p agent-boxd
 app="$HOME/Applications/a.box.app"
 # The app was called Agent Box before; the bundle id (and so its notification permission) stays the same.
 rm -rf "$app" "$HOME/Applications/Agent Box.app"
@@ -31,6 +31,6 @@ cat > "$app/Contents/Info.plist" << 'PLIST'
 PLIST
 # A real (even self-signed) signature lets macOS show its notifications and Dock badge; ad-hoc can't.
 identity=$(security find-identity -p codesigning 2> /dev/null | awk -F'"' '/Agent Box Local Signing/ {print $2; exit}')
-# allow-jit lets JavaScriptCore compile scripts to machine code (about 6-17x faster than without).
+# allow-jit lets wasmtime compile scripts to machine code.
 codesign --force --sign "${identity:--}" --entitlements app/entitlements.plist "$app" > /dev/null 2>&1
 echo "installed $app"

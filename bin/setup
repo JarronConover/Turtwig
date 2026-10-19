@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""What the app's setup guide checks and does, each printing one JSON object.
+
+  setup check                 the agents, tools and machines it can see
+  setup box HOST              can it reach HOST over ssh, and is a.box there
+  setup box-install HOST      clone (or update) a.box on HOST and boot it
+  setup backup-create [NAME]  a private GitLab project for the backups (glab), or the one already made
+  setup backup-check URL      can it read URL
+  setup finish                boot this machine (hooks, state clones)
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+AGENT_BOX_DIR = Path(__file__).resolve().parent.parent
+HOME = Path.home()
+
+
+def run(cmd, timeout=20, **kw):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, "", str(e)
+
+
+def last_line(text):
+    lines = [l for l in text.splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
+def https_url(url):
+    """The https form of a git URL, for a machine without this one's ssh key."""
+    m = re.match(r"^(?:ssh://)?git@([^:/]+)[:/](.+)$", url)
+    return f"https://{m.group(1)}/{m.group(2)}" if m else url
+
+
+def check():
+    claude_json = HOME / ".claude.json"
+    try:
+        claude_cfg = json.loads(claude_json.read_text())
+    except (OSError, ValueError):
+        claude_cfg = {}
+    hooks = HOME / ".claude" / "settings.json"
+    workspaces, coder_in = [], False
+    if shutil.which("coder"):
+        code, out, _ = run(["coder", "list", "-o", "json"], timeout=15)
+        coder_in = code == 0
+        if coder_in:
+            try:
+                workspaces = [f"coder.{w['name']}" for w in json.loads(out)]
+            except (ValueError, KeyError, TypeError):
+                pass
+    glab = bool(shutil.which("glab"))
+    return {
+        "claude": {"installed": bool(shutil.which("claude")),
+                   "signed_in": bool(claude_cfg.get("oauthAccount") or os.environ.get("ANTHROPIC_API_KEY"))},
+        "codex": {"installed": bool(shutil.which("codex")), "signed_in": (HOME / ".codex" / "auth.json").exists()},
+        "glab": {"installed": glab, "signed_in": glab and run(["glab", "auth", "status"], timeout=10)[0] == 0},
+        "coder": {"installed": bool(shutil.which("coder")), "signed_in": coder_in, "workspaces": workspaces},
+        "cargo": bool(shutil.which("cargo") or (HOME / ".cargo" / "bin" / "cargo").exists()),
+        "hooks": hooks.exists() and "agent-boxd" in hooks.read_text(errors="ignore"),
+        "origin": run(["git", "-C", str(AGENT_BOX_DIR), "remote", "get-url", "origin"])[1],
+    }
+
+
+def ssh(host, script, timeout):
+    return run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, script], timeout=timeout)
+
+
+def box(host):
+    code, out, err = ssh(host, "echo reached; [ -x ~/agent-box/bin/boot ] && echo installed; command -v claude > /dev/null && echo claude", 40)
+    if "reached" not in out:
+        return {"ok": False, "error": last_line(err) or "couldn't connect"}
+    return {"ok": True, "installed": "installed" in out.split(), "claude": "claude" in out.split()}
+
+
+def box_install(host):
+    origin = https_url(run(["git", "-C", str(AGENT_BOX_DIR), "remote", "get-url", "origin"])[1])
+    script = (f"set -e; if [ -d ~/agent-box/.git ]; then git -C ~/agent-box pull -q --ff-only; "
+              f"else git clone -q {json.dumps(origin)} ~/agent-box; fi; ~/agent-box/bin/boot --force")
+    code, _, err = ssh(host, script, 1800)
+    if code != 0:
+        return {"ok": False, "error": last_line(err) or f"exit {code}"}
+    return box(host)
+
+
+def glab_api(*args):
+    code, out, err = run(["glab", "api", *args], timeout=30)
+    if code != 0:
+        raise RuntimeError(last_line(err) or last_line(out) or "glab failed")
+    return json.loads(out)
+
+
+def backup_create(name="agent-box-state"):
+    if not shutil.which("glab"):
+        return {"ok": False, "error": "glab isn't installed (brew install glab, then glab auth login)"}
+    try:
+        user = glab_api("user")["username"]
+        try:
+            p = glab_api(f"projects/{user}%2F{name}")
+        except RuntimeError:
+            p = glab_api("-X", "POST", "projects", "-f", f"name={name}", "-f", f"path={name}", "-f", "visibility=private",
+                         "-f", "description=a.box backups: chats, settings and uncommitted work (keep private)")
+    except (RuntimeError, ValueError, KeyError) as e:
+        return {"ok": False, "error": str(e)}
+    if p.get("visibility") != "private":
+        return {"ok": False, "error": f"{p.get('web_url')} isn't private; backups hold every transcript"}
+    return {"ok": True, "url": p["ssh_url_to_repo"], "web_url": p["web_url"]}
+
+
+def backup_check(url):
+    code, _, err = run(["git", "ls-remote", url], timeout=30)
+    return {"ok": code == 0, "error": None if code == 0 else last_line(err) or "can't read it"}
+
+
+def finish():
+    code, _, err = run([str(AGENT_BOX_DIR / "bin" / "boot"), "--force"], timeout=600)
+    return {"ok": code == 0, "error": None if code == 0 else last_line(err) or f"exit {code}"}
+
+
+def main(argv):
+    cmds = {"check": check, "box": box, "box-install": box_install, "backup-create": backup_create,
+            "backup-check": backup_check, "finish": finish}
+    if not argv or argv[0] not in cmds:
+        sys.exit(__doc__)
+    print(json.dumps(cmds[argv[0]](*argv[1:])))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

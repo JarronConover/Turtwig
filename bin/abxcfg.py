@@ -74,7 +74,7 @@ BOX_BOOT = {
 
 HOSTS = {
     "box": {
-        "label": "box", "detect": {"env": "CODER_AGENT_URL"}, "ssh": "coder.tj-agents", "agent_box_dir": "~/agent-box",
+        "label": "box", "detect": {"env": "CODER_AGENT_URL"}, "ssh": None, "agent_box_dir": "~/agent-box",
         "sc_store": "sc.json", "supervise": True, "relay_app_actions": True, "sync_transcripts": "all", "stacks": False,
         "foreign_sessions": False, "build_unwatched": True, "env": {"REDO_GITLAB_USER_AUTH": "1"},
         "agent_env": {"path_prepend": ["{agent_box_dir}/shim", "~/redo-monorepo-worktrees/bin", "~/.local/bin"],

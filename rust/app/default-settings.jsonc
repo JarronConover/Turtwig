@@ -1,8 +1,10 @@
 // Built-in defaults: super.engineering's layout, written in the same settings language you use.
 // Override any part in your settings file; SETTINGS.md (next to it) documents every key.
 {
+  // The box: another machine (a Coder workspace) whose chats keep running while this Mac sleeps. It's
+  // used once app.default_host is "box"; setup fills in ssh_host (its name in ~/.ssh/config).
   "connection": {
-    "ssh_host": "coder.tj-agents",
+    "ssh_host": "",
     "daemon": "~/agent-box/rust/target/release/agent-boxd",
     "retry_seconds": 3,
     // Extra ssh arguments for the box connection.
@@ -135,7 +137,8 @@
         { "type": "MainArea", "id": "main-area", "style": { "grow": 1 } },
         { "type": "ChangesPanel", "id": "changes-panel", "if": ".state.changes_place == \"right\" and .selected.worktree" },
         { "type": "DesignerPanel", "id": "designer", "if": ".state.designer_open" },
-        { "type": "Confirm", "id": "confirm" }
+        { "type": "Confirm", "id": "confirm" },
+        { "type": "Setup", "id": "setup" }
       ]
     }
   },
@@ -1239,6 +1242,465 @@
       ]
     },
 
+    "Setup": {
+      "about": "The setup guide a fresh install opens with (state.setup_step: welcome, agents, box, backup, finish, tour; done or null hides it). Its checks and steps run bin/setup; its texts and tour stops are in settings `setup`. The palette's \"Set up a.box\" reopens it.",
+      "if": ".state.setup_step and .state.setup_step != \"done\"",
+      "type": "box",
+      "layer": "top",
+      "style": { "position": "absolute", "left": 0, "top": 0, "right": 0, "bottom": 0 },
+      "children": [
+        { "if": ".state.setup_step == \"tour\"", "type": "SetupTour", "id": "setup-tour" },
+        {
+          "if": ".state.setup_step != \"tour\"",
+          "type": "box",
+          "style": { "position": "absolute", "left": 0, "top": 0, "right": 0, "bottom": 0, "align": "center", "justify": "center", "background": "#0000008c" },
+          "occlude": true,
+          "children": [
+            {
+              "id": "setup-card",
+              "type": "column",
+              "occlude": true,
+              "style": { "width": 560, "max_height": "{{ .app.window.height - 60 }}", "padding": [22, 26, 20, 26], "gap": 16, "radius": 14, "border": 1, "border_color": "@line", "background": "@card", "shadow": "xl" },
+              "animate": { "from": { "opacity": 0, "y": 10 }, "duration": 200 },
+              "children": [
+                {
+                  "type": "row",
+                  "style": { "align": "center", "gap": 10 },
+                  "children": [
+                    { "type": "logo", "props": { "size": 22 } },
+                    { "type": "text", "props": { "text": "Set up a.box" }, "style": { "font_size": 12.5, "color": "@text_muted", "grow": 1 } },
+                    {
+                      "if": ".state.setup_step != \"welcome\"",
+                      "type": "row",
+                      "style": { "gap": 6, "align": "center" },
+                      "children": [
+                        {
+                          "for": "[\"agents\", \"box\", \"backup\", \"finish\"] | to_entries",
+                          "as": "d",
+                          "key": ".d.value",
+                          "type": "box",
+                          "style": {
+                            "height": 7, "radius": 4,
+                            "width": "{{ if .d.value == .state.setup_step then 18 else 7 end }}",
+                            "background": "{{ if .d.key <= (if .state.setup_step == \"agents\" then 0 elif .state.setup_step == \"box\" then 1 elif .state.setup_step == \"backup\" then 2 else 3 end) then \"@accent\" else \"@line\" end }}"
+                          },
+                          "transition": { "width": 200 }
+                        }
+                      ]
+                    }
+                  ]
+                },
+
+                { "if": ".state.setup_step == \"welcome\"", "type": "SetupWelcome", "id": "setup-welcome" },
+                { "if": ".state.setup_step == \"agents\"", "type": "SetupAgents", "id": "setup-agents" },
+                { "if": ".state.setup_step == \"box\"", "type": "SetupBox", "id": "setup-box" },
+                { "if": ".state.setup_step == \"backup\"", "type": "SetupBackup", "id": "setup-backup" },
+                { "if": ".state.setup_step == \"finish\"", "type": "SetupFinish", "id": "setup-finish" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+
+    "SetupButton": {
+      "about": "A setup guide button. props: text, do, primary (accent fill), icon, busy (a spinner instead of the icon), disabled.",
+      "type": "row",
+      "style": {
+        "height": 30, "padding": [0, 14], "gap": 6, "align": "center", "radius": 15, "font_size": 13, "shrink": 0,
+        "cursor": "{{ if .props.disabled then \"default\" else \"pointer\" end }}",
+        "opacity": "{{ if .props.disabled then 0.45 else 1 end }}",
+        "border": "{{ if .props.primary then 0 else 1 end }}", "border_color": "@line",
+        "background": "{{ if .props.primary then \"@accent\" else \"@pill\" end }}",
+        "color": "{{ if .props.primary then \"#ffffff\" else \"@text\" end }}",
+        "hover": { "opacity": "{{ if .props.disabled then 0.45 else 0.88 end }}" }, "active": { "opacity": 0.75 }
+      },
+      "on": { "click": "{{ if .props.disabled or .props.busy then null else .props.do end }}" },
+      "children": [
+        { "if": ".props.busy", "type": "spinner", "props": { "size": "xsmall", "color": "{{ if .props.primary then \"#ffffff\" else \"@accent\" end }}" } },
+        { "if": ".props.icon and (.props.busy | not)", "type": "icon", "props": { "name": "{{ .props.icon }}", "size": 14 } },
+        { "type": "text", "props": { "text": "{{ .props.text }}" } }
+      ]
+    },
+
+    "SetupStepText": {
+      "about": "A setup step's heading and explanation. props: title, text.",
+      "type": "column",
+      "style": { "gap": 6 },
+      "children": [
+        { "type": "text", "props": { "text": "{{ .props.title }}" }, "style": { "font_size": 20, "font_weight": "semibold" } },
+        { "type": "text", "props": { "text": "{{ .props.text }}" }, "style": { "font_size": 13.5, "color": "@text_muted", "line_height": 1.55 } }
+      ]
+    },
+
+    "SetupFooter": {
+      "about": "A setup step's buttons: Back (props.back: the step before), a quiet skip (props.skip, props.skip_do), and props.next / props.next_do.",
+      "type": "row",
+      "style": { "align": "center", "gap": 8, "margin": [4, 0, 0, 0] },
+      "children": [
+        { "if": ".props.back", "type": "SetupButton", "props": { "text": "Back", "do": { "do": "state.set", "key": "setup_step", "value": "{{ .props.back }}" } } },
+        { "type": "box", "style": { "grow": 1 } },
+        {
+          "if": ".props.skip",
+          "type": "text",
+          "props": { "text": "{{ .props.skip }}" },
+          "style": { "font_size": 12.5, "color": "@text_faint", "cursor": "pointer", "padding": [0, 6], "hover": { "color": "@text" } },
+          "on": { "click": "{{ .props.skip_do }}" }
+        },
+        { "if": ".props.next", "type": "SetupButton", "props": { "text": "{{ .props.next }}", "do": "{{ .props.next_do }}", "primary": true, "busy": "{{ .props.busy }}", "disabled": "{{ .props.disabled }}" } }
+      ]
+    },
+
+    "SetupStatus": {
+      "about": "A check's line: props.state ok | missing | busy | warn, props.text.",
+      "type": "row",
+      "style": { "gap": 8, "align": "center", "font_size": 12.5 },
+      "children": [
+        { "if": ".props.state == \"busy\"", "type": "spinner", "props": { "size": "xsmall", "color": "@accent" } },
+        {
+          "if": ".props.state != \"busy\"",
+          "type": "icon",
+          "props": {
+            "name": "{{ if .props.state == \"ok\" then \"circle-check\" elif .props.state == \"warn\" then \"triangle-alert\" else \"circle-dashed\" end }}", "size": 15,
+            "color": "{{ if .props.state == \"ok\" then \"@success\" elif .props.state == \"warn\" then \"@warning\" else \"@text_faint\" end }}"
+          }
+        },
+        { "type": "text", "props": { "text": "{{ .props.text }}" }, "style": { "color": "{{ if .props.state == \"warn\" then \"@warning\" else \"@text_muted\" end }}", "shrink": 1, "min_width": 0 } }
+      ]
+    },
+
+    "SetupWelcome": {
+      "type": "column",
+      "style": { "gap": 16 },
+      "children": [
+        { "type": "SetupStepText", "props": { "title": "{{ .settings.setup.welcome.title }}", "text": "{{ .settings.setup.welcome.text }}" } },
+        {
+          "type": "column",
+          "style": { "gap": 10, "padding": [4, 0] },
+          "children": [
+            {
+              "for": ".settings.setup.welcome.points",
+              "as": "p",
+              "type": "row",
+              "style": { "gap": 10, "align": "start" },
+              "children": [
+                { "type": "icon", "props": { "name": "{{ .p.icon }}", "size": 16, "color": "@accent" }, "style": { "margin": [2, 0, 0, 0] } },
+                { "type": "text", "props": { "text": "{{ .p.text }}" }, "style": { "font_size": 13, "line_height": 1.5, "shrink": 1, "min_width": 0 } }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "SetupFooter",
+          "props": {
+            "skip": "Not now", "skip_do": { "do": "state.set", "key": "setup_step", "value": "done" },
+            "next": "Get started", "next_do": [{ "do": "state.set", "key": "setup_step", "value": "agents" }, { "do": "emit", "event": "setup.check" }]
+          }
+        }
+      ]
+    },
+
+    "SetupAgents": {
+      "type": "column",
+      "style": { "gap": 14 },
+      "children": [
+        { "type": "SetupStepText", "props": { "title": "Your agents", "text": "a.box runs agents you already have. Claude Code is the one you need; the rest make later steps easier." } },
+        {
+          "type": "column",
+          "style": { "gap": 2, "radius": 10, "border": 1, "border_color": "@line", "padding": 4 },
+          "children": [
+            {
+              "for": ".settings.setup.tools",
+              "as": "t",
+              "key": ".t.key",
+              "type": "row",
+              "style": { "gap": 12, "align": "center", "padding": [9, 10], "radius": 7, "hover": { "background": "@hover" } },
+              "children": [
+                {
+                  "type": "SetupStatus",
+                  "props": {
+                    "state": "{{ if .state.setup_busy == \"check\" then \"busy\" elif .state.setup_facts[.t.key].installed and .state.setup_facts[.t.key].signed_in then \"ok\" elif .t.required then \"warn\" else \"missing\" end }}",
+                    "text": ""
+                  }
+                },
+                {
+                  "type": "column",
+                  "style": { "grow": 1, "min_width": 0, "gap": 2 },
+                  "children": [
+                    {
+                      "type": "row",
+                      "style": { "gap": 6, "align": "center" },
+                      "children": [
+                        { "type": "text", "props": { "text": "{{ .t.name }}" }, "style": { "font_size": 13.5, "font_weight": "medium" } },
+                        { "if": ".t.required | not", "type": "text", "props": { "text": "optional" }, "style": { "font_size": 11.5, "color": "@text_faint" } }
+                      ]
+                    },
+                    { "type": "text", "props": { "text": "{{ .t.about }}" }, "style": { "font_size": 12, "color": "@text_muted" } }
+                  ]
+                },
+                {
+                  "if": ".state.setup_facts and .state.setup_busy != \"check\" and (.state.setup_facts[.t.key].installed | not)",
+                  "type": "Pill",
+                  "props": { "text": "Install", "icon": "download", "tooltip": "{{ .t.install }}", "do": { "do": "emit", "event": "setup.terminal", "payload": { "run": "{{ .t.install }}" } } }
+                },
+                {
+                  "if": ".state.setup_facts[.t.key].installed and (.state.setup_facts[.t.key].signed_in | not) and .state.setup_busy != \"check\"",
+                  "type": "Pill",
+                  "props": { "text": "Sign in", "icon": "key-round", "tooltip": "{{ .t.sign_in }}", "do": { "do": "emit", "event": "setup.terminal", "payload": { "run": "{{ .t.sign_in }}" } } }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "row",
+          "style": { "gap": 8, "align": "center" },
+          "children": [
+            { "type": "text", "props": { "text": "Installs and sign-ins open in Terminal. Come back here when they're done." }, "style": { "font_size": 12, "color": "@text_faint", "grow": 1, "shrink": 1, "min_width": 0 } },
+            { "type": "Pill", "props": { "text": "Check again", "icon": "refresh-cw", "do": { "do": "emit", "event": "setup.check" } } }
+          ]
+        },
+        {
+          "type": "SetupFooter",
+          "props": { "back": "welcome", "next": "Continue", "next_do": { "do": "state.set", "key": "setup_step", "value": "box" } }
+        }
+      ]
+    },
+
+    "SetupBox": {
+      "type": "column",
+      "style": { "gap": 14 },
+      "children": [
+        { "type": "SetupStepText", "props": { "title": "A box in the cloud", "text": "Chats can also run on a Coder workspace, so they keep working while your Mac sleeps or travels, and you can move a chat between the two at any time. Skip this to keep everything on this Mac; you can add a box later." } },
+        {
+          "if": ".settings.app.default_host != .settings.app.local_host and (.settings.connection.ssh_host // \"\") != \"\"",
+          "type": "SetupStatus",
+          "props": { "state": "ok", "text": "Using {{ .settings.connection.ssh_host }}. Connect another below to change it." }
+        },
+        {
+          "type": "column",
+          "style": { "gap": 8 },
+          "children": [
+            { "type": "text", "props": { "text": "Its ssh name" }, "style": { "font_size": 12, "color": "@text_muted" } },
+            {
+              "type": "row",
+              "style": { "gap": 8, "align": "center" },
+              "children": [
+                {
+                  "id": "setup-ssh",
+                  "type": "input",
+                  "props": { "state": "setup_ssh", "placeholder": "coder.my-workspace" },
+                  "style": { "grow": 1 },
+                  "on": { "submit": { "do": "emit", "event": "setup.box_check" } }
+                },
+                { "type": "SetupButton", "props": { "text": "Connect", "icon": "plug", "busy": "{{ .state.setup_busy == \"box\" }}", "disabled": "{{ (.state.setup_ssh // \"\") == \"\" }}", "do": { "do": "emit", "event": "setup.box_check" } } }
+              ]
+            },
+            {
+              "if": "(.state.setup_facts.coder.workspaces // []) | length > 0",
+              "type": "row",
+              "style": { "gap": 6, "wrap": true, "align": "center" },
+              "children": [
+                { "type": "text", "props": { "text": "Your workspaces:" }, "style": { "font_size": 12, "color": "@text_faint" } },
+                {
+                  "for": ".state.setup_facts.coder.workspaces",
+                  "as": "w",
+                  "type": "Pill",
+                  "props": { "text": "{{ .w }}", "mono": true, "do": [{ "do": "state.set", "key": "setup_ssh", "value": "{{ .w }}" }, { "do": "emit", "event": "setup.box_check" }] }
+                }
+              ]
+            },
+            {
+              "if": ".state.setup_facts and (.state.setup_facts.coder.installed | not)",
+              "type": "text",
+              "props": { "text": "With Coder's CLI signed in (coder login, then coder config-ssh), your workspaces show up here." },
+              "style": { "font_size": 12, "color": "@text_faint" }
+            }
+          ]
+        },
+        {
+          "if": ".state.setup_box and .state.setup_busy != \"box\"",
+          "type": "column",
+          "style": { "gap": 10, "padding": [12, 14], "radius": 10, "background": "@window" },
+          "children": [
+            {
+              "type": "SetupStatus",
+              "props": {
+                "state": "{{ if .state.setup_busy == \"box_install\" then \"busy\" elif .state.setup_box.ok and .state.setup_box.installed then \"ok\" elif .state.setup_box.ok then \"missing\" else \"warn\" end }}",
+                "text": "{{ if .state.setup_busy == \"box_install\" then \"Installing a.box on \\(.state.setup_box.host). The first build takes a few minutes…\" elif .state.setup_box.ok and .state.setup_box.installed then \"\\(.state.setup_box.host) is ready.\" elif .state.setup_box.ok then \"Reached \\(.state.setup_box.host). a.box isn't installed there yet.\" else \"Couldn't reach \\(.state.setup_box.host): \\(.state.setup_box.error)\" end }}"
+              }
+            },
+            {
+              "if": ".state.setup_box.ok and (.state.setup_box.installed | not)",
+              "type": "row",
+              "children": [{ "type": "SetupButton", "props": { "text": "Install a.box there", "icon": "download", "busy": "{{ .state.setup_busy == \"box_install\" }}", "do": { "do": "emit", "event": "setup.box_install" } } }]
+            }
+          ]
+        },
+        {
+          "type": "SetupFooter",
+          "props": {
+            "back": "agents",
+            "skip": "Just this Mac",
+            "skip_do": [{ "do": "settings.set", "key": "app.default_host", "value": "{{ .settings.app.local_host }}" }, { "do": "state.set", "key": "setup_step", "value": "backup" }],
+            "next": "{{ if .state.setup_box.ok and .state.setup_box.installed then \"Use \\(.state.setup_box.host)\" else \"Continue\" end }}",
+            "disabled": "{{ (.state.setup_box.ok and .state.setup_box.installed) or ((.settings.connection.ssh_host // \"\") != \"\" and .settings.app.default_host != .settings.app.local_host) | not }}",
+            "next_do": [
+              {
+                "do": "if",
+                "cond": "{{ .state.setup_box.ok and .state.setup_box.installed }}",
+                "then": { "do": "settings.set", "values": { "connection.ssh_host": "{{ .state.setup_box.host }}", "app.default_host": "box", "hosts.box.label": "On the box ({{ .state.setup_box.host }})" } }
+              },
+              { "do": "state.set", "key": "setup_step", "value": "backup" }
+            ]
+          }
+        }
+      ]
+    },
+
+    "SetupBackup": {
+      "type": "column",
+      "style": { "gap": 14 },
+      "children": [
+        { "type": "SetupStepText", "props": { "title": "Backups", "text": "a.box keeps your chats, settings and uncommitted work in a private git repo of your own. That's what lets a chat move between machines, and what brings everything back on a new one. It holds every transcript, so it must be private: never a repo other people can read." } },
+        {
+          "if": "(.settings.daemon.state_repo_url // \"\") != \"\"",
+          "type": "SetupStatus",
+          "props": { "state": "ok", "text": "Backing up to {{ .settings.daemon.state_repo_url }}" }
+        },
+        {
+          "if": "(.settings.daemon.state_repo_url // \"\") == \"\"",
+          "type": "column",
+          "style": { "gap": 12 },
+          "children": [
+            {
+              "type": "row",
+              "style": { "gap": 10, "align": "center" },
+              "children": [
+                {
+                  "type": "SetupButton",
+                  "props": {
+                    "text": "Make a private GitLab repo for me", "icon": "lock", "primary": true,
+                    "busy": "{{ .state.setup_busy == \"backup\" }}",
+                    "disabled": "{{ .state.setup_facts.glab.signed_in | not }}",
+                    "do": { "do": "emit", "event": "setup.backup_create" }
+                  }
+                },
+                {
+                  "if": ".state.setup_facts and (.state.setup_facts.glab.signed_in | not)",
+                  "type": "text",
+                  "props": { "text": "Needs the GitLab CLI, signed in (the Agents step)." },
+                  "style": { "font_size": 12, "color": "@text_faint", "shrink": 1 }
+                }
+              ]
+            },
+            {
+              "type": "row",
+              "style": { "gap": 8, "align": "center" },
+              "children": [
+                { "id": "setup-backup-url", "type": "input", "props": { "state": "setup_backup_url", "placeholder": "Or one you made: git@gitlab.com:you/agent-box-state.git" }, "style": { "grow": 1 }, "on": { "submit": { "do": "emit", "event": "setup.backup_use" } } },
+                { "type": "SetupButton", "props": { "text": "Use it", "busy": "{{ .state.setup_busy == \"backup_check\" }}", "disabled": "{{ (.state.setup_backup_url // \"\") == \"\" }}", "do": { "do": "emit", "event": "setup.backup_use" } } }
+              ]
+            },
+            { "if": ".state.setup_backup_error", "type": "SetupStatus", "props": { "state": "warn", "text": "{{ .state.setup_backup_error }}" } }
+          ]
+        },
+        {
+          "type": "SetupFooter",
+          "props": {
+            "back": "box",
+            "skip": "{{ if (.settings.daemon.state_repo_url // \"\") == \"\" then \"Not now\" else null end }}",
+            "skip_do": [{ "do": "state.set", "key": "setup_step", "value": "finish" }, { "do": "emit", "event": "setup.finish" }],
+            "next": "Continue",
+            "disabled": "{{ (.settings.daemon.state_repo_url // \"\") == \"\" }}",
+            "next_do": [{ "do": "state.set", "key": "setup_step", "value": "finish" }, { "do": "emit", "event": "setup.finish" }]
+          }
+        }
+      ]
+    },
+
+    "SetupFinish": {
+      "type": "column",
+      "style": { "gap": 14 },
+      "children": [
+        { "type": "SetupStepText", "props": { "title": "{{ if .state.setup_busy == \"finish\" then \"Almost there\" else \"You're set\" end }}", "text": "a.box adds its hooks to Claude Code and Codex, so it can see when a chat is working, done, or waiting on you." } },
+        {
+          "type": "SetupStatus",
+          "props": {
+            "state": "{{ if .state.setup_busy == \"finish\" then \"busy\" elif .state.setup_finish.ok then \"ok\" else \"warn\" end }}",
+            "text": "{{ if .state.setup_busy == \"finish\" then \"Installing hooks…\" elif .state.setup_finish.ok then \"Hooks installed.\" else \"Setup hit a problem: \\(.state.setup_finish.error // \"unknown\"). Try again, or run bin/boot --force.\" end }}"
+          }
+        },
+        { "if": ".state.setup_busy != \"finish\" and (.state.setup_finish.ok | not)", "type": "row", "children": [{ "type": "Pill", "props": { "text": "Try again", "icon": "refresh-cw", "do": { "do": "emit", "event": "setup.finish" } } }] },
+        {
+          "type": "SetupFooter",
+          "props": {
+            "back": "backup",
+            "skip": "Skip the tour", "skip_do": { "do": "state.set", "key": "setup_step", "value": "done" },
+            "next": "Take the tour", "busy": "{{ .state.setup_busy == \"finish\" }}",
+            "next_do": [{ "do": "state.set", "key": "setup_tour", "value": 0 }, { "do": "state.set", "key": "setup_step", "value": "tour" }]
+          }
+        }
+      ]
+    },
+
+    "SetupTour": {
+      "about": "The tour: each stop (settings setup.tour: {id, title, text}) dims the window around the node with that id (.app.layout) and explains it; a stop without an id is a card in the middle.",
+      "type": "box",
+      "style": { "position": "absolute", "left": 0, "top": 0, "right": 0, "bottom": 0 },
+      "children": [
+        {
+          "for": ". as $c | [{stop: .settings.setup.tour[.state.setup_tour // 0], n: (.state.setup_tour // 0), count: (.settings.setup.tour | length)} | . + {t: ($c.app.layout[.stop.id // \"\"] // {x: 0, y: 0, w: 0, h: 0})}]",
+          "as": "s",
+          "type": "box",
+          "style": { "position": "absolute", "left": 0, "top": 0, "right": 0, "bottom": 0 },
+          "occlude": true,
+          "children": [
+            { "if": ".s.t.w == 0", "type": "box", "style": { "position": "absolute", "left": 0, "top": 0, "right": 0, "bottom": 0, "background": "#0000008c" } },
+            { "if": ".s.t.w > 0", "type": "box", "style": { "position": "absolute", "left": 0, "right": 0, "top": 0, "height": "{{ [.s.t.y - 6, 0] | max }}", "background": "#0000008c" } },
+            { "if": ".s.t.w > 0", "type": "box", "style": { "position": "absolute", "left": 0, "right": 0, "bottom": 0, "top": "{{ .s.t.y + .s.t.h + 6 }}", "background": "#0000008c" } },
+            { "if": ".s.t.w > 0", "type": "box", "style": { "position": "absolute", "left": 0, "top": "{{ [.s.t.y - 6, 0] | max }}", "height": "{{ .s.t.h + 12 }}", "width": "{{ [.s.t.x - 6, 0] | max }}", "background": "#0000008c" } },
+            { "if": ".s.t.w > 0", "type": "box", "style": { "position": "absolute", "right": 0, "top": "{{ [.s.t.y - 6, 0] | max }}", "height": "{{ .s.t.h + 12 }}", "left": "{{ .s.t.x + .s.t.w + 6 }}", "background": "#0000008c" } },
+            {
+              "if": ".s.t.w > 0",
+              "id": "setup-tour-ring",
+              "type": "box",
+              "style": { "position": "absolute", "left": "{{ .s.t.x - 6 }}", "top": "{{ .s.t.y - 6 }}", "width": "{{ .s.t.w + 12 }}", "height": "{{ .s.t.h + 12 }}", "radius": 10, "border": 2, "border_color": "@accent" }
+            },
+            {
+              "id": "setup-tour-card",
+              "type": "column",
+              "style": {
+                "position": "absolute", "width": 320, "padding": [16, 18, 14, 18], "gap": 8, "radius": 12, "border": 1, "border_color": "@line", "background": "@card", "shadow": "xl",
+                "left": "{{ if .s.t.w == 0 then (.app.window.width - 320) / 2 elif .s.t.x + .s.t.w + 360 < .app.window.width then .s.t.x + .s.t.w + 22 else [.s.t.x - 342, 16] | max end }}",
+                "top": "{{ if .s.t.w == 0 then (.app.window.height - 200) / 2 else [[.s.t.y, .app.window.height - 230] | min, 16] | max end }}"
+              },
+              "children": [
+                { "type": "text", "props": { "text": "{{ .s.stop.title }}" }, "style": { "font_size": 15, "font_weight": "semibold" } },
+                { "type": "text", "props": { "text": "{{ .s.stop.text }}" }, "style": { "font_size": 13, "color": "@text_muted", "line_height": 1.55 } },
+                {
+                  "type": "row",
+                  "style": { "align": "center", "gap": 8, "margin": [6, 0, 0, 0] },
+                  "children": [
+                    { "type": "text", "props": { "text": "{{ .s.n + 1 }} of {{ .s.count }}" }, "style": { "font_size": 12, "color": "@text_faint", "grow": 1 } },
+                    { "if": ".s.n > 0", "type": "SetupButton", "props": { "text": "Back", "do": { "do": "state.set", "key": "setup_tour", "value": "{{ .s.n - 1 }}" } } },
+                    {
+                      "type": "SetupButton",
+                      "props": {
+                        "primary": true,
+                        "text": "{{ if .s.n + 1 < .s.count then \"Next\" else \"Done\" end }}",
+                        "do": "{{ if .s.n + 1 < .s.count then {do: \"state.set\", key: \"setup_tour\", value: (.s.n + 1)} else {do: \"state.set\", key: \"setup_step\", value: \"done\"} end }}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+
     "DropLineX": {
       "about": "The vertical insertion line at the left or right edge of a drop target in a row (tabs). props: key (the target's drop_key). Its parent needs position: relative.",
       "type": "box",
@@ -1679,7 +2141,55 @@
     "designer.finished": {
       "if": ".app.focused | not",
       "do": { "do": "notify.system", "chat": "designer", "title": "The designer finished", "text": "Your changes are in.", "sound": false }
-    }
+    },
+    // The setup guide's steps (components.Setup), each running bin/setup (settings setup.command).
+    "setup.check": { "do": [
+      { "do": "state.set", "key": "setup_busy", "value": "check" },
+      { "do": "shell", "run": "{{ .settings.setup.command // (.settings.app.source_dir + \"/bin/setup\") }} check", "timeout": 60, "then": [
+        { "do": "state.set", "key": "setup_facts", "value": "{{ (.output.stdout | fromjson)? // {} }}" },
+        { "do": "state.set", "key": "setup_busy", "value": null }
+      ] }
+    ] },
+    "setup.terminal": { "do": { "do": "shell", "run": "osascript -e 'on run argv' -e 'tell application \"Terminal\" to do script (item 1 of argv)' -e 'tell application \"Terminal\" to activate' -e 'end run' \"$CMD\"", "env": { "CMD": "{{ .payload.run }}" } } },
+    "setup.box_check": { "do": [
+      { "do": "state.set", "key": "setup_busy", "value": "box" },
+      { "do": "shell", "run": "{{ .settings.setup.command // (.settings.app.source_dir + \"/bin/setup\") }} box \"$HOST\"", "env": { "HOST": "{{ .state.setup_ssh }}" }, "timeout": 60, "then": [
+        { "do": "state.set", "key": "setup_box", "value": "{{ ((.output.stdout | fromjson)? // {ok: false, error: \"no answer\"}) + {host: .state.setup_ssh} }}" },
+        { "do": "state.set", "key": "setup_busy", "value": null }
+      ] }
+    ] },
+    "setup.box_install": { "do": [
+      { "do": "state.set", "key": "setup_busy", "value": "box_install" },
+      { "do": "shell", "run": "{{ .settings.setup.command // (.settings.app.source_dir + \"/bin/setup\") }} box-install \"$HOST\"", "env": { "HOST": "{{ .state.setup_box.host }}" }, "timeout": 1900, "then": [
+        { "do": "state.set", "key": "setup_box", "value": "{{ ((.output.stdout | fromjson)? // {ok: false, error: \"no answer\"}) + {host: .state.setup_box.host} }}" },
+        { "do": "state.set", "key": "setup_busy", "value": null }
+      ] }
+    ] },
+    "setup.backup_create": { "do": [
+      { "do": "state.set", "key": "setup_busy", "value": "backup" },
+      { "do": "shell", "run": "{{ .settings.setup.command // (.settings.app.source_dir + \"/bin/setup\") }} backup-create", "timeout": 90, "then": [
+        { "do": "if", "cond": "{{ ((.output.stdout | fromjson)? // {}).ok }}",
+          "then": [{ "do": "settings.set", "key": "daemon.state_repo_url", "value": "{{ ((.output.stdout | fromjson)? // {}).url }}" }, { "do": "state.set", "key": "setup_backup_error", "value": null }],
+          "else": { "do": "state.set", "key": "setup_backup_error", "value": "{{ ((.output.stdout | fromjson)? // {}).error // \"no answer\" }}" } },
+        { "do": "state.set", "key": "setup_busy", "value": null }
+      ] }
+    ] },
+    "setup.backup_use": { "do": [
+      { "do": "state.set", "key": "setup_busy", "value": "backup_check" },
+      { "do": "shell", "run": "{{ .settings.setup.command // (.settings.app.source_dir + \"/bin/setup\") }} backup-check \"$URL\"", "env": { "URL": "{{ .state.setup_backup_url }}" }, "timeout": 60, "then": [
+        { "do": "if", "cond": "{{ ((.output.stdout | fromjson)? // {}).ok }}",
+          "then": [{ "do": "settings.set", "key": "daemon.state_repo_url", "value": "{{ .state.setup_backup_url }}" }, { "do": "state.set", "key": "setup_backup_error", "value": null }],
+          "else": { "do": "state.set", "key": "setup_backup_error", "value": "Can't read it: {{ ((.output.stdout | fromjson)? // {}).error // \"no answer\" }}" } },
+        { "do": "state.set", "key": "setup_busy", "value": null }
+      ] }
+    ] },
+    "setup.finish": { "do": [
+      { "do": "state.set", "key": "setup_busy", "value": "finish" },
+      { "do": "shell", "run": "{{ .settings.setup.command // (.settings.app.source_dir + \"/bin/setup\") }} finish", "timeout": 600, "then": [
+        { "do": "state.set", "key": "setup_finish", "value": "{{ (.output.stdout | fromjson)? // {ok: false, error: \"no answer\"} }}" },
+        { "do": "state.set", "key": "setup_busy", "value": null }
+      ] }
+    ] }
   },
 
   // Which chat state changes are which events: {from: state | [states] | "*", to, event}.
@@ -1717,7 +2227,7 @@
   // (no ssh_host: its daemon runs here); app.default_host uses `connection` and app.local_host uses
   // `local` unless they have their own.
   "hosts": {
-    "box": { "label": "On the box (tj-agents)", "icon": "cloud", "color": "@text_faint" },
+    "box": { "label": "On the box", "icon": "cloud", "color": "@text_faint" },
     "mac": { "label": "On this Mac", "icon": "laptop", "color": "@success" }
   },
 
@@ -1760,10 +2270,13 @@
     { "key": "cmd-alt-[", "do": { "do": "select", "offset": -1 } },
     { "key": "cmd-q", "do": "app.quit" },
     { "key": "escape", "if": ".app.confirm", "do": "confirm.cancel" },
+    { "key": "escape", "if": ".state.setup_step == \"tour\"", "do": { "do": "state.set", "key": "setup_step", "value": "done" } },
     { "key": "cmd-w", "if": ".selected.chat", "do": { "do": "if", "cond": "{{ .selected.chat.state == \"working\" or .selected.chat.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .selected.chat.name }}”?", "text": "It's still working. Closing the tab stops its {{ .agents[.selected.chat.agent].name // \"agent\" }} process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .selected.chat.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .selected.chat.id }}" } } }
   ],
 
   "commands": [
+    { "label": "Set up a.box…", "do": [{ "do": "state.set", "key": "setup_step", "value": "welcome" }, { "do": "emit", "event": "setup.check" }] },
+    { "label": "Take the tour", "do": [{ "do": "state.set", "key": "setup_tour", "value": 0 }, { "do": "state.set", "key": "setup_step", "value": "tour" }] },
     { "label": "Redesign the app (open the designer)", "do": { "do": "state.set", "key": "designer_open", "value": true } },
     { "label": "Undo the last design change", "do": "settings.undo" },
     { "label": "New chat here", "if": ".selected.worktree", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
@@ -2111,7 +2624,7 @@
     "dialog_save": "Save", "dialog_name": "Name", "settings_title": "Settings", "new_section_title": "New section",
     "menu_settings": "Settings…", "menu_palette": "Command Palette", "menu_quit": "Quit {app}",
     "settings_intro": "Everything about the app is here. Your file is merged over the built-in defaults; set a key to null to remove a default. Reference for you and agents: {docs}",
-    "connecting": "Connecting to the box…", "terminal": "Terminal", "settings_reference": "Reference", "settings_save": "Save", "prompt_title": "Enter a value",
+    "connecting": "Connecting…", "terminal": "Terminal", "settings_reference": "Reference", "settings_save": "Save", "prompt_title": "Enter a value",
     "rename_section_title": "Rename section", "rename_worktree_title": "Rename worktree", "rename_branch_title": "Rename branch",
     "new_worktree_title": "New {repo} worktree from branch (new or existing)", "project_settings_title": "{name} settings",
     "project_field_name": "Name", "project_field_letter": "Badge letter", "project_field_hue": "Badge color (hue, 0–360)",
@@ -2140,9 +2653,39 @@
   "app": {
     "auto_update": true, "update_check_secs": 60, "min_update_check_secs": 15, "update_off_check_secs": 300,
     "update_command": null, "restart_command": null,
-    "local_host": "mac", "default_host": "box",
+    "local_host": "mac", "default_host": "mac",
     "source_dir": "~/dev/agent-box", "bin_dir": null,
     "path": ["~/.local/bin", "~/.cargo/bin", "~/.super.engineering/bin", "~/dev/redo-monorepo-worktrees/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+  },
+
+  // The setup guide a fresh install opens with (components.Setup; the palette's "Set up a.box…" reopens
+  // it). command: what does its checks and steps (null: bin/setup in app.source_dir); tools: the CLIs its
+  // Agents step looks for ({key: the name bin/setup check reports, name, about, required, install,
+  // sign_in: commands it opens in Terminal}); tour: its stops ({id: a node id, or null for a card in the
+  // middle, title, text}).
+  "setup": {
+    "command": null,
+    "welcome": {
+      "title": "Welcome to a.box",
+      "text": "A box for your coding agents, shaped however you like. A few quick steps and you're set.",
+      "points": [
+        { "icon": "messages-square", "text": "Run Claude Code and Codex chats side by side, each in its own git worktree, and see at a glance which ones need you." },
+        { "icon": "cloud", "text": "Keep chats going on a cloud box while your Mac sleeps, and move them to your Mac and back." },
+        { "icon": "wand-sparkles", "text": "Change anything: the layout, the colors, even what the buttons do. Ask the designer and watch it happen." }
+      ]
+    },
+    "tools": [
+      { "key": "claude", "name": "Claude Code", "about": "Runs your chats.", "required": true, "install": "curl -fsSL https://claude.ai/install.sh | bash", "sign_in": "claude" },
+      { "key": "codex", "name": "Codex", "about": "OpenAI's agent, for Codex chats.", "install": "brew install codex", "sign_in": "codex login" },
+      { "key": "glab", "name": "GitLab CLI", "about": "Makes your private backup repo for you.", "install": "brew install glab", "sign_in": "glab auth login" },
+      { "key": "coder", "name": "Coder CLI", "about": "Finds your Coder workspaces for the cloud box.", "install": "brew install coder", "sign_in": "coder login && coder config-ssh" }
+    ],
+    "tour": [
+      { "id": "sidebar", "title": "Your work", "text": "Every project and section, with a row per worktree; a worktree's chats are its tabs. Drag rows and sections to arrange them, and right-click for more." },
+      { "id": "footer-new-chat", "title": "Start a chat", "text": "⌘N starts a chat in the selected worktree. ⌘⇧N makes a new worktree for a new branch." },
+      { "id": "designer-button", "title": "Make it yours", "text": "The designer is an agent that changes a.box while you watch. Ask for a new layout, a theme, or a button that runs a script." },
+      { "id": null, "title": "One more thing", "text": "⌘K opens the command palette: every command, and every worktree by name. Settings (⌘,) hold every option. \"Set up a.box…\" in the palette brings this guide back." }
+    ]
   },
 
   // Where pasted and dropped files are copied: here, and on the other machine for its chats.

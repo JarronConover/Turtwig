@@ -44,7 +44,8 @@ class HostIdentity(Config):
         self.assertEqual(abxcfg.host_id(), "mac")
 
     def test_env_then_host_file_then_detect_rules(self):
-        self.opts(hosts={"lab": {"detect": {"env": "ABX_TEST_LAB"}}})
+        # The Mac's own rule (os: darwin) would match first on a Mac.
+        self.opts(hosts={"lab": {"detect": {"env": "ABX_TEST_LAB"}}, "mac": {"detect": {"env": "ABX_TEST_NEVER"}}})
         os.environ["ABX_TEST_LAB"] = "1"
         try:
             self.assertEqual(abxcfg.host_id(), "lab")
@@ -56,8 +57,12 @@ class HostIdentity(Config):
             del os.environ["ABX_TEST_LAB"]
 
     def test_the_defaults_are_the_original_two_machines(self):
+        self.opts()
         box, mac = abxcfg.host("box"), abxcfg.host("mac")
-        self.assertEqual((box["ssh"], box["sc_store"], box["sessions_branch"]), ("coder.tj-agents", "sc.json", "sessions/box"))
+        self.assertEqual((box["ssh"], box["sc_store"], box["sessions_branch"]), (None, "sc.json", "sessions/box"))
+        self.opts(ssh_host="coder.me")
+        self.assertEqual(abxcfg.host("box")["ssh"], "coder.me")
+        self.opts()
         self.assertEqual((mac["ssh"], mac["sc_store"], mac["sessions_branch"]), (None, "sc-mac.json", "sessions/mac"))
         self.assertEqual((box["sync_transcripts"], mac["sync_transcripts"]), ("all", "registry"))
         self.assertTrue(box["supervise"] and not mac["supervise"])
@@ -71,7 +76,7 @@ class HostIdentity(Config):
         self.assertEqual(abxcfg.host("box")["ssh"], "explicit")
 
     def test_a_new_host_gets_its_own_branch_and_store(self):
-        self.opts(hosts={"lab": {"ssh": "lab.local"}}, sessions_branch="backups/{host}")
+        self.opts(hosts={"lab": {"ssh": "lab.local"}}, sessions_branch="backups/{host}", ssh_host="coder.me")
         lab = abxcfg.host("lab")
         self.assertEqual((lab["ssh"], lab["sc_store"], lab["sessions_branch"], lab["label"]),
                          ("lab.local", "sc-lab.json", "backups/lab", "lab"))

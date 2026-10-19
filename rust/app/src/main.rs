@@ -2,6 +2,7 @@ mod behavior;
 mod completions;
 mod designer;
 mod diff;
+mod jsonc_edit;
 mod logo;
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]

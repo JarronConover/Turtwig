@@ -171,6 +171,15 @@ pub fn load() -> Result<Settings> {
     Ok(s)
 }
 
+/** Writes one value into the user's settings file (comments and layout kept); `key` is dotted
+(`daemon.state_repo_url`). */
+pub fn set_value(key: &[String], value: &Value) -> Result<()> {
+    let p = path();
+    let text = std::fs::read_to_string(&p).unwrap_or_else(|_| "{\n}\n".into());
+    let out = crate::jsonc_edit::set(&text, key, value).with_context(|| format!("editing {}", p.display()))?;
+    std::fs::write(&p, out).with_context(|| format!("writing {}", p.display()))
+}
+
 /** Settings from already-merged JSON (`Settings::raw` with runtime changes on top). */
 pub fn from_raw(raw: Value) -> Result<Settings> {
     let mut s: Settings = serde_json::from_value(raw.clone()).context("settings")?;

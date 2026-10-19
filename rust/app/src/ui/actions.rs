@@ -86,6 +86,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("designer.open", "{id}: show and continue an earlier designer conversation (one from `.designer.sessions`)"),
     ("settings.undo", "put the settings file back as it was before the last designer request (repeatable)"),
     ("settings.open / settings.reload / settings.docs", "edit, reload, or read the settings reference (`views.settings` in settings draws the panel instead: `.app.settings_sheet`)"),
+    ("settings.set", "{key, value} or {values: {key: value, ..}}: write values into your settings file and reload; a key is a dotted path (`daemon.state_repo_url`) or a list of keys, and the rest of the file (comments included) is left as it is"),
     ("settings.save / settings.close", "{text} / -: for a settings panel drawn by `views.settings`: write the settings file (and reload), close it"),
     ("notify", "{text}: a notification inside the window"),
     ("notify.system", "{title, text, subtitle?, group?, chat?, sound?: bool | name, do?}: a macOS notification banner (sound: false for none, or a sound's name); clicking it runs `do`, else the `notification.click` event (`.chat`, `.id`)"),
@@ -1037,6 +1038,24 @@ impl Workspace {
                     let _ = std::fs::write(crate::settings::path(), text);
                     self.reload_settings(cx);
                 }
+            }
+            "settings.set" => {
+                // {key, value} or {values: {key: value, ...}}; keys are dotted paths or lists of keys.
+                let keys = |k: &Value| -> Vec<String> {
+                    match k {
+                        Value::Array(a) => a.iter().map(super::render::value_text).collect(),
+                        k => super::render::value_text(k).split('.').map(str::to_string).collect(),
+                    }
+                };
+                let mut writes: Vec<(Vec<String>, Value)> = a.get("key").map(|k| (keys(k), a.get("value").cloned().unwrap_or(Value::Null))).into_iter().collect();
+                if let Some(Value::Object(m)) = a.get("values") {
+                    writes.extend(m.iter().map(|(k, v)| (keys(&Value::String(k.clone())), v.clone())));
+                }
+                let failed: Vec<String> = writes.iter().filter_map(|(k, v)| crate::settings::set_value(k, v).err().map(|e| format!("settings.set {}: {e:#}", k.join(".")))).collect();
+                for e in &failed {
+                    self.exprs.note(e.clone());
+                }
+                self.reload_settings(cx);
             }
             "settings.reload" => self.reload_settings(cx),
             "settings.docs" => {
