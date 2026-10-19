@@ -138,6 +138,8 @@ class StateLock:
 
 
 def pull_state():
+    if not abxcfg.state_repo_url():
+        return
     git_state("pull", "-q", "--rebase", "--autostash", "origin", abxcfg.state_branch(), check=False)
 
 
@@ -147,6 +149,8 @@ def commit_state(message):
     git_state("add", "-A")
     if git_state("diff", "--cached", "--quiet", check=False).returncode != 0:
         git_state("commit", "-q", "-m", message)
+    if not abxcfg.state_repo_url():
+        return
     for _ in range(max(1, int(option("state_push_tries", 3)))):
         pull_state()
         if git_state("push", "-q", "origin", f"HEAD:{abxcfg.state_branch()}", check=False).returncode == 0:
@@ -1205,6 +1209,8 @@ def cmd_move(args):
         sys.exit(f"unknown host {dst!r} (known: {', '.join(abxcfg.hosts())})")
     if src == dst:
         sys.exit(f"{chat['name']} is already on the {label(dst)}")
+    if not abxcfg.state_repo_url():
+        sys.exit(f"can't move {chat['name']}: {abxcfg.NO_BACKUP}")
     if HOST not in (src, dst):
         # Neither end is here: the source runs it (it reaches the destination or says it can't).
         print(on_host(src, "move", chat["id"], "--to", dst, *(["--scope", args.scope] if args.scope else []),

@@ -2325,9 +2325,11 @@
     "default_repo": "redo", "default_base": "main", "forge": null, "forge_cmd": null,
     // Folders that are the same checkout on each host ({host: path}, or [mac path, box path]).
     "path_aliases": [{ "mac": "~/dev/redo", "box": "~/project" }],
-    // Where the state and sessions branches live (null: this checkout's origin) and who commits to them.
+    // Where the state and sessions branches live: a private git repo, since they hold every transcript and
+    // uncommitted work (null: no backup; chats stay on their machine and can't move). Who commits to them
+    // (email null: git's user.email).
     "state_repo_url": null, "state_branch": "state", "sessions_branch": "sessions/{host}",
-    "git_author": { "name": "agent-box ({host})", "email": "tj@getredo.com" },
+    "git_author": { "name": "agent-box ({host})", "email": null },
     // New chats: kinds, the kinds that get a worktree of their own (orchestrator_branch: {slug} {id4}), what a
     // fork of each kind becomes; sc worktree create's default folder name ({hex6}).
     "chat_kinds": ["orchestrator", "feature", "primary"], "branch_kinds": ["orchestrator"], "fork_kinds": { "orchestrator": "feature" },

@@ -78,6 +78,11 @@ sync_sessions() {
     git -C "$s" commit -q --allow-empty -m "sessions snapshot ($AGENT_HOST)"
   fi
   local err
+  if [ -z "$AGENT_BOX_REPO_URL" ]; then
+    rm -f "$AGENT_HOME/push-pending"
+    sync_status "" "$NO_BACKUP"
+    return 0
+  fi
   if err=$(git -C "$s" push -q --force origin "HEAD:refs/heads/$SESSIONS_BRANCH" 2>&1); then
     rm -f "$AGENT_HOME/push-pending"
     sync_status "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ""

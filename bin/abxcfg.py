@@ -389,15 +389,14 @@ def state_branch():
 
 
 def state_repo_url():
-    """Where the state and sessions branches live: AGENT_BOX_REPO_URL, option state_repo_url (or this host's),
-    else this checkout's origin."""
-    if os.environ.get("AGENT_BOX_REPO_URL"):
-        return os.environ["AGENT_BOX_REPO_URL"]
-    found = host().get("state_repo_url") or option("state_repo_url")
-    if found:
-        return found
-    r = subprocess.run(["git", "-C", str(AGENT_BOX_DIR), "remote", "get-url", "origin"], capture_output=True, text=True)
-    return r.stdout.strip()
+    """Where the state and sessions branches live: AGENT_BOX_REPO_URL, option state_repo_url (or this host's).
+    Empty: no backup repo, so state and transcripts stay on this machine. Never the code repo's origin, which
+    other people can read."""
+    return os.environ.get("AGENT_BOX_REPO_URL") or host().get("state_repo_url") or option("state_repo_url") or ""
+
+
+NO_BACKUP = ("no backup repo: set daemon.state_repo_url in settings to a private git repo to back up chats "
+             "and move them between machines")
 
 
 def git_author():

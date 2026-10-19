@@ -1536,6 +1536,9 @@ impl Workspace {
         lines.extend(self.settings.warnings.iter().cloned());
         lines.extend(self.scripts.iter().flat_map(|s| s.errors.iter().cloned()));
         lines.extend(self.exprs.errors.borrow().iter().cloned());
+        let mut unbacked: Vec<String> = self.models.iter().filter_map(|(h, m)| Some(format!("{h}: {}", no_backup(m)?))).collect();
+        unbacked.sort();
+        lines.extend(unbacked);
         let text = if lines.is_empty() { "No problems.\n".to_string() } else { lines.join("\n") + "\n" };
         if text != self.problems_written {
             let _ = std::fs::write(settings::dir().join("problems.txt"), &text);
@@ -1597,7 +1600,12 @@ impl Workspace {
             }
             Incoming::Event(Event::Model(m)) => {
                 let before: HashMap<String, String> = self.model.chats.iter().map(|c| (c.id.clone(), c.state.clone())).collect();
+                let unbacked = no_backup(&m).map(str::to_string);
+                let was_unbacked = self.models.get(host).and_then(no_backup).is_some();
                 let old = self.models.insert(host.to_string(), m);
+                if let (Some(e), false) = (unbacked, was_unbacked) {
+                    self.toast(format!("{host}: {e}"), window, cx);
+                }
                 self.merge_models();
                 if let Some(old) = old {
                     self.model_events(&old, host);
@@ -4484,6 +4492,11 @@ struct UploadOptions {
     remote_dir: String,
     ssh_options: Vec<String>,
     path: String,
+}
+
+/** The host's sync error when it has no backup repo (daemon.state_repo_url unset). */
+fn no_backup(m: &Model) -> Option<&str> {
+    m.sync.as_ref()?.error.as_deref().filter(|e| e.starts_with("no backup repo"))
 }
 
 static UPLOADS: std::sync::RwLock<Option<UploadOptions>> = std::sync::RwLock::new(None);

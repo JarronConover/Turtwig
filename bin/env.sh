@@ -7,7 +7,7 @@ eval "$(python3 "$AGENT_BOX_DIR/bin/abxcfg.py" shell 2> /dev/null)"
 if [ -z "${AGENT_HOST:-}" ]; then
   if [ -n "${CODER_AGENT_URL:-}" ]; then AGENT_HOST=box AGENT_SYNC_TRANSCRIPTS=all; else AGENT_HOST=mac; fi
   SESSIONS_BRANCH="sessions/$AGENT_HOST" STATE_BRANCH=state
-  AGENT_BOX_REPO_URL="${AGENT_BOX_REPO_URL:-$(git -C "$AGENT_BOX_DIR" remote get-url origin 2> /dev/null)}"
+  AGENT_BOX_REPO_URL="${AGENT_BOX_REPO_URL:-}"
 fi
 
 AGENT_HOME="$HOME/.agent-box"
@@ -36,20 +36,29 @@ detach() {
   fi
 }
 
+NO_BACKUP="no backup repo: set daemon.state_repo_url in settings to a private git repo to back up chats and move them between machines"
+
 # Clone one branch of the state repo into $1 (or point an existing clone at it), or start
-# it as an orphan when the branch doesn't exist on the remote yet.
+# it as an orphan when the branch doesn't exist on the remote yet. With no state repo the
+# clone is local only, and an origin left from before is dropped.
 ensure_branch_clone() {
-  local dir=$1 branch=$2
+  local dir=$1 branch=$2 url
   if [ -d "$dir/.git" ]; then
-    [ "$(git -C "$dir" remote get-url origin 2> /dev/null)" = "$AGENT_BOX_REPO_URL" ] || git -C "$dir" remote set-url origin "$AGENT_BOX_REPO_URL"
+    url=$(git -C "$dir" remote get-url origin 2> /dev/null)
+    if [ -z "$AGENT_BOX_REPO_URL" ]; then
+      [ -n "$url" ] && git -C "$dir" remote remove origin
+    elif [ "$url" != "$AGENT_BOX_REPO_URL" ]; then
+      git -C "$dir" remote remove origin 2> /dev/null
+      git -C "$dir" remote add origin "$AGENT_BOX_REPO_URL"
+    fi
     return 0
   fi
   mkdir -p "$(dirname "$dir")"
-  if git ls-remote --exit-code --heads "$AGENT_BOX_REPO_URL" "$branch" > /dev/null 2>&1; then
+  if [ -n "$AGENT_BOX_REPO_URL" ] && git ls-remote --exit-code --heads "$AGENT_BOX_REPO_URL" "$branch" > /dev/null 2>&1; then
     git clone -q --single-branch --branch "$branch" "$AGENT_BOX_REPO_URL" "$dir"
   else
     git init -q "$dir"
-    git -C "$dir" remote add origin "$AGENT_BOX_REPO_URL"
+    [ -n "$AGENT_BOX_REPO_URL" ] && git -C "$dir" remote add origin "$AGENT_BOX_REPO_URL"
     git -C "$dir" checkout -q --orphan "$branch"
   fi
 }

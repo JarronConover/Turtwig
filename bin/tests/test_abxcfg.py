@@ -186,5 +186,20 @@ class Environment(Config):
         self.assertEqual(out, "box sessions/box st bot (box) bot@example.com https://example.com/s.git all")
 
 
+    def test_no_state_repo_means_no_backup_not_the_code_repo(self):
+        self.opts()
+        self.assertEqual(abxcfg.state_repo_url(), "")
+        with tempfile.TemporaryDirectory() as d:
+            clone = Path(d) / "sessions"
+            subprocess.run(["git", "init", "-q", str(clone)], check=True)
+            subprocess.run(["git", "-C", str(clone), "remote", "add", "origin", "git@example.com:code.git"], check=True)
+            env_sh = Path(abxcfg.__file__).with_name("env.sh")
+            script = f'. {env_sh}; AGENT_BOX_REPO_URL=; ensure_branch_clone {clone} sessions/mac; ' \
+                     f'ensure_branch_clone {Path(d) / "state"} state; git -C {clone} remote; git -C {Path(d) / "state"} remote'
+            out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=dict(os.environ))
+            self.assertEqual(out.stdout.strip(), "")
+            self.assertTrue((Path(d) / "state" / ".git").is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()

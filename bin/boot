@@ -26,7 +26,9 @@ fi
 
 ensure_branch_clone "$AGENT_STATE_DIR" "${STATE_BRANCH:-state}"
 ensure_branch_clone "$AGENT_SESSIONS_DIR" "$SESSIONS_BRANCH"
-git -C "$AGENT_STATE_DIR" pull -q --ff-only 2>> "$AGENT_LOG" || log "state pull failed"
+if [ -n "$AGENT_BOX_REPO_URL" ]; then
+  git -C "$AGENT_STATE_DIR" pull -q --ff-only 2>> "$AGENT_LOG" || log "state pull failed"
+fi
 
 # Each agent's backed-up transcripts this machine is missing.
 while IFS=$'\t' read -r root dest; do

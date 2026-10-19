@@ -6,7 +6,12 @@ workspace running Claude Code chats under Remote Control). Design:
 
 ## Branches
 
-- `main`: this tooling.
+This repo holds only the tooling (`main`). The backups live in a separate
+private repo, `daemon.state_repo_url` in settings, because they hold every
+transcript and uncommitted change. Never point it at this repo, which other
+people can read. Without it nothing is backed up: chats stay on their
+machine and can't move between machines.
+
 - `state`: durable orchestrator state (designs, handoffs, review JSON,
   registry), committed on write.
 - `sessions/<host>`: the latest snapshot of that host's Claude transcripts
