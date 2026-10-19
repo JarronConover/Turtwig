@@ -61,6 +61,8 @@ def rsync():
 # How an agent's `trust` pre-accepts a folder: set `path` (keys; {dir} is the folder) to `value` in `file`.
 TRUST = {"claude": {"file": "~/.claude.json", "path": ["projects", "{dir}", "hasTrustDialogAccepted"], "value": True}}
 
+CLAUDE_SETTINGS = '{"showThinkingSummaries":true}'
+
 # Each agent CLI a chat can run. The app's `daemon.agents` (config.json) overrides any key. A template is
 # argv with {placeholders}; a nested list is dropped when a placeholder in it is empty. `session`:
 # "assigned" (the chat id is the session id) or "discovered" (the CLI picks it; found in `sessions_dir`).
@@ -75,10 +77,13 @@ AGENTS = {
         "hooks_file": "~/.claude/settings.json", "hooks_installer": "claude-hooks", "provider": "anthropic",
         "hook_events": ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "PermissionRequest", "Stop",
                         "SubagentStop", "SessionStart", "SessionEnd"],
-        "new": ["{bin}", "--session-id", "{id}", "--remote-control", "{name}", ["--model", "{model}"], ["{prompt}"]],
-        "resume": ["{bin}", "--resume", "{session}", "--remote-control", "{name}", ["--model", "{model}"]],
+        # showThinkingSummaries: Claude Code logs thinking as empty blocks unless asked for summaries.
+        "new": ["{bin}", "--session-id", "{id}", "--remote-control", "{name}", "--settings", CLAUDE_SETTINGS,
+                ["--model", "{model}"], ["{prompt}"]],
+        "resume": ["{bin}", "--resume", "{session}", "--remote-control", "{name}", "--settings", CLAUDE_SETTINGS,
+                   ["--model", "{model}"]],
         "fork": ["{bin}", "--resume", "{from}", "--fork-session", "--session-id", "{id}", "--remote-control", "{name}",
-                 ["--model", "{model}"]],
+                 "--settings", CLAUDE_SETTINGS, ["--model", "{model}"]],
     },
     "codex": {
         "bin": "codex", "session": "discovered", "sessions_dir": "~/.codex/sessions",

@@ -386,6 +386,24 @@ pub struct Chat {
     /** Its transcript file on this host. */
     #[serde(default)]
     pub transcript: Option<String>,
+    /** What the agent's own status line says while it works, read from its pane. */
+    #[serde(default)]
+    pub activity: Option<Activity>,
+}
+
+/** A working agent's status line, like Claude Code's "✻ Concocting… (4m 17s · ↓ 6.5k tokens)". */
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Activity {
+    /** "Concocting" */
+    pub verb: String,
+    /** When the turn started, from the time it shows (unix seconds). */
+    pub since: Option<f64>,
+    /** "↓ 6.5k tokens" */
+    pub tokens: Option<String>,
+    /** When `tokens` last changed (or the line first showed): how long the agent has sent nothing. */
+    pub changed_at: f64,
+    /** The line's other parts ("thinking with high effort"). */
+    pub notes: Vec<String>,
 }
 
 fn default_agent() -> String {

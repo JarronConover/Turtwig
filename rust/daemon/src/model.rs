@@ -1,4 +1,4 @@
-use agent_box_protocol::{Chat, MergeRequest, Model, Project, Section, SyncStatus, Worktree};
+use agent_box_protocol::{Activity, Chat, MergeRequest, Model, Project, Section, SyncStatus, Worktree};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -310,6 +310,84 @@ fn pane_waiting(pane: &str, agent: &str) -> bool {
     re.is_match(&lines[lines.len().saturating_sub(crate::config::count("waiting_pane_lines", 25))..].join("\n"))
 }
 
+const STATUS_PATTERN: &str = r"^\s*[^\w\s]\s+(?P<verb>\w[^…]*?)…\s*\((?P<rest>[^)]*)\)\s*$";
+const STATUS_DROP: &str = r"(?i)esc to interrupt";
+
+/** The agent's working line, the last in its pane's bottom `waiting_pane_lines` lines matching its
+`status_pattern` (groups `verb` and `rest`): `rest` splits on `status_separator` into a time ("4m 17s"),
+a token count ("↓ 6.5k tokens") and notes, less parts matching `status_drop`. */
+fn pane_activity(pane: &str, agent: &str) -> Option<(String, Option<f64>, Option<String>, Vec<String>)> {
+    static RES: Mutex<Option<HashMap<String, Option<Regex>>>> = Mutex::new(None);
+    let mut cached = RES.lock().unwrap();
+    let cache = cached.get_or_insert_with(HashMap::new);
+    let mut re = |key: &str, default: &str| {
+        let pattern = crate::agents::text(agent, key, default);
+        cache.entry(pattern.clone()).or_insert_with(|| Regex::new(&pattern).ok()).clone()
+    };
+    let (line, drop) = (re("status_pattern", STATUS_PATTERN)?, re("status_drop", STATUS_DROP));
+    let sep = crate::agents::text(agent, "status_separator", " · ");
+    let text = strip_ansi(pane);
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(crate::config::count("waiting_pane_lines", 25))..];
+    let m = tail.iter().rev().find_map(|l| line.captures(l))?;
+    let (mut secs, mut tokens, mut notes) = (None, None, vec![]);
+    for part in m.name("rest").map_or("", |r| r.as_str()).split(sep.as_str()).map(str::trim).filter(|p| !p.is_empty()) {
+        if drop.as_ref().is_some_and(|d| d.is_match(part)) {
+        } else if let Some(t) = duration_secs(part).filter(|_| secs.is_none()) {
+            secs = Some(t);
+        } else if part.ends_with("tokens") && tokens.is_none() {
+            tokens = Some(part.to_string());
+        } else {
+            notes.push(part.to_string());
+        }
+    }
+    Some((m.name("verb")?.as_str().trim().to_string(), secs, tokens, notes))
+}
+
+/** Seconds in "1h 2m 3s" / "4m 17s" / "12s". */
+fn duration_secs(text: &str) -> Option<f64> {
+    let mut total = 0.;
+    for w in text.split_whitespace() {
+        let n: f64 = w.get(..w.len() - 1)?.parse().ok()?;
+        total += n * match w.chars().last()? {
+            'h' => 3600.,
+            'm' => 60.,
+            's' => 1.,
+            _ => return None,
+        };
+    }
+    (!text.trim().is_empty()).then_some(total)
+}
+
+/** A chat's activity from its latest status line: `since` holds steady across reads (the shown time
+rounds), and `changed_at` moves only when the token count does. */
+fn track_activity(id: &str, read: Option<(String, Option<f64>, Option<String>, Vec<String>)>) -> Option<Activity> {
+    static SEEN: Mutex<Option<HashMap<String, Activity>>> = Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap();
+    let seen = seen.get_or_insert_with(HashMap::new);
+    let Some((verb, secs, tokens, notes)) = read else {
+        seen.remove(id);
+        return None;
+    };
+    let now = util::now();
+    let since = secs.map(|s| now - s);
+    let next = match seen.get(id) {
+        Some(prev) => Activity {
+            since: match (prev.since, since) {
+                (Some(p), Some(s)) if (p - s).abs() < 3. => Some(p),
+                _ => since,
+            },
+            changed_at: if prev.tokens == tokens { prev.changed_at } else { now },
+            verb,
+            tokens,
+            notes,
+        },
+        None => Activity { verb, since, tokens, changed_at: now, notes },
+    };
+    seen.insert(id.to_string(), next.clone());
+    Some(next)
+}
+
 /** What's typed after the last line starting with `prompt` (the input box), without dim or grey text
 (a placeholder or suggestion). None: no such line. */
 pub(crate) fn typed_input(pane: &str, prompt: &str) -> Option<String> {
@@ -449,7 +527,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
         let turns = crate::agents::get(&agent, "turn_events").and_then(|t| t.as_object().cloned());
         let turn = turns.as_ref().zip(transcript.as_deref()).and_then(|(t, p)| crate::codex::turn_state(p, t));
         let hook = combine(turn, hook);
-        let pane = if is_alive && (turns.is_some() || hook.as_ref().is_none_or(|(st, _)| st == "idle")) { capture(&tmux) } else { None };
+        let pane = if is_alive && (turns.is_some() || hook.as_ref().is_none_or(|(st, _)| st == "idle" || st == "working")) { capture(&tmux) } else { None };
         let pane_waits = pane.as_deref().is_some_and(|p| pane_waiting(p, &agent));
         let (state, waiting_on) = match hook {
             _ if !is_alive => ("stopped".to_string(), None),
@@ -458,6 +536,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             _ => ("idle".to_string(), None),
         };
         let suggestion = if state == "idle" { pane.as_deref().and_then(suggestion) } else { None };
+        let activity = track_activity(&id, pane.as_deref().filter(|_| state == "working").and_then(|p| pane_activity(p, &agent)));
         // A name nobody chose follows the agent's own title (auto_title), and the registry learns it.
         let mut name = s("name").unwrap_or_default();
         if config::flag("auto_title", true) && crate::titles::auto_named(&v) {
@@ -492,6 +571,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             forked_from: s("forked_from"),
             launched_at: v.get("launched_at").and_then(Value::as_f64),
             transcript: transcript.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            activity,
         });
     }
     out
@@ -619,7 +699,7 @@ pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model 
 
 #[cfg(test)]
 mod tests {
-    use super::{combine, parse_head, parse_remote, suggestion, typed_input, GitInfo};
+    use super::{combine, pane_activity, parse_head, parse_remote, suggestion, track_activity, typed_input, GitInfo};
     use serde_json::json;
 
     #[test]
@@ -676,5 +756,26 @@ mod tests {
         assert_eq!(suggestion(&pane("")), None);
         assert_eq!(suggestion(&pane("com\x1b[2mmit this\x1b[0m")), None);
         assert_eq!(suggestion(&pane("\x1b[2mTry \"fix lint errors\"\x1b[0m")), None);
+    }
+
+    #[test]
+    fn the_spinner_line_reads_as_activity() {
+        let p = "⏺ Reading\n    · Click to expand collapsed tool results\n\x1b[38;5;174m✢\x1b[39m Concocting… (1h 4m 17s · ↓ 6.5k tokens · esc to interrupt)\n❯ \n";
+        let (verb, secs, tokens, notes) = pane_activity(p, "claude").unwrap();
+        assert_eq!((verb.as_str(), secs, tokens.as_deref(), notes.len()), ("Concocting", Some(3857.), Some("↓ 6.5k tokens"), 0));
+        let (_, secs, tokens, notes) = pane_activity("· Hullaballooing… (1s · thinking with high effort)", "claude").unwrap();
+        assert_eq!((secs, tokens, notes), (Some(1.), None, vec!["thinking with high effort".to_string()]));
+        assert!(pane_activity("✻ Worked for 5m 27s · done 10:58 PM\n❯ ", "claude").is_none());
+    }
+
+    #[test]
+    fn activity_keeps_its_start_and_dates_the_last_new_output() {
+        let read = |s: f64, t: &str| Some(("Thinking".to_string(), Some(s), Some(t.to_string()), vec![]));
+        let a = track_activity("t1", read(10., "↓ 1k tokens")).unwrap();
+        let b = track_activity("t1", read(11., "↓ 1k tokens")).unwrap();
+        assert_eq!((b.since, b.changed_at), (a.since, a.changed_at));
+        assert!(track_activity("t1", None).is_none());
+        let c = track_activity("t1", read(500., "↓ 2k tokens")).unwrap();
+        assert!(c.since.unwrap() < a.since.unwrap() - 400.);
     }
 }

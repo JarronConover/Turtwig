@@ -39,6 +39,23 @@ pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
     blocks
 }
 
+/** "4m 17s", "1h 4m", "12s". */
+fn clock(secs: f64) -> String {
+    let s = secs.max(0.) as u64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m {}s", s / 60, s % 60),
+        _ => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+/** A thought's first line (its summary's heading, without Markdown marks), cut to `chat.summary_chars`. */
+fn thought_line(text: &str) -> Option<String> {
+    let line = text.lines().map(|l| l.trim().trim_start_matches('#').trim().trim_matches('*').trim()).find(|l| !l.is_empty())?;
+    let max = crate::transcript::options().summary_chars;
+    Some(if line.chars().count() > max { format!("{}…", line.chars().take(max).collect::<String>().trim_end()) } else { line.to_string() })
+}
+
 /** (running, done, failed) titles and an icon for a tool call: the subject (a file, a pattern, a command,
 or `subject` from `chat.tools.NAME.subject`) after the tool's prefixes; `strip_min` 0 keeps timestamps. */
 fn describe(name: &str, input: &Value, summary: &str, strip_min: usize, subject: Option<String>) -> (String, String, String, String) {
@@ -156,6 +173,7 @@ impl Workspace {
                 let look = LineLook::of(&cs);
                 let (text, kind) = if *title == "Working" { (label("pending_working", "Working", &[]), "working") } else { (label("pending_thinking", "Thinking", &[]), "thinking") };
                 let icon = look.icon(&format!("pending_{kind}"), &look.icon("pending", "brain"));
+                let text = self.pending_text(chat_id, text);
                 let line = self.trace_line(&key, &icon, &text, true, false, false, false, vec![], &st, &theme, cx);
                 Some(style::apply(v_flex(), &st("trace"), &theme).child(line).into_any_element())
             }
@@ -189,6 +207,34 @@ impl Workspace {
                 Some(trace.into_any_element())
             }
         }
+    }
+
+    /** The pending row's words: the agent's own status line when its daemon reads one ("Concocting · 4m 17s
+    · ↓ 6.5k tokens"), then how long nothing new has come once that passes `chat.pending.quiet_secs`. */
+    fn pending_text(&self, chat_id: &str, fallback: String) -> String {
+        let Some(chat) = self.chat(chat_id) else { return fallback };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
+        let (mut text, quiet_since) = match &chat.activity {
+            Some(a) => {
+                let mut t = label("pending_status", "{verb}", &[("verb", &a.verb)]);
+                if let Some(since) = a.since {
+                    t += &label("pending_elapsed", " · {time}", &[("time", &clock(now - since))]);
+                }
+                if let Some(tokens) = &a.tokens {
+                    t += &label("pending_tokens", " · {tokens}", &[("tokens", tokens)]);
+                }
+                for note in &a.notes {
+                    t += &label("pending_note", " · {note}", &[("note", note)]);
+                }
+                (t, Some(a.changed_at))
+            }
+            None => (fallback, chat.last_activity),
+        };
+        let quiet_after = self.settings.chat.get("pending").and_then(|p| p.get("quiet_secs")).and_then(Value::as_f64).unwrap_or(60.);
+        if let Some(quiet) = quiet_since.map(|at| now - at).filter(|q| *q >= quiet_after) {
+            text += &label("pending_quiet", " · nothing new for {time}", &[("time", &clock(quiet))]);
+        }
+        text
     }
 
     /** `chat.render.KIND` (a component name or node) drawing one transcript part, if set. */
@@ -407,7 +453,11 @@ impl Workspace {
                 let open = self.expanded_tools.contains(&key);
                 let has_text = !text.trim().is_empty();
                 let look = LineLook::of(&self.settings.chat);
-                let title = if running { label("thinking", "Thinking", &[]) } else { label("thought", "Thought", &[]) };
+                let title = match thought_line(text) {
+                    Some(line) => label("thought_summary", "{summary}", &[("summary", &line)]),
+                    None if running => label("thinking", "Thinking", &[]),
+                    None => label("thought", "Thought", &[]),
+                };
                 let icon = look.icon("thinking", "brain");
                 let props = serde_json::json!({"kind": "thinking", "id": key, "index": i, "chat": chat_id, "title": title, "icon": icon, "running": running, "open": open, "text": text});
                 if let Some(el) = self.chat_part("step", props, &format!("chat:{key}"), window, cx) {
@@ -654,8 +704,16 @@ pub fn shift_scroll_layer(handle: Option<ScrollHandle>, speed: f32) -> impl Into
 
 #[cfg(test)]
 mod tests {
-    use super::{blocks_of, Block};
+    use super::{blocks_of, clock, thought_line, Block};
     use crate::transcript::Item;
+
+    #[test]
+    fn a_thought_is_titled_by_its_first_line_and_times_read_as_clocks() {
+        assert_eq!(thought_line("\n**Planning the tests**\n\nI'll start with…").as_deref(), Some("Planning the tests"));
+        assert_eq!(thought_line("## Done\n"), Some("Done".into()));
+        assert_eq!(thought_line("  \n"), None);
+        assert_eq!((clock(7.), clock(257.), clock(3857.)), ("7s".into(), "4m 17s".into(), "1h 4m".into()));
+    }
 
     fn tool(done: bool) -> Item {
         Item::Tool { id: "t".into(), name: "Bash".into(), summary: String::new(), input: serde_json::Value::Null, result: done.then(String::new), is_error: false }
