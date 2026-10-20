@@ -262,10 +262,13 @@ impl Workspace {
                 let digits = self.stamp_digits("messages");
                 let thumbs: Vec<AnyElement> = uploads
                     .into_iter()
-                    .map(|p| {
+                    .enumerate()
+                    .map(|(n, p)| {
                         if self.is_image_path(&p) {
                             let (w, h) = crate::workspace::fit(&p, mw, mh);
-                            style::apply_plain(img(p).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme).into_any_element()
+                            let action = serde_json::json!({"do": "image.view", "path": p.to_string_lossy()});
+                            let thumb = style::apply_plain(img(p).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme);
+                            self.zoomable(format!("img:{key}:{n}"), thumb.into_any_element(), action, cx)
                         } else {
                             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                             // `gap` in `chat.file` overrides this one: style::apply refines after it.
@@ -283,7 +286,9 @@ impl Workspace {
             }
             Item::Image { media_type, data } => {
                 let image = self.images.entry(key.clone()).or_insert_with(|| crate::workspace::decode_image(media_type, data)).clone();
-                image.map(|i| h_flex().w_full().justify_end().child(style::apply_plain(img(i).object_fit(ObjectFit::Contain), &st("image"), theme)).into_any_element())
+                let action = serde_json::json!({"do": "image.view", "chat": chat_id, "index": i});
+                let shown = image.map(|i| style::apply_plain(img(i).object_fit(ObjectFit::Contain), &st("image"), theme).into_any_element());
+                shown.map(|el| h_flex().w_full().justify_end().child(self.zoomable(format!("img:{key}"), el, action, cx)).into_any_element())
             }
             Item::Assistant { text } => {
                 let props = serde_json::json!({"kind": "assistant", "text": text, "index": i, "chat": chat_id, "key": key});
@@ -300,6 +305,12 @@ impl Workspace {
             _ => None,
         }
     }
+    /** An image in the transcript that opens full size (`image.view`) when clicked. */
+    fn zoomable(&mut self, id: String, image: AnyElement, action: Value, cx: &mut Context<Self>) -> AnyElement {
+        self.clickables.push((id.clone(), label("view_image", "View image", &[]), action.clone()));
+        div().id(SharedString::from(id)).cursor_pointer().child(image).on_click(cx.listener(move |ws, _, window, cx| ws.run_action(&action, window, cx))).into_any_element()
+    }
+
     fn markdown(&self, key: &str, text: &str, theme: &Map<String, Value>) -> TextView {
         let selectable = self.settings.chat.get("selectable").and_then(Value::as_bool) != Some(false);
         let md = self.settings.chat.get("markdown").and_then(Value::as_object).cloned();

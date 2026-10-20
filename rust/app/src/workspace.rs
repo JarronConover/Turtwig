@@ -307,6 +307,8 @@ pub struct Workspace {
     term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
     pub(crate) expanded_tools: HashSet<String>,
     pub(crate) images: HashMap<String, Option<std::sync::Arc<Image>>>,
+    /** The image shown full size over the window (`image.view`): what it is (a path or chat:index) and its source. */
+    pub(crate) image_view: Option<(String, ImageSource)>,
     pub(crate) diffs: HashMap<String, crate::ui::diff_view::DiffData>,
     pub(crate) attachments: HashMap<String, Vec<crate::ui::attach_view::Pending>>,
     pub(crate) send_when_ready: HashSet<String>,
@@ -592,6 +594,7 @@ impl Workspace {
             term_by_id: HashMap::new(),
             expanded_tools: HashSet::new(),
             images: HashMap::new(),
+            image_view: None,
             diffs: HashMap::new(),
             attachments: HashMap::new(),
             send_when_ready: HashSet::new(),
@@ -2280,6 +2283,7 @@ impl Workspace {
                 "default_host": self.default_host(),
                 "script_actions": self.scripts.as_ref().map(|s| s.actions.clone()).unwrap_or_default(),
                 "palette": self.palette_view.as_ref().map(|p| self.palette_json(p)),
+                "image_view": self.image_view.as_ref().map(|(k, _)| k.clone()),
                 "settings_sheet": self.settings_sheet.then(|| json!({
                     "path": settings::path(), "docs": settings::dir().join("SETTINGS.md"),
                     "text": std::fs::read_to_string(settings::path()).unwrap_or_default(),
@@ -4276,8 +4280,32 @@ impl Workspace {
         }
     }
 
+    /** The full-size image over the window (`chat.image_viewer`: backdrop, padding); a click anywhere closes it. */
+    fn image_viewer(&self, src: ImageSource, cx: &mut Context<Self>) -> AnyElement {
+        let opts = self.settings.chat.get("image_viewer").cloned().unwrap_or(Value::Null);
+        let backdrop = opts.get("backdrop").and_then(|c| style::color(c, &self.settings.theme)).unwrap_or(hsla(0., 0., 0., 0.85));
+        let pad = opts.get("padding").and_then(Value::as_f64).unwrap_or(32.) as f32;
+        div()
+            .id("image-viewer")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(backdrop)
+            .p(px(pad))
+            .cursor_pointer()
+            .on_click(cx.listener(|ws, _, window, cx| ws.run_action(&json!({"do": "image.close"}), window, cx)))
+            .child(img(src).size_full().object_fit(ObjectFit::Contain))
+            .into_any_element()
+    }
+
     fn handle_keys(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let pressed = e.keystroke.unparse();
+        if self.image_view.is_some() && pressed == "escape" {
+            self.run_action(&json!({"do": "image.close"}), window, cx);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         let area = self.focus_area(window, cx);
         // The composer's completion list: `chat.completion_keys` {next, prev, accept, close}, each a list of keys.
         if let Some(chat) = self.completion.as_ref().map(|c| c.0.clone()) {
@@ -4426,7 +4454,10 @@ impl Render for Workspace {
             .filter(|(name, on)| *on && self.settings.views.contains_key(*name))
             .map(|(name, _)| name)
             .collect();
-        let overlays: Vec<AnyElement> = shown.into_iter().map(|name| div().absolute().inset_0().child(self.render_view(name, &ctx, window, cx)).into_any_element()).collect();
+        let mut overlays: Vec<AnyElement> = shown.into_iter().map(|name| div().absolute().inset_0().child(self.render_view(name, &ctx, window, cx)).into_any_element()).collect();
+        if let Some((_, src)) = self.image_view.clone() {
+            overlays.push(self.image_viewer(src, cx));
+        }
         self.perf.borrow_mut().spans.insert("tree", t.elapsed().as_secs_f32() * 1000.);
         let t = std::time::Instant::now();
         self.write_inspect(&ctx, window, cx);

@@ -102,6 +102,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("window.move / window.zoom / window.minimize / window.fullscreen / window.close", "drag, zoom, minimize, toggle full screen, or close the window"),
     ("window.resize", "{width, height} (or {w, h}): resize the window, in points"),
     ("app.hide / app.activate / app.quit", "hide the app, bring it to the front, or quit"),
+    ("image.view", "{path} or {chat, index} (a transcript image): show the image full size over the window; a click or Escape closes it"),
+    ("image.close", "close the full-size image"),
 ];
 
 /** A one-shot local Claude Code run in the settings folder; it may only read and edit files there
@@ -974,6 +976,27 @@ impl Workspace {
                     if let Some(l) = self.lists.get(&id) {
                         l.state.scroll_to(gpui::ListOffset { item_ix: row, offset_in_item: gpui::px(offset) });
                     }
+                }
+            }
+            "image.view" => {
+                let path = s("path");
+                let index = a.get("index").and_then(Value::as_u64);
+                let shown = match (&path, chat(), index) {
+                    (Some(p), _, _) => Some((p.clone(), ImageSource::from(std::path::PathBuf::from(p)))),
+                    (None, Some(c), Some(i)) => {
+                        let key = format!("{c}:{i}");
+                        self.images.get(&key).cloned().flatten().map(|img| (key, ImageSource::from(img)))
+                    }
+                    _ => None,
+                };
+                if shown.is_some() {
+                    self.image_view = shown;
+                    self.ctx_rev += 1;
+                }
+            }
+            "image.close" => {
+                if self.image_view.take().is_some() {
+                    self.ctx_rev += 1;
                 }
             }
             "chat.jump_to_latest" => {
