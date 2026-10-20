@@ -101,8 +101,8 @@
     // Spinners: an icon name (null: the built-in loader) and one turn's length; `spin` icons turn at spin_period_ms.
     "spinner": { "icon": null, "period_ms": 800 },
     "spin_period_ms": 900,
-    // How often spinners and pulsing lines redraw (each redraw repaints the window). 0 holds them still.
-    "animation_fps": 12
+    // How often spinners and pulsing lines redraw (each redraws the region around it). 0 holds them still.
+    "animation_fps": 30
   },
 
   "state": {
@@ -135,8 +135,8 @@
       "children": [
         { "type": "Sidebar", "id": "sidebar", "if": ".state.sidebar_open" },
         { "type": "MainArea", "id": "main-area", "style": { "grow": 1 } },
-        { "type": "ChangesPanel", "id": "changes-panel", "if": ".state.changes_place == \"right\" and .selected.worktree" },
-        { "type": "DesignerPanel", "id": "designer", "if": ".state.designer_open" },
+        { "type": "ChangesPanel", "id": "changes-panel", "if": ".state.changes_place == \"right\" and .selected.worktree", "region": true },
+        { "type": "DesignerPanel", "id": "designer", "if": ".state.designer_open", "region": true },
         { "type": "Confirm", "id": "confirm" },
         { "type": "Setup", "id": "setup" }
       ]
@@ -728,10 +728,10 @@
       "type": "column",
       "style": { "height": "full", "min_width": 0, "padding": [0, 14, 14, 0] },
       "children": [
-        { "type": "Toolbar", "id": "toolbar" },
+        { "type": "Toolbar", "id": "toolbar", "region": true },
         { "type": "ChatCard", "id": "chat-card", "style": { "grow": 1, "min_height": 160 } },
-        { "type": "BranchBar", "id": "branch-bar" },
-        { "if": ".state.terminal_open", "type": "TerminalCard", "id": "terminal-card" }
+        { "type": "BranchBar", "id": "branch-bar", "region": true },
+        { "if": ".state.terminal_open", "type": "TerminalCard", "id": "terminal-card", "region": true }
       ]
     },
 
@@ -858,7 +858,7 @@
           "style": { "grow": 1, "min_height": 0, "position": "relative" },
           "children": [
             {
-              "id": "transcript",
+              "id": "transcript", "region": true,
               "type": "transcript",
               "props": { "empty": "{{ if .selected.worktree then \"No chat in this worktree yet. Press + above to start one.\" else \"Select a worktree\" end }}" },
               "style": { "grow": 1, "min_height": 0 }
@@ -877,7 +877,7 @@
             { "id": "waiting", "type": "waiting", "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" } },
             {
               "if": ".selected.chat",
-              "id": "composer-box",
+              "id": "composer-box", "region": true,
               "type": "box",
               "style": { "shrink": 0, "padding": [4, 20, 14, 20], "width": "full", "max_width": 900, "self": "center", "position": "relative" },
               "children": [
@@ -980,7 +980,7 @@
           "style": { "direction": "row", "align": "stretch", "basis": "auto", "shrink": 1, "min_width": 0 },
           "children": [
             {
-              "for": ".app.drag as $d | .selected.chats | map(select(.open and (($d.kind == \"chat\" and $d.value == .id) | not)))", "as": "c", "key": ".c.id", "id": "chat-tab",
+              "for": ".app.drag as $d | .selected.chats | map(select(.open and (($d.kind == \"chat\" and $d.value == .id) | not)))", "as": "c", "key": ".c.id", "id": "chat-tab", "region": true,
               "type": "row",
               "style": {
                 "position": "relative", "gap": 6, "padding": [0, 4, 0, 10], "align": "center", "font_size": 13, "cursor": "pointer", "shrink": 0,
