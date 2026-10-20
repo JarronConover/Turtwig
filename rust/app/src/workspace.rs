@@ -2043,19 +2043,21 @@ impl Workspace {
         self.selected.as_deref().and_then(|p| self.worktree(p))
     }
 
-    /** The selected worktree's active chat: the one chosen there, else its first open tab, else by
-    `chat.open_on_select`: "recent" (the one with the newest activity), "first" (the first tab), or none. */
+    /** The selected worktree's active chat: the one chosen there (this run, else as saved in
+    `state.active_tabs` from an earlier one), else its first open tab, else by `chat.open_on_select`:
+    "recent" (the one with the newest activity), "first" (the first tab), or none. */
     pub(crate) fn current_chat(&self) -> Option<&Chat> {
         let w = self.current_worktree()?;
         let chats = self.chats_of(w);
-        let active = self.active_chat.get(&w.path);
+        let saved = self.state.get("active_tabs").and_then(|t| t.get(&w.path)).and_then(Value::as_str);
+        let active = self.active_chat.get(&w.path).map(String::as_str).or(saved);
         let fallback = || match self.settings.chat.get("open_on_select").and_then(Value::as_str) {
             Some("recent") => chats.iter().max_by(|a, b| a.last_activity.unwrap_or(0.).total_cmp(&b.last_activity.unwrap_or(0.))).copied(),
             Some("first") => chats.first().copied(),
             _ => None,
         };
         active
-            .and_then(|id| chats.iter().find(|c| &c.id == id && !self.closed.contains(&c.id)).copied())
+            .and_then(|id| chats.iter().find(|c| c.id == id && !self.closed.contains(&c.id)).copied())
             .or_else(|| chats.iter().find(|c| self.chat_open(c)).copied())
             .or_else(fallback)
     }
@@ -2438,6 +2440,7 @@ impl Workspace {
     pub(crate) fn sync_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(w) = self.current_worktree().cloned() else { return };
         if let Some(chat) = self.current_chat().cloned() {
+            self.save_active_tab(&w.path, &chat.id);
             if !self.watching.contains(&chat.id) {
                 self.watching.insert(chat.id.clone());
                 let from = self.transcripts.get(&chat.id).map(|t| t.lines).unwrap_or(0);
@@ -2470,6 +2473,19 @@ impl Workspace {
             let view = cx.new(|cx| TerminalView::new(remote, host, None, Some(path.clone()), &ts, cx));
             self.terminals.insert(w.path.clone(), view);
         }
+    }
+
+    /** Remembers a worktree's open tab across restarts (`state.active_tabs`, {path: chat id}, for the
+    worktrees that still exist). */
+    fn save_active_tab(&mut self, path: &str, chat: &str) {
+        let tabs = self.state.get("active_tabs").cloned().unwrap_or_else(|| json!({}));
+        if tabs.get(path).and_then(Value::as_str) == Some(chat) {
+            return;
+        }
+        let live: HashSet<String> = self.all_worktrees().iter().map(|w| w.path.clone()).collect();
+        let mut tabs: serde_json::Map<String, Value> = tabs.as_object().cloned().unwrap_or_default().into_iter().filter(|(p, _)| live.contains(p)).collect();
+        tabs.insert(path.to_string(), Value::String(chat.to_string()));
+        self.set_state("active_tabs".into(), Value::Object(tabs));
     }
 
     pub(crate) fn ensure_composer(&mut self, chat_id: &str, window: &mut Window, cx: &mut Context<Self>) {
