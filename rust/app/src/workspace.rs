@@ -327,7 +327,29 @@ pub struct Workspace {
     pub(crate) pending_move: Option<(String, String)>,
     pub(crate) perf: std::rc::Rc<std::cell::RefCell<crate::ui::inspect::Perf>>,
     /** The redraw a looping animation (spinner, pulse) asked for, at `motion.animation_fps`. */
-    pub(crate) anim_tick: Option<Task<()>>,
+    /** Each drawer's (region, or "" for the window) pending looping-animation redraw. */
+    pub(crate) anim_ticks: HashMap<String, Task<()>>,
+    /** Regions on screen: (view, what it was drawn from), what they registered, and their views by id. */
+    pub(crate) regions: HashMap<String, (Entity<crate::ui::region::Region>, crate::ui::region::Fingerprint)>,
+    pub(crate) kept: HashMap<String, crate::ui::region::Kept>,
+    pub(crate) region_views: HashMap<String, WeakEntity<crate::ui::region::Region>>,
+    pub(crate) region_deps: HashMap<String, (u64, crate::ui::region::Deps)>,
+    pub(crate) regions_placed: HashSet<String>,
+    pub(crate) live_regions: HashSet<String>,
+    /** Draw every region this frame: an input event's handlers may have changed what no fingerprint covers. */
+    pub(crate) refresh_regions: bool,
+    pub(crate) refresh_now: bool,
+    pub(crate) settings_rev: u64,
+    pub(crate) ctx_generation: std::cell::Cell<u64>,
+    pub(crate) hash_memo: std::cell::RefCell<crate::ui::region::HashMemo>,
+    /** Which region (or "" for the window) drew each enter animation and transition. */
+    pub(crate) anim_owner: HashMap<String, String>,
+    /** ABX_REGION_DEBUG: each region's per-path hashes, to report which path made it draw. */
+    pub(crate) region_debug: HashMap<String, Vec<(String, u64)>>,
+    /** Whether the node being drawn sits in a row (else a column): which way a region takes its content's size. */
+    pub(crate) in_row: bool,
+    /** The context each virtual list was last measured against. */
+    pub(crate) list_generations: HashMap<String, (u64, u64)>,
     pub(crate) anim_epoch: std::time::Instant,
     /** Each chat's transcript list: only the rows on screen are built and laid out. */
     pub(crate) lists: HashMap<String, TranscriptList>,
@@ -368,7 +390,7 @@ pub struct Workspace {
     fs_watchers: HashMap<u64, notify::RecommendedWatcher>,
     pub(crate) window_size: (f32, f32),
     /** Each composer's text as of the last change, for `.composers`. */
-    composer_texts: HashMap<String, String>,
+    pub(crate) composer_texts: HashMap<String, String>,
     /** Where `composer.recall` is in each chat's sent messages (0: the newest). */
     recall: HashMap<String, usize>,
     pub(crate) palette_view: Option<PaletteView>,
@@ -585,7 +607,22 @@ impl Workspace {
             mirrored: HashMap::new(),
             pending_move: None,
             perf: Default::default(),
-            anim_tick: None,
+            anim_ticks: HashMap::new(),
+            regions: HashMap::new(),
+            kept: HashMap::new(),
+            region_views: HashMap::new(),
+            region_deps: HashMap::new(),
+            regions_placed: HashSet::new(),
+            live_regions: HashSet::new(),
+            refresh_regions: true,
+            refresh_now: true,
+            settings_rev: 0,
+            ctx_generation: Default::default(),
+            hash_memo: Default::default(),
+            anim_owner: HashMap::new(),
+            region_debug: HashMap::new(),
+            in_row: false,
+            list_generations: HashMap::new(),
             anim_epoch: std::time::Instant::now(),
             lists: HashMap::new(),
             virtual_lists: HashMap::new(),
@@ -1358,6 +1395,7 @@ impl Workspace {
 
     pub(crate) fn reload_settings(&mut self, cx: &mut Context<Self>) {
         crate::ui::docs::write_reference();
+        self.settings_rev += 1;
         match settings::load() {
             Ok(s) => {
                 self.state = s.state.clone();
@@ -2105,6 +2143,7 @@ impl Workspace {
         let data = data.unwrap_or_else(|| {
             let t = std::time::Instant::now();
             let v = self.context_data();
+            self.ctx_generation.set(self.ctx_generation.get() + 1);
             self.perf.borrow_mut().spans.insert("context_build", t.elapsed().as_secs_f32() * 1000.);
             *self.ctx_data.borrow_mut() = Some((key, std::time::Instant::now(), v.clone()));
             v
@@ -4303,11 +4342,17 @@ impl Render for Workspace {
         self.refresh_sub_chats();
         self.perf.borrow_mut().spans.insert("flush", t.elapsed().as_secs_f32() * 1000.);
         self.render_generation += 1;
+        self.settle_regions();
         self.clickables_last = std::mem::take(&mut self.clickables);
         self.menus_last = std::mem::take(&mut self.menus);
         let generation = self.render_generation;
-        self.entered.retain(|_, (_, seen, _)| *seen + 2 >= generation);
-        self.transitions.retain(|_, t| t.seen + 2 >= generation);
+        // A reused region didn't draw its animations again, but they're still on screen.
+        let (owners, live) = (&self.anim_owner, &self.live_regions);
+        let live = |k: &String| owners.get(k).is_some_and(|o| !o.is_empty() && live.contains(o));
+        self.entered.retain(|k, (_, seen, _)| *seen + 2 >= generation || live(k));
+        self.transitions.retain(|k, t| t.seen + 2 >= generation || live(k));
+        let (entered, transitions) = (&self.entered, &self.transitions);
+        self.anim_owner.retain(|k, _| entered.contains_key(k) || transitions.contains_key(k));
         {
             let mut m = self.motion.borrow_mut();
             m.frame = generation;
@@ -4403,6 +4448,10 @@ impl Render for Workspace {
             .text_color(fg)
             .font_family(font)
             .capture_key_down(cx.listener(Self::handle_keys))
+            // A click's handlers can change what a built-in shows (a collapsed file, an expanded step)
+            // without anything a region's fingerprint reads: the frame after one draws every region.
+            .capture_any_mouse_down(cx.listener(|ws, _, _, _| ws.refresh_regions = true))
+            .capture_any_mouse_up(cx.listener(|ws, _, _, _| ws.refresh_regions = true))
             .on_key_down(cx.listener(Self::type_to_focus))
             .on_action(cx.listener(|ws, _: &OpenSettings, w, cx| ws.open_settings(w, cx)))
             .on_action(cx.listener(|ws, _: &Palette, w, cx| ws.open_palette(w, cx)))

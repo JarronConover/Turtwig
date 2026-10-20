@@ -15,9 +15,26 @@ use std::io::Write as _;
 pub struct Perf {
     frames: std::collections::VecDeque<(std::time::Instant, f32, f32)>,
     pub spans: std::collections::BTreeMap<&'static str, f32>,
+    /** Regions placed fresh (their fingerprint moved) and drawn, since the last summary. */
+    pub regions_fresh: Vec<String>,
+    pub regions_drawn: Vec<String>,
+}
+
+fn counts(ids: &[String]) -> Value {
+    let mut m = std::collections::BTreeMap::new();
+    for id in ids {
+        *m.entry(id.as_str()).or_insert(0) += 1;
+    }
+    json!(m)
 }
 
 impl Perf {
+    /** Starts counting region draws afresh (each inspect write reports the ones since the last). */
+    pub fn reset_regions(&mut self) {
+        self.regions_fresh.clear();
+        self.regions_drawn.clear();
+    }
+
     pub fn record(&mut self, started: std::time::Instant, render: std::time::Duration) {
         self.frames.push_back((started, render.as_secs_f32() * 1000., started.elapsed().as_secs_f32() * 1000.));
         while self.frames.len() > 240 {
@@ -38,6 +55,8 @@ impl Perf {
             "last_render_ms": last.map(|f| f.1),
             "last_frame_ms": last.map(|f| f.2),
             "spans_ms": self.spans,
+            "regions_fresh": counts(&self.regions_fresh),
+            "regions_drawn": counts(&self.regions_drawn),
         })
     }
 }
@@ -83,10 +102,12 @@ impl Workspace {
         let mut layout: Vec<(String, [f32; 4])> = self.motion.borrow().bounds.iter().map(|(k, b)| (k.clone(), *b)).collect();
         layout.sort_by(|a, b| a.0.cmp(&b.0));
         let size = window.viewport_size();
+        let perf = self.perf.borrow().summary(self.settings.num("inspect.perf_window_secs", 2.) as f32);
+        self.perf.borrow_mut().reset_regions();
         json!({
             "about": "The running app as of `at`: `context` is what settings expressions see; `layout` is where nodes with ids are (x, y, w, h in points); see SETTINGS.md.",
             "window": {"width": f32::from(size.width), "height": f32::from(size.height), "focused": self.focused, "number": window_number()},
-            "perf": self.perf.borrow().summary(self.settings.num("inspect.perf_window_secs", 2.) as f32),
+            "perf": perf,
             "internal": self.internal_json(),
             "dialog": self.dialog_json(cx),
             "palette": self.palette_entries().into_iter().map(|(l, _)| l).collect::<Vec<_>>(),

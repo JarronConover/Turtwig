@@ -48,7 +48,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("row", "Children side by side."),
     ("column", "Children stacked."),
     ("stack", "Children layered on top of each other (later children on top); position them with `style.position: absolute`."),
-    ("scroll", "A scrolling container. `props.axis`: y (default) | x | both. `props.scrollbar`: never (default) | scrolling | hover | always. `props.handle` names it for `ui.scroll` (default: its id). `props.virtual`: true builds only the children on screen (each `for` item is one row), for long lists; then `props.align` top | bottom (rows sit at the bottom when they don't fill it), `props.follow` (stay at the end as rows are added), `props.overdraw` (points drawn past each edge, 400)."),
+    ("scroll", "A scrolling container. `props.axis`: y (default) | x | both. `props.scrollbar`: never (default) | scrolling | hover | always. `props.handle` names it for `ui.scroll` (default: its id). `props.virtual`: true builds only the children on screen (each `for` item is one row), for long lists; then `props.align` top | bottom (rows sit at the bottom when they don't fill it), `props.follow` (stay at the end as rows are added), `props.overdraw` (points drawn past each edge, 400); each row is a `region` unless `props.region_rows` is false."),
     ("text", "Text. `props.text` (templates allowed); a plain string node is shorthand for this. `props.selectable`: true lets it be selected and copied."),
     ("icon", "A Lucide icon. `props.name` (e.g. git-branch, panel-left, plus), `props.size` (points), `props.spin` (bool)."),
     ("image", "A picture, animated GIF/WebP, or video (mp4, mov, m4v, webm; muted, looping): `props.src` (a file: absolute, ~/, or relative to the settings folder; or an http(s) URL) and `props.fit` (cover, contain, fill, scale_down, none). Size it with `style`; settings `background` puts one behind the whole window."),
@@ -64,7 +64,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("attachments", "Preview chips for files attached to a chat but not sent yet (spinner while uploading, × to remove). `props.chat` (default the selected chat), `props.size`. Look: settings `chat.attachments`, `chat.attachment`."),
     ("diff", "The built-in diff of a worktree: a file list beside the changes. `props.path` (default the selected worktree), `props.base` (default `state.diff_base`: uncommitted | branch). Click a file to jump, a file header to collapse, a line number to open it in the editor. Look: settings `diff`."),
     ("resize_handle", "A drag handle that sets a numeric state value. `props.state` (key), `props.axis` x|y, `props.min` (80), `props.max` (2000), `props.default` (300, the size while the state is unset), `props.invert` (bool, for handles on the far edge). `on.double_click` works on it (e.g. a state.set back to a size)."),
-    ("(every node)", "Besides `type`, `props`, `style`, `children`: `id` (stable identity; listed in inspect.json `layout`), `for`/`as`/`key`, `if`, `on` (events: click, double_click, mouse_down, mouse_up, right_click, hover_start, hover_end, scroll (`.dx`/`.dy` added to the action), key ({KEY: action} or [{key, do}], while focused), focus, blur, click_outside, drop, drop_item, change, submit), `focusable` (true: takes keyboard focus; Enter/Space click it, Tab moves on; `.focused_node` is the focused node's id), `menu` (entries) with `menu_on` (right_click (default) | click), `tooltip`, `drag`, `drop_key`, `drop_zones`, `layer` (top | above | a number: paint above lower layers), `occlude`, `animate`, `motion`, `transition`."),
+    ("(every node)", "Besides `type`, `props`, `style`, `children`: `id` (stable identity; listed in inspect.json `layout`), `for`/`as`/`key`, `if`, `on` (events: click, double_click, mouse_down, mouse_up, right_click, hover_start, hover_end, scroll (`.dx`/`.dy` added to the action), key ({KEY: action} or [{key, do}], while focused), focus, blur, click_outside, drop, drop_item, change, submit), `focusable` (true: takes keyboard focus; Enter/Space click it, Tab moves on; `.focused_node` is the focused node's id), `menu` (entries) with `menu_on` (right_click (default) | click), `tooltip`, `drag`, `drop_key`, `drop_zones`, `layer` (top | above | a number: paint above lower layers), `occlude`, `animate`, `motion`, `transition`, `region` (true: drawn as its own cached view, again only when what its expressions read changes or an animation inside it asks; a big area that changes on its own (a list, the transcript, a panel) as a region keeps the rest of the window still. Its size comes from its style, or its content's along its parent's direction; regions inside a region that redraws redraw with it)."),
     ("<Component>", "Any name under `components`; its `props` are available inside as `.props`. `style` merges into its root's, and `id`, `on`, `menu`, `tooltip`, `drag`, `drop_key`, `drop_zones`, `layer`, `animate`, `motion` and `transition` set on the use replace its root's."),
 ];
 
@@ -76,15 +76,19 @@ impl Workspace {
         if fps <= 0. {
             return 0.;
         }
-        if self.anim_tick.is_none() {
+        // Only the region drawing it redraws (or the window, outside any).
+        let owner = super::region::owner();
+        if !self.anim_ticks.contains_key(&owner) {
             let wait = Duration::from_secs_f64(1. / fps.min(240.));
-            self.anim_tick = Some(cx.spawn(async move |this, cx| {
+            let o = owner.clone();
+            let task = cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(wait).await;
                 let _ = this.update(cx, |ws, cx| {
-                    ws.anim_tick = None;
-                    cx.notify();
+                    ws.anim_ticks.remove(&o);
+                    ws.notify_owner(&o, cx);
                 });
-            }));
+            });
+            self.anim_ticks.insert(owner, task);
         }
         (self.anim_epoch.elapsed().as_secs_f32() * 1000. % period_ms) / period_ms
     }
@@ -196,7 +200,7 @@ impl Workspace {
                         }
                     }
                 }
-                for k in ["id", "animate", "motion", "transition", "tooltip", "on", "menu", "menu_on", "focusable", "drag", "drop_key", "drop_zones", "layer"] {
+                for k in ["id", "animate", "motion", "transition", "tooltip", "on", "menu", "menu_on", "focusable", "drag", "drop_key", "drop_zones", "layer", "region"] {
                     if let Some(v) = obj.get(k) {
                         base.insert(k.into(), v.clone());
                     }
@@ -220,6 +224,9 @@ impl Workspace {
             Some(own) => format!("{own}{}", loop_keys(path)),
             None => path.to_string(),
         };
+        if obj.get("region").and_then(Value::as_bool) == Some(true) {
+            return vec![self.place_region(obj, ctx, path, &id, &st, cx)];
+        }
         // `hover_ms` (and ui.hover) apply hover styles from tracked state, so they can ease.
         let hover_ms = st.get("hover_ms").and_then(Value::as_u64);
         let (hovered, forced) = super::drive::ui(|u| (u.hovered.contains(&id), u.forced_hover.as_deref() == Some(id.as_str())));
@@ -381,8 +388,12 @@ impl Workspace {
         // fade or slide its contents in.
         let still = obj.get("motion").and_then(Value::as_bool) == Some(false);
         self.motion_off += still as usize;
+        // Regions among the children need to know which way they're laid out (see place_region).
+        let row = kind == "row" || st.get("direction").and_then(Value::as_str) == Some("row");
+        let saved_row = std::mem::replace(&mut self.in_row, row);
         let kids = if virtual_list { vec![self.virtual_list(obj, &props, ctx, path, &id, cx)] } else if super::widgets::OWNS_CHILDREN.contains(&kind.as_str()) { vec![] } else { children(self, window, cx) };
         self.motion_off -= still as usize;
+        self.in_row = saved_row;
 
         let mut el = el.id(SharedString::from(id.clone()));
         let mut scrollbar: Option<AnyElement> = None;
@@ -442,6 +453,7 @@ impl Workspace {
                 if !changed {
                     return;
                 }
+                ws.refresh_regions = true;
                 match (*over, &start, &end) {
                     (true, Some(a), _) | (false, _, Some(a)) => ws.run_action(a, window, cx),
                     _ => cx.notify(),
@@ -787,6 +799,10 @@ impl Workspace {
             let mut one = kid.clone();
             if let Value::Object(o) = &mut one {
                 o.remove("for");
+                // Each row draws as its own region (`props.region_rows`: false draws them all every frame).
+                if props.get("region_rows").and_then(Value::as_bool) != Some(false) {
+                    o.entry("region").or_insert(Value::Bool(true));
+                }
             }
             for (j, item) in items.into_iter().enumerate() {
                 let c = with(ctx, vec![(name.clone(), item), ("index".into(), to_val(&Value::from(j)))]);
@@ -818,14 +834,29 @@ impl Workspace {
             state.splice(head..old.len() - tail, new.len() - tail - head);
             entry.1 = keys;
         }
-        // Rows off screen keep their last height until they scroll into view; content may have changed.
-        state.remeasure_items(0..rows.len());
+        // Rows off screen keep their last height until they scroll into view; content may have changed,
+        // which only a new context (or a frame drawing every region) can bring.
+        let generation = (self.ctx_generation.get(), self.settings_rev);
+        if self.refresh_now || self.list_generations.insert(id.to_string(), generation) != Some(generation) {
+            state.remeasure_items(0..rows.len());
+        }
         entry.2 = std::rc::Rc::new(rows);
         let list_id = id.to_string();
+        let owner = super::region::owner();
         let bar = scrollbar_mode(props.get("scrollbar")).map(|m| gpui_kit::component::scroll::Scrollbar::vertical(&state).mode(m));
         let rows = list(state, cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| {
             let Some(row) = ws.virtual_lists.get(&list_id).and_then(|l| l.2.get(ix).cloned()) else { return div().into_any_element() };
-            div().w_full().flex().flex_col().children(ws.render(&row.0, &row.1, &row.2, window, cx)).into_any_element()
+            // Rows are drawn as the list lays out, after its region's drawing: they're the region's all the same.
+            let mark = (!owner.is_empty()).then(|| {
+                super::region::push_owner(&owner);
+                ws.begin_kept()
+            });
+            let el = div().w_full().flex().flex_col().children(ws.render(&row.0, &row.1, &row.2, window, cx)).into_any_element();
+            if let Some(m) = mark {
+                super::region::pop_owner();
+                ws.end_kept(&owner, m);
+            }
+            el
         }))
         .size_full();
         match bar {
@@ -976,7 +1007,7 @@ impl Workspace {
             return;
         }
         let generation = self.render_generation;
-        let running = self.entered.get(id).filter(|(_, seen, _)| *seen + 1 >= generation).map(|(start, _, spec)| (*start, spec.clone()));
+        let running = self.entered.get(id).filter(|(_, seen, _)| self.motion.borrow().recent(*seen)).map(|(start, _, spec)| (*start, spec.clone()));
         let (start, spec) = match running {
             Some(r) => r,
             None => {
@@ -996,6 +1027,7 @@ impl Workspace {
             }
         };
         self.entered.insert(id.to_string(), (start, generation, spec.clone()));
+        self.anim_owner.insert(id.to_string(), super::region::owner());
         let ms = spec.get("duration").and_then(Value::as_u64).unwrap_or(200).max(1) as f32;
         let t = (start.elapsed().as_secs_f32() * 1000. / ms).min(1.);
         if t >= 1. {
@@ -1055,7 +1087,7 @@ impl Workspace {
             };
             let key = format!("{id}#{prop}");
             let shown = match self.transitions.get_mut(&key) {
-                Some(t) if t.seen + 1 >= generation && !snap => {
+                Some(t) if self.motion.borrow().recent(t.seen) && !snap => {
                     t.seen = generation;
                     if t.to.len() == target.len() && t.to.iter().zip(&target).any(|(a, b)| (a - b).abs() > 0.001) {
                         let (now, _) = t.value();
@@ -1068,6 +1100,7 @@ impl Workspace {
                     v
                 }
                 _ => {
+                    self.anim_owner.insert(key.clone(), super::region::owner());
                     self.transitions.insert(key, Transition { from: target.clone(), to: target.clone(), start: Instant::now(), duration: Duration::ZERO, seen: generation, easing: style_easing });
                     target
                 }

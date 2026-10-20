@@ -23,6 +23,7 @@ pub(crate) const ACTIONS: &[(&str, &str)] = &[
 ];
 
 /** A drop target drawn this frame: its key, zones and `on.drop_item` specs (accept, action, valid). */
+#[derive(Clone)]
 pub(crate) struct DropTarget {
     pub key: String,
     pub zones: Value,

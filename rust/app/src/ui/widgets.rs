@@ -312,10 +312,11 @@ impl Workspace {
                 let every = num(props, "every_ms", 1000.).max(16.) as u64;
                 let key = id.to_string();
                 if !TIMERS.with(|t| t.borrow().contains_key(&key)) {
+                    let owner = super::region::owner();
                     let task = cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(std::time::Duration::from_millis(every)).await;
                         TIMERS.with(|t| t.borrow_mut().remove(&key));
-                        let _ = this.update(cx, |_, cx| cx.notify());
+                        let _ = this.update(cx, |ws, cx| ws.notify_owner(&owner, cx));
                     });
                     TIMERS.with(|t| t.borrow_mut().insert(id.to_string(), task));
                 }

@@ -76,6 +76,11 @@ pub struct MotionStore {
     pub bounds: HashMap<String, [f32; 4]>,
     /** Nodes whose bounds a `Track` recorded (they don't move), by the frame it last did. */
     tracked: HashMap<String, u64>,
+    /** The region that drew each node, and the regions still on screen: a reused one's nodes stay. */
+    owners: HashMap<String, String>,
+    pub live_owners: std::collections::HashSet<String>,
+    /** Each region's last two draws (frames): a reused region's nodes count as shown since its last. */
+    draws: HashMap<String, (u64, u64)>,
 }
 
 impl Default for MotionStore {
@@ -92,6 +97,9 @@ impl Default for MotionStore {
             snap_frame: 0,
             bounds: HashMap::new(),
             tracked: HashMap::new(),
+            owners: HashMap::new(),
+            live_owners: Default::default(),
+            draws: HashMap::new(),
         }
     }
 }
@@ -99,7 +107,23 @@ impl Default for MotionStore {
 impl MotionStore {
     /** Was this node on screen in the previous render? */
     pub fn was_visible(&self, key: &str) -> bool {
-        self.entries.get(key).is_some_and(|e| e.seen + 1 >= self.frame)
+        self.entries.get(key).is_some_and(|e| self.recent(e.seen))
+    }
+
+    /** Whether something last drawn at frame `seen` was drawn by the previous draw of the region drawing
+    now (for the window, the previous frame; a reused region's last draw may be long ago). */
+    pub fn recent(&self, seen: u64) -> bool {
+        let owner = crate::ui::region::owner();
+        seen + 1 >= self.frame || self.draws.get(&owner).is_some_and(|(_, prev)| seen >= *prev)
+    }
+
+    /** Notes that region `owner` draws in this frame. */
+    pub fn drew(&mut self, owner: &str) {
+        let frame = self.frame;
+        let d = self.draws.entry(owner.to_string()).or_insert((frame, frame));
+        if d.0 != frame {
+            *d = (frame, d.0);
+        }
     }
 
     pub fn has_history(&self) -> bool {
@@ -108,10 +132,20 @@ impl MotionStore {
 
     pub fn prune(&mut self) {
         let frame = self.frame;
-        self.entries.retain(|_, e| e.seen + 2 >= frame);
-        self.tracked.retain(|_, seen| *seen + 2 >= frame);
+        let (owners, live) = (&self.owners, &self.live_owners);
+        let kept = |k: &String| owners.get(k).is_some_and(|o| !o.is_empty() && live.contains(o));
+        self.entries.retain(|k, e| e.seen + 2 >= frame || kept(k));
+        self.tracked.retain(|k, seen| *seen + 2 >= frame || kept(k));
         let (entries, tracked) = (&self.entries, &self.tracked);
         self.bounds.retain(|k, _| entries.contains_key(k) || tracked.contains_key(k));
+        self.owners.retain(|k, _| entries.contains_key(k) || tracked.contains_key(k));
+        let live = &self.live_owners;
+        self.draws.retain(|o, _| live.contains(o));
+    }
+
+    /** Notes which region is drawing `key`. */
+    pub fn own(&mut self, key: &str) {
+        self.owners.insert(key.to_string(), crate::ui::region::owner());
     }
 
     fn offset(&mut self, key: &str, origin: Point<Pixels>, window: &mut Window) -> Point<f32> {
@@ -132,7 +166,7 @@ impl MotionStore {
             point(e.from.x * k, e.from.y * k)
         };
         let e = self.entries.entry(key.to_string()).or_insert(Entry { rel, from: Point::default(), start: now, seen: frame });
-        if e.seen + 1 < frame {
+        if !(e.seen + 1 >= frame || self.draws.get(&crate::ui::region::owner()).is_some_and(|(_, prev)| e.seen >= *prev)) {
             *e = Entry { rel, from: Point::default(), start: now, seen: frame };
         } else if (rel.x - e.rel.x).abs() > 0.5 || (rel.y - e.rel.y).abs() > 0.5 {
             let cur = if may_move { current(e) } else { Point::default() };
@@ -160,6 +194,7 @@ pub struct Motion {
 
 impl Motion {
     pub fn new(key: String, child: AnyElement, store: Rc<RefCell<MotionStore>>) -> Self {
+        store.borrow_mut().own(&key);
         Self { key, child, store }
     }
 }
@@ -215,6 +250,7 @@ pub struct Track {
 
 impl Track {
     pub fn new(key: String, child: AnyElement, store: Rc<RefCell<MotionStore>>) -> Self {
+        store.borrow_mut().own(&key);
         Self { key, child, store }
     }
 }
