@@ -363,6 +363,14 @@ impl Transcript {
         self.revision += 1;
     }
 
+    /** Takes back the echo of a message that didn't go through. */
+    pub fn unecho(&mut self, text: &str) {
+        if self.echoes.iter().any(|(t, _)| t == text.trim()) {
+            self.settle_echo(text.trim());
+            self.revision += 1;
+        }
+    }
+
     /** Swaps the echo of `text` (or else the oldest echo) out for the real message about to be added. */
     fn settle_echo(&mut self, text: &str) {
         if self.echoes.is_empty() {

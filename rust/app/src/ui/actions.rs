@@ -456,7 +456,7 @@ impl Workspace {
                                     window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
                                 }
                             }
-                            "queue.send_now" => self.send_chat(&id, text),
+                            "queue.send_now" => self.send_chat(&id, text, window, cx),
                             _ => {}
                         }
                     }

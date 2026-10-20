@@ -646,7 +646,8 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let chat = registry_chat(&chat_id);
             let kind = chat.as_ref().map(agents::of).unwrap_or_else(|| "claude".into());
             if !ok(&["has-session", "-t", &target]) {
-                return chat_tool(&["send", &chat_id, &text], "chat_send_timeout_secs", 60);
+                // Not running: bin/chat resumes it first (send_resumes), which can take a while for a long chat.
+                return chat_tool(&["send", &chat_id, &text], "chat_send_timeout_secs", 150);
             }
             let buf = format!("abx-{}", &chat_id[..chat_id.len().min(8)]);
             if !(ok(&["set-buffer", "-b", &buf, "--", &text]) && ok(&["paste-buffer", "-p", "-d", "-b", &buf, "-t", &target])) {

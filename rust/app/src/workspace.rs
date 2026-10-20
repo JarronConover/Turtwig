@@ -1618,7 +1618,7 @@ impl Workspace {
                 }
                 if !before.is_empty() {
                     self.fire_chat_events(&before, window, cx);
-                    self.flush_queue();
+                    self.flush_queue(window, cx);
                 }
                 self.pending_events.push(("model".into(), [("host".to_string(), json!(host))].into_iter().collect()));
                 let ctx = self.context();
@@ -2744,7 +2744,7 @@ impl Workspace {
     }
 
     /** Sends the next queued message to each chat that's idle again. */
-    pub(crate) fn flush_queue(&mut self) {
+    pub(crate) fn flush_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ready: Vec<String> = self
             .queued
             .iter()
@@ -2756,7 +2756,7 @@ impl Workspace {
         for id in ready {
             let Some(text) = self.queued.get_mut(&id).filter(|q| !q.is_empty()).map(|q| q.remove(0)) else { continue };
             self.queue_sent.insert(id.clone(), std::time::Instant::now());
-            self.send_chat(&id, text);
+            self.send_chat(&id, text, window, cx);
             self.ctx_rev += 1;
         }
     }
@@ -2865,12 +2865,31 @@ impl Workspace {
     }
 
     /** Sends a message to a chat, showing it in the transcript at once. */
-    pub(crate) fn send_chat(&mut self, id: &str, text: String) {
+    /** Sends a message (a stopped or closed chat resumes first). One that doesn't go through comes back
+    out of the transcript into the queue, with a toast saying why. */
+    pub(crate) fn send_chat(&mut self, id: &str, text: String, window: &mut Window, cx: &mut Context<Self>) {
         self.just_sent.insert(id.to_string(), std::time::Instant::now());
         self.apply_just_sent();
         self.transcripts.entry(id.to_string()).or_default().echo(&text);
-        let call = Call::ChatSend { chat_id: id.to_string(), text };
-        self.route(&call).send(call);
+        let call = Call::ChatSend { chat_id: id.to_string(), text: text.clone() };
+        let remote = self.route(&call);
+        let id = id.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(e) = remote.call(call).await {
+                this.update_in(cx, |ws, window, cx| {
+                    if let Some(t) = ws.transcripts.get_mut(&id) {
+                        t.unecho(&text);
+                    }
+                    ws.just_sent.remove(&id);
+                    ws.queued.entry(id.clone()).or_default().insert(0, text.clone());
+                    ws.ctx_rev += 1;
+                    let msg = ws.tr("send_failed", "Couldn't send: {why}", &[("why", &e.to_string())]);
+                    ws.toast(msg, window, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /** Each new (worktree, chat) on screen is a visit; going back or forward moves along them. */
@@ -3233,7 +3252,7 @@ impl Workspace {
             self.queued.entry(id.to_string()).or_default().push(text);
             self.ctx_rev += 1;
         } else {
-            self.send_chat(id, text);
+            self.send_chat(id, text, window, cx);
         }
         self.jump_to_latest(id);
         self.recall.remove(id);

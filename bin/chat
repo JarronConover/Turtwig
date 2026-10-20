@@ -838,16 +838,21 @@ def cmd_send(args):
     chat = find(args.chat)
     name = tmux_name(chat)
     prompt = agent_def(chat).get("prompt_char")
+    wait = args.wait
     if not tmux_alive(name):
-        sys.exit("chat isn't running here")
-    if args.wait:
-        deadline = time.time() + args.wait
+        # A stopped or closed chat on this machine: resume it, then send once its prompt is up.
+        if chat["host"] != HOST or not option("send_resumes", True):
+            sys.exit(f"{chat['name']} isn't running here" + (f"; it's on the {label(chat['host'])}" if chat["host"] != HOST else ""))
+        cmd_start(argparse.Namespace(chat=chat["id"]))
+        wait = max(wait, option("send_resume_wait_secs", 90))
+    if wait:
+        deadline = time.time() + wait
         while time.time() < deadline and input_line(name, prompt) != "":
             time.sleep(1)
     run(["tmux", "send-keys", "-t", name, "-l", args.text])
     time.sleep(option("chat_send_pause_secs", 0.5))
     run(["tmux", "send-keys", "-t", name, "C-m"])
-    for _ in range(option("send_enter_tries", 4) if args.wait else 0):
+    for _ in range(option("send_enter_tries", 4) if wait else 0):
         time.sleep(option("send_enter_wait_ms", 350) / 1000)
         line = input_line(name, prompt)
         if not line or not args.text.startswith(line[:20]):
