@@ -1053,8 +1053,14 @@
           "type": "row",
           "style": { "position": "relative", "padding": [0, 4], "align": "center", "shrink": 0 },
           "children": [
-            { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
-            { "type": "IconButton", "if": ".state.chat_history_open", "id": "chat-history-button-above", "layer": "above", "motion": false, "style": { "position": "absolute", "top": 0, "left": 4 }, "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } },
+            {
+              "type": "box",
+              "style": { "position": "relative" },
+              "children": [
+                { "type": "IconButton", "id": "chat-history-button", "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": [{ "do": "state.toggle", "key": "chat_history_open" }, { "do": "state.set", "key": "chat_history_query", "value": "" }] } },
+                { "type": "IconButton", "if": ".state.chat_history_open", "id": "chat-history-button-above", "layer": "above", "motion": false, "style": { "position": "absolute", "top": 0, "left": 0 }, "props": { "icon": "archive-restore", "size": 24, "tooltip": "Closed chats in this worktree", "do": { "do": "state.toggle", "key": "chat_history_open" } } }
+              ]
+            },
             {
               "if": ".state.chat_history_open and (.app.dragging | not)",
               "type": "box",
@@ -1064,27 +1070,46 @@
             },
             {
               "if": ".state.chat_history_open",
-              "id": "chat-history-list",
-              "type": "scroll",
+              "id": "chat-history-panel",
+              "type": "column",
               "layer": "top",
               "style": {
-                "position": "absolute", "top": 30, "right": 0, "width": 320, "max_height": 380, "padding": 6, "gap": 2,
+                "position": "absolute", "top": 30, "right": 0, "width": 320, "max_height": 420, "padding": 6, "gap": 4,
                 "radius": 10, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg"
               },
               "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
               "children": [
-                { "type": "text", "props": { "text": "Closed chats" }, "style": { "padding": [4, 8, 6, 8], "font_size": 12, "color": "@text_faint" } },
                 {
-                  "for": ".selected.chats | map(select(.open | not)) | sort_by(.last_activity // \"\") | reverse", "as": "c", "key": ".c.id",
                   "type": "row",
-                  "style": { "height": 32, "padding": [0, 8], "gap": 8, "align": "center", "radius": 6, "cursor": "pointer", "font_size": 13, "hover": { "background": "@hover" } },
-                  "tooltip": "Reopen (resumes it on {{ .hosts[.c.host].label // .c.host }})",
-                  "on": { "click": [{ "do": "chat.open", "chat": "{{ .c.id }}" }, { "do": "state.set", "key": "chat_history_open", "value": false }] },
+                  "style": { "gap": 8, "align": "center", "padding": [2, 8] },
                   "children": [
-                    { "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 12 } },
-                    { "type": "AgentIcon", "props": { "agent": "{{ .c.agent }}", "size": 12 } },
-                    { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "grow": 1, "truncate": true } },
-                    { "type": "text", "props": { "text": "{{ .c.age_text }}" }, "style": { "font_size": 12, "color": "@text_faint", "shrink": 0 } }
+                    { "type": "icon", "props": { "name": "search", "size": 13, "color": "@text_faint" } },
+                    { "id": "chat-history-search", "type": "input", "props": { "state": "chat_history_query", "placeholder": "Search closed chats", "autofocus": true, "appearance": false }, "style": { "grow": 1, "font_size": 13 } }
+                  ]
+                },
+                { "type": "divider" },
+                {
+                  "id": "chat-history-list",
+                  "type": "scroll",
+                  "style": { "max_height": 360, "gap": 2 },
+                  "children": [
+                    {
+                      "if": "(.state.chat_history_query // \"\" | ascii_downcase) as $q | .selected.chats | map(select((.open | not) and ((.name // \"\") | ascii_downcase | contains($q)))) | length == 0",
+                      "type": "text", "props": { "text": "No closed chats match." }, "style": { "padding": [6, 8], "font_size": 13, "color": "@text_faint" }
+                    },
+                    {
+                      "for": "(.state.chat_history_query // \"\" | ascii_downcase) as $q | .selected.chats | map(select((.open | not) and ((.name // \"\") | ascii_downcase | contains($q)))) | sort_by(.last_activity // \"\") | reverse", "as": "c", "key": ".c.id",
+                      "type": "row",
+                      "style": { "height": 32, "padding": [0, 8], "gap": 8, "align": "center", "radius": 6, "cursor": "pointer", "font_size": 13, "hover": { "background": "@hover" } },
+                      "tooltip": "Reopen (resumes it on {{ .hosts[.c.host].label // .c.host }})",
+                      "on": { "click": [{ "do": "chat.open", "chat": "{{ .c.id }}" }, { "do": "state.set", "key": "chat_history_open", "value": false }] },
+                      "children": [
+                        { "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 12 } },
+                        { "type": "AgentIcon", "props": { "agent": "{{ .c.agent }}", "size": 12 } },
+                        { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "grow": 1, "truncate": true } },
+                        { "type": "text", "props": { "text": "{{ .c.age_text }}" }, "style": { "font_size": 12, "color": "@text_faint", "shrink": 0 } }
+                      ]
+                    }
                   ]
                 }
               ]
