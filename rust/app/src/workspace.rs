@@ -1625,6 +1625,12 @@ impl Workspace {
                 }
                 self.merge_models();
                 if let Some(old) = old {
+                    // A chat that left this host (moved to another machine) is read from where it went now.
+                    let here: HashSet<&String> = self.models.get(host).map(|m| m.chats.iter().map(|c| &c.id).collect()).unwrap_or_default();
+                    let gone: Vec<String> = old.chats.iter().filter(|c| !here.contains(&c.id)).map(|c| c.id.clone()).collect();
+                    for id in gone {
+                        self.watching.remove(&id);
+                    }
                     self.model_events(&old, host);
                 }
                 if !before.is_empty() {

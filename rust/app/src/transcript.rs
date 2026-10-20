@@ -304,7 +304,7 @@ impl Transcript {
         let mut out = vec![];
         for it in &self.items {
             let Item::Tool { id, name, summary, input, result, .. } = it else { continue };
-            let bg = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
+            let bg = matches!(input.get("run_in_background"), Some(Value::Bool(true))) || input.get("run_in_background").and_then(Value::as_str) == Some("true");
             let done = |task: &Option<String>| self.finished.contains(id) || task.as_ref().is_some_and(|t| self.finished.contains(t));
             let kind = if o.shell_tools.contains(name) { "shell" } else if o.agent_tools.contains(name) { "agent" } else { "" };
             match kind {
@@ -317,10 +317,13 @@ impl Transcript {
                     }
                 }
                 "agent" => {
-                    let task = result.as_deref().and_then(|r| after(r, "agentId: ")).map(|s| word(s).to_string());
-                    let launched = result.as_deref().is_some_and(|r| r.contains("agent launched") || r.contains("working in the background"));
+                    // A named teammate's result says `agent_id: ` and `name: `; its idle notice comes by name.
+                    let r = result.as_deref().unwrap_or("");
+                    let task = after(r, "agentId: ").or_else(|| after(r, "agent_id: ")).map(|s| word(s).to_string());
+                    let name = after(r, "\nname: ").map(|s| word(s).to_string());
+                    let launched = ["agent launched", "working in the background", "is now running"].iter().any(|m| r.contains(m));
                     let running = result.is_none() || ((bg || launched) && task.is_some());
-                    if running && !done(&task) {
+                    if running && !done(&task) && !done(&name) {
                         let kind = input.get("subagent_type").and_then(Value::as_str).filter(|t| *t != "general-purpose");
                         let label = match kind {
                             Some(k) => format!("{k}: {summary}"),
@@ -348,6 +351,16 @@ impl Transcript {
                 }
             }
             rest = &rest[i + end.max(1)..];
+        }
+        // A teammate that went idle has finished what it was given.
+        let mut rest = text;
+        while let Some(i) = rest.find("<teammate-message teammate_id=\"") {
+            let block = &rest[i + "<teammate-message teammate_id=\"".len()..];
+            let end = block.find("</teammate-message>").unwrap_or(block.len());
+            if block[..end].contains("\"idle_notification\"") {
+                self.finished.insert(block.split('"').next().unwrap_or("").to_string());
+            }
+            rest = &block[end..];
         }
     }
 
@@ -563,6 +576,7 @@ impl Transcript {
         let opts = options();
         // Another Claude session talking to this one (SendMessage, teammates): a collapsed step, not you.
         if t.contains("<teammate-message") || t.contains("<cross-session-message") || t.starts_with("Another Claude session sent a message") {
+            self.note_finished(t);
             match opts.agent_messages.as_str() {
                 "hidden" => return,
                 "message" => {
@@ -829,6 +843,21 @@ mod background_tests {
         assert_eq!(bg[1].kind, "agent");
         t.append(2, &[json!({"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n<task-id>b9</task-id>\n<status>completed</status>\n</task-notification>"})]);
         assert_eq!(t.background().len(), 1);
+    }
+
+    #[test]
+    fn a_named_teammate_runs_until_it_goes_idle() {
+        let mut t = Transcript::default();
+        t.append(0, &[
+            json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Agent", "input": {"description": "Verify", "name": "lv-1", "run_in_background": "true", "prompt": "x"}}
+            ]}}),
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "Spawned successfully.\nagent_id: alv-1-674a\nname: lv-1\nThe agent is now running and will receive instructions via mailbox."}]}]}}),
+        ]);
+        let bg = t.background();
+        assert_eq!((bg.len(), bg[0].task_id.as_deref()), (1, Some("alv-1-674a")));
+        t.append(2, &[json!({"type": "user", "message": {"content": "Another Claude session sent a message: <teammate-message teammate_id=\"lv-1\" color=\"pink\">\n{\"type\":\"idle_notification\",\"from\":\"lv-1\",\"result\":\"done\"}\n</teammate-message>"}})]);
+        assert!(t.background().is_empty());
     }
 }
 

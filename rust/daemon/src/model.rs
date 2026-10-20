@@ -258,11 +258,24 @@ pub fn apply_hook(states: &mut ChatStates, e: &agent_box_protocol::HookEvent) {
         return;
     }
     let Some((sid, state)) = e.session_id.as_ref().zip(state_for_event(&e.event)) else { return };
+    // A subagent's hooks carry its parent's session id: only its questions say anything about the chat, and
+    // once one is answered the chat goes back to what it was doing.
+    if e.payload.get("agent_id").is_some() && state != "waiting" {
+        let resume = states.get(sid).and_then(|(st, w)| w.as_ref().filter(|w| st == "waiting" && w.get("agent_id").is_some()));
+        if let Some(before) = resume.map(|w| w.get("parent_state").and_then(Value::as_str).unwrap_or("working").to_string()) {
+            states.insert(sid.clone(), (before, None));
+        }
+        return;
+    }
     let named = |w: &Option<Value>| w.as_ref().is_some_and(|w| w.get("tool_input").is_some());
     if e.event == "Notification" && states.get(sid).is_some_and(|(st, w)| st == "waiting" && named(w)) {
         return;
     }
-    let waiting = (state == "waiting").then(|| e.payload.clone());
+    let mut waiting = (state == "waiting").then(|| e.payload.clone());
+    if let (Some(Value::Object(w)), true) = (waiting.as_mut(), e.payload.get("agent_id").is_some()) {
+        let before = states.get(sid).map(|(st, _)| st.clone()).filter(|st| st != "waiting").unwrap_or_else(|| "working".into());
+        w.insert("parent_state".into(), Value::String(before));
+    }
     states.insert(sid.clone(), (state, waiting));
 }
 
@@ -774,6 +787,19 @@ mod tests {
         assert_eq!(suggestion(&pane("")), None);
         assert_eq!(suggestion(&pane("com\x1b[2mmit this\x1b[0m")), None);
         assert_eq!(suggestion(&pane("\x1b[2mTry \"fix lint errors\"\x1b[0m")), None);
+    }
+
+    #[test]
+    fn a_subagents_tool_calls_leave_its_idle_parent_idle() {
+        let ev = |event: &str, payload: serde_json::Value| agent_box_protocol::HookEvent { seq: 0, at: 0., event: event.into(), session_id: Some("s".into()), payload };
+        let mut states = super::ChatStates::new();
+        super::apply_hook(&mut states, &ev("Stop", json!({})));
+        super::apply_hook(&mut states, &ev("PreToolUse", json!({"agent_id": "a1", "tool_name": "Bash"})));
+        assert_eq!(states["s"].0, "idle");
+        super::apply_hook(&mut states, &ev("PermissionRequest", json!({"agent_id": "a1", "tool_name": "Bash"})));
+        assert_eq!(states["s"].0, "waiting");
+        super::apply_hook(&mut states, &ev("PostToolUse", json!({"agent_id": "a1", "tool_name": "Bash"})));
+        assert_eq!(states["s"], ("idle".into(), None));
     }
 
     #[test]
