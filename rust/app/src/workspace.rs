@@ -4095,8 +4095,9 @@ impl Workspace {
         };
         let w = chat.waiting_on.clone().unwrap_or_default();
         let fallback = self.tr("waiting", "The agent is waiting for you", &[]);
-        let message = w["message"].as_str().or(w["tool_name"].as_str()).map(str::to_string).unwrap_or(fallback);
-        let (options, questions) = waiting_options(&w, &self.settings);
+        let message = waiting_message(&w).unwrap_or(fallback);
+        let (options, mut questions) = waiting_options(&w, &self.settings);
+        questions.retain(|q| *q != message);
         let mut row = style::apply(h_flex().gap(px(6.)).flex_wrap(), &st("waiting_row"), theme);
         let cancel = self.tr("waiting_cancel", "Cancel", &[]);
         for (i, label) in options.iter().enumerate().chain(std::iter::once((usize::MAX, &cancel))) {
@@ -4704,6 +4705,11 @@ pub(crate) fn switch_rows(items: &mut Vec<Worktree>, to: &str, branches: &HashSe
         }
     }
     *items = out;
+}
+
+/** What a waiting chat asks: its (first) question's text, else the agent's message, else the tool's name. */
+pub(crate) fn waiting_message(w: &Value) -> Option<String> {
+    w["tool_input"]["questions"][0]["question"].as_str().or(w["message"].as_str()).or(w["tool_name"].as_str()).map(str::to_string)
 }
 
 /** A waiting chat's choices: the first question's options (or `chat.waiting_options`), and the text of

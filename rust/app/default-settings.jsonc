@@ -2137,7 +2137,7 @@
     "chat.waiting": {
       "if": ".app.focused | not",
       "do": [
-        { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} needs you", "text": "{{ .chat.waiting_on.message // \"It's waiting for an answer.\" }}", "sound": false },
+        { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} needs you", "text": "{{ .chat.waiting_on.tool_input.questions[0].question // .chat.waiting_on.message // \"It's waiting for an answer.\" }}", "sound": false },
         "dock.bounce"
       ]
     },

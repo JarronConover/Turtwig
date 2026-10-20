@@ -838,8 +838,9 @@ impl Workspace {
     action that answers it) and the cancel action. */
     fn waiting_props(&self, c: &agent_box_protocol::Chat) -> Value {
         let w = c.waiting_on.clone().unwrap_or_default();
-        let message = w["message"].as_str().or(w["tool_name"].as_str()).map(str::to_string).unwrap_or_else(|| self.tr("waiting", "The agent is waiting for you", &[]));
-        let (options, questions) = crate::workspace::waiting_options(&w, &self.settings);
+        let message = crate::workspace::waiting_message(&w).unwrap_or_else(|| self.tr("waiting", "The agent is waiting for you", &[]));
+        let (options, mut questions) = crate::workspace::waiting_options(&w, &self.settings);
+        questions.retain(|q| *q != message);
         let options: Vec<Value> = options
             .iter()
             .enumerate()
