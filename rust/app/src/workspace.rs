@@ -2427,6 +2427,9 @@ impl Workspace {
             let activity = self.transcripts.get(&c.id).filter(|_| c.state == "working").map(|t| t.activity()).unwrap_or_default();
             o.insert("activity".into(), Value::String(activity));
             o.insert("orchestrator".into(), Value::Bool(self.is_orchestrator(c)));
+            // The model its newest reply came from, else the one it was started with (null: the agent's default).
+            let used = self.transcripts.get(&c.id).and_then(|t| t.model.clone()).or_else(|| c.model.clone());
+            o.insert("model_used".into(), json!(used));
         }
         v
     }

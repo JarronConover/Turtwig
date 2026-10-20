@@ -230,6 +230,8 @@ pub struct Transcript {
     pub revision: u64,
     /** Tool results whose call is in lines not loaded yet (an older page attaches them). */
     orphans: HashMap<String, (String, bool)>,
+    /** The model the newest reply came from (a Claude reply's `message.model`, a Codex turn's). */
+    pub model: Option<String>,
     /** Messages just sent, shown right away until the file has them: (text, item index). */
     echoes: Vec<(String, usize)>,
     /** Background shells and agents that have finished: their tool_use ids and task ids. */
@@ -416,6 +418,11 @@ impl Transcript {
             return;
         }
         let kind = e.get("type").and_then(Value::as_str).unwrap_or("");
+        let model = if kind == "turn_context" { e["model"].as_str() } else if kind == "assistant" { e["message"]["model"].as_str() } else { None };
+        // "<synthetic>": a reply Claude Code made up itself (an error, an interruption), not a model's.
+        if let Some(m) = model.filter(|m| !m.is_empty() && !m.starts_with('<')) {
+            self.model = Some(m.to_string());
+        }
         if kind == "queue-operation" {
             if let Some(c) = e.get("content").and_then(Value::as_str) {
                 self.note_finished(c);
@@ -902,5 +909,21 @@ mod plural_tests {
         assert_eq!(super::plural_label(&l, "steps", "x", 2), ("{n} pasos".to_string(), "en".to_string()));
         crate::transcript::set_options(&json!({}));
         assert_eq!(super::label_n("steps", "{n} step{s}{failed}", 2, &[("failed", "")]), "2 steps");
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::Transcript;
+    use serde_json::json;
+
+    #[test]
+    fn keeps_the_model_of_the_newest_real_reply() {
+        let mut t = Transcript::default();
+        let reply = |m: &str| json!({"type": "assistant", "message": {"model": m, "content": [{"type": "text", "text": "hi"}]}});
+        t.append(0, &[reply("claude-opus-5-5"), reply("<synthetic>")]);
+        assert_eq!(t.model.as_deref(), Some("claude-opus-5-5"));
+        t.append(2, &[json!({"type": "turn_context", "model": "gpt-6-sol"})]);
+        assert_eq!(t.model.as_deref(), Some("gpt-6-sol"));
     }
 }

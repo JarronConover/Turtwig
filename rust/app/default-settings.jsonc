@@ -921,6 +921,17 @@
                   ]
                 },
                 {
+                  "if": ".selected.chat.kind != \"subagent\"",
+                  "id": "composer-model",
+                  "type": "row",
+                  "tooltip": "{{ (.agents[.selected.chat.agent].name // .selected.chat.agent) + \": the model its newest reply came from\" }}",
+                  "style": { "padding": [6, 6, 0, 6], "gap": 5, "align": "center", "font_size": 12, "color": "@text_muted" },
+                  "children": [
+                    { "type": "icon", "props": { "name": "{{ .agents[.selected.chat.agent].icon // \"bot\" }}", "size": 12 } },
+                    { "type": "text", "props": { "text": "{{ .agents[.selected.chat.agent] as $a | ({\"anthropic\": \"Anthropic\", \"openai\": \"OpenAI\"}[$a.provider // \"\"] // $a.name // .selected.chat.agent) + \" · \" + (.selected.chat.model_used // $a.model // \"default model\") }}" } }
+                  ]
+                },
+                {
                   "if": "(.selected.background | length) > 0",
                   "id": "background-work",
                   "type": "row",

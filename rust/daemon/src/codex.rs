@@ -21,6 +21,8 @@ pub fn entry(line: &[u8]) -> Value {
         ("event_msg", "agent_message") => assistant(vec![text(&s("message"))]),
         ("event_msg", "agent_reasoning") => assistant(vec![json!({"type": "thinking", "thinking": s("text")})]),
         ("event_msg", "error") => Some(json!({"type": "system", "level": "error", "content": s("message")})),
+        // The model each turn runs on (the app shows the newest).
+        ("turn_context", _) => Some(json!({"type": "turn_context", "model": s("model")})),
         _ => None,
     };
     out.unwrap_or_else(|| json!({ "type": kind }))
