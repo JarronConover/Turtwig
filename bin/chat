@@ -1357,15 +1357,16 @@ def is_orchestrator(chat):
         pattern and re.search(pattern, f"{chat.get('name', '')} {chat.get('dir', '')}"))
 
 
-def note_moved(chats, src, dst, section, moved):
-    """Tell the moved orchestrators (move_note_kinds) what changed, so they pick up where they were."""
+def note_moved(chats, src, dst, section, moved, running):
+    """Tell the moved orchestrators (move_note_kinds) that were running (ids in `running`) what changed,
+    so they pick up where they were."""
     text = option("move_note", "")
     if not text:
         return
     paths = "; ".join(f"{a} -> {b}" for a, b in moved.items() if a != b) or "unchanged"
     text = text.replace("{from}", label(src)).replace("{to}", label(dst)).replace("{section}", section["name"] if section else "").replace("{paths}", paths)
     for c in chats:
-        if is_orchestrator(c) and c["status"] == "running":
+        if is_orchestrator(c) and c["id"] in running:
             try:
                 on_host(dst, "send", c["id"], text, "--wait", str(option("move_note_wait_secs", 90)))
             except (SystemExit, subprocess.CalledProcessError) as err:
@@ -1395,6 +1396,8 @@ def cmd_move(args):
             {"folder": f, "branch": b, "repo": r, "chats": [c["name"] for c in cs]} for f, b, r, cs in groups]}, indent=2))
         return
     labels = {f: sc_store(src)["worktrees"].get(f, {}).get("label") for f, *_ in groups}
+    # Before the move, which marks each chat "moving" as it stops it.
+    running = {c["id"] for *_, cs in groups for c in cs if c["status"] == "running"}
     moved, done = {}, []
     for folder, branch, repo, chats in groups:
         try:
@@ -1421,7 +1424,7 @@ def cmd_move(args):
         sync_files(src, dst, moved)
     if section:
         move_section(section, src, dst, moved, labels)
-    note_moved(every, src, dst, section, moved)
+    note_moved(every, src, dst, section, moved, running)
     leftovers = [f for f, b, *_ in groups if b and f]
     if leftovers and option("move_leftovers", "hide") != "keep":
         # The move is done; tidying what it left on src needn't hold it up (agent-box.log has the outcome).
