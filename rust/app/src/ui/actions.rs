@@ -37,7 +37,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("section.new", "{name?, assign?: path, host?}: create a section (asks for a name when it's missing) on host (default the worktree's, else `app.default_host`), and move that worktree into it"),
     ("section.rename", "{id, name?}: rename (asks when name is missing)"),
     ("section.delete", "{id}"),
-    ("section.move", "{id?, index? | target: section id with zone}: reorder a section (id defaults to `dragged`)"),
+    ("section.move", "{id?, index? | target: section id with zone}: reorder a section (id defaults to `dragged`); with several machines' sections the order is kept in `state.section_order`"),
     ("worktree.move", "{path?, section?: id|null, before?: path | target: path with zone: before|after}: move a worktree into a section (null: under its project), next to another or last (path defaults to `dragged`; drops supply `zone`); a project listing several machines' worktrees keeps its order in `state.worktree_order:REPO`"),
     ("project.move", "{repo?, index? | target: repo with zone}: reorder a project (repo defaults to `dragged`)"),
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
@@ -801,6 +801,14 @@ impl Workspace {
                     if let Some(from) = self.model.sections.iter().position(|x| x.id == id) {
                         let sec = self.model.sections.remove(from);
                         self.model.sections.insert(index.min(self.model.sections.len()), sec);
+                    }
+                    // Its machine only knows its own sections: the index among those, and the mixed order in state.
+                    let host = self.section_hosts.get(&id).cloned();
+                    let mine: Vec<&String> = self.model.sections.iter().map(|x| &x.id).filter(|x| self.section_hosts.get(*x) == host.as_ref()).collect();
+                    let index = mine.iter().position(|x| **x == id).unwrap_or(index);
+                    if self.section_hosts.values().collect::<std::collections::HashSet<_>>().len() > 1 {
+                        let order = self.model.sections.iter().map(|x| Value::String(x.id.clone())).collect();
+                        self.set_state("section_order".into(), Value::Array(order));
                     }
                     self.call(Call::SectionMove { id, index }, cx);
                 }
