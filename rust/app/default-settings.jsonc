@@ -102,7 +102,7 @@
     "spinner": { "icon": null, "period_ms": 800 },
     "spin_period_ms": 900,
     // How often spinners and pulsing lines redraw (each redraws the region around it). 0 holds them still.
-    "animation_fps": 30
+    "animation_fps": 60
   },
 
   "state": {
