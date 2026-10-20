@@ -1554,7 +1554,7 @@ impl Workspace {
 
     pub(crate) fn set_state(&mut self, key: String, value: Value) {
         self.ctx_rev += 1;
-        let regroup = key == "sidebar_projects";
+        let regroup = key == "sidebar_projects" || key == "moving";
         // null forgets the key: back to the settings' starting value, if any.
         if value.is_null() {
             match self.settings.state.get(&key) {
@@ -1748,6 +1748,12 @@ impl Workspace {
                 for w in &mut s.items {
                     w.host = h.clone();
                 }
+                // A section a move is taking to another machine exists on both under one id for a moment:
+                // one section, its rows leaving one machine and arriving on the other.
+                if let Some(same) = merged.sections.iter_mut().find(|x| x.id == s.id) {
+                    same.items.extend(s.items);
+                    continue;
+                }
                 section_hosts.insert(s.id.clone(), h.clone());
                 merged.sections.push(s);
             }
@@ -1764,6 +1770,19 @@ impl Workspace {
         if let Some(saved) = self.state.get("section_order").and_then(Value::as_array).filter(|_| section_machines.len() > 1) {
             let saved: Vec<&str> = saved.iter().filter_map(Value::as_str).collect();
             apply_order(&mut merged.sections, &saved, |s| (s.id.clone(), section_hosts.get(&s.id).cloned().unwrap_or_default()));
+        }
+        // state.moving {to, branches, at}: a move under way (bin/chat sets it). Once a branch's worktree is on
+        // `to`, it takes the place of its copy on the machine it's leaving, so the row switches machines.
+        // One left behind by a move that never finished counts for 10 minutes at most.
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
+        if let Some(mv) = self.state.get("moving").filter(|v| v["at"].as_f64().is_some_and(|at| now - at < 600.)) {
+            let to = mv["to"].as_str().unwrap_or_default();
+            let branches: HashSet<&str> = mv["branches"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            let arrived: HashSet<(String, String)> = merged.projects.iter().flat_map(|p| &p.items).chain(merged.sections.iter().flat_map(|s| &s.items))
+                .filter(|w| w.host == to).filter_map(|w| w.branch.clone().filter(|b| branches.contains(b.as_str())).map(|b| (w.repo.clone(), b))).collect();
+            for list in merged.projects.iter_mut().map(|p| &mut p.items).chain(merged.sections.iter_mut().map(|s| &mut s.items)) {
+                switch_rows(list, to, &branches, &arrived);
+            }
         }
         self.model = merged;
         self.apply_just_sent();
@@ -4648,6 +4667,29 @@ pub(crate) fn apply_order<T: Clone>(items: &mut Vec<T>, saved: &[&str], key: imp
     *items = ordered;
 }
 
+/** A list with each leaving worktree (a `branches` one not on `to`) swapped for its copy on `to`: in its
+place when the copy is in the same list, left out when the copy is elsewhere (`arrived`). */
+pub(crate) fn switch_rows(items: &mut Vec<Worktree>, to: &str, branches: &HashSet<&str>, arrived: &HashSet<(String, String)>) {
+    let key = |w: &Worktree| w.branch.clone().filter(|b| branches.contains(b.as_str())).map(|b| (w.repo.clone(), b));
+    let here: HashMap<(String, String), usize> = items.iter().enumerate().filter(|(_, w)| w.host == to).filter_map(|(i, w)| key(w).map(|k| (k, i))).collect();
+    let mut placed = HashSet::new();
+    let mut out = Vec::with_capacity(items.len());
+    for (i, w) in items.iter().enumerate() {
+        let at = match key(w) {
+            Some(k) if w.host != to => match here.get(&k) {
+                Some(&j) => j,
+                None if arrived.contains(&k) => continue,
+                None => i,
+            },
+            _ => i,
+        };
+        if placed.insert(at) {
+            out.push(items[at].clone());
+        }
+    }
+    *items = out;
+}
+
 /** A waiting chat's choices: the first question's options (or `chat.waiting_options`), and the text of
 every question when there are several (`chat.waiting_all_questions`). */
 pub(crate) fn waiting_options(w: &Value, settings: &Settings) -> (Vec<String>, Vec<String>) {
@@ -4783,6 +4825,20 @@ mod order_tests {
 
     fn paths(items: &[Worktree]) -> Vec<&str> {
         items.iter().map(|w| w.path.as_str()).collect()
+    }
+
+    #[test]
+    fn a_moving_worktree_takes_its_copys_place_once_it_arrives() {
+        let b = |path: &str, branch: &str, host: &str| Worktree { branch: Some(branch.into()), ..w(path, host) };
+        let branches = ["x", "y"].into_iter().collect();
+        let arrived = [("".to_string(), "x".to_string()), ("".to_string(), "z".to_string())].into_iter().collect();
+        let mut items = vec![b("m-x", "x", "mac"), b("m-y", "y", "mac"), b("m-o", "o", "mac"), b("b-x", "x", "box")];
+        super::switch_rows(&mut items, "box", &branches, &arrived);
+        // x arrived: its box copy takes its row; y hasn't yet, so the Mac's stays.
+        assert_eq!(paths(&items), ["b-x", "m-y", "m-o"]);
+        let mut items = vec![b("m-x", "x", "mac")];
+        super::switch_rows(&mut items, "box", &branches, &arrived);
+        assert!(items.is_empty(), "its copy is in another list");
     }
 
     #[test]
