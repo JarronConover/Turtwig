@@ -52,12 +52,12 @@ class Templates(unittest.TestCase):
     def test_claude_argv_is_unchanged(self):
         v = {"bin": "claude", "id": "c1", "session": "c1", "from": "s0", "name": "n", "model": "opus", "prompt": "go"}
         self.assertEqual(chat.fill(chat.AGENTS["claude"]["new"], v),
-                         ["claude", "--session-id", "c1", "--remote-control", "n", "--model", "opus", "go"])
+                         ["claude", "--session-id", "c1", "--remote-control", "n", "--settings", chat.CLAUDE_SETTINGS, "--model", "opus", "go"])
         self.assertEqual(chat.fill(chat.AGENTS["claude"]["resume"], dict(v, model=None)),
-                         ["claude", "--resume", "c1", "--remote-control", "n"])
+                         ["claude", "--resume", "c1", "--remote-control", "n", "--settings", chat.CLAUDE_SETTINGS])
         self.assertEqual(chat.fill(chat.AGENTS["claude"]["fork"], v),
                          ["claude", "--resume", "s0", "--fork-session", "--session-id", "c1", "--remote-control", "n",
-                          "--model", "opus"])
+                          "--settings", chat.CLAUDE_SETTINGS, "--model", "opus"])
 
     def test_codex_trusts_the_folder_inline(self):
         argv = chat.fill(chat.AGENTS["codex"]["resume"], {"bin": "codex", "session": "s1", "realdir": "/w", "model": None})
