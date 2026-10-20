@@ -107,6 +107,10 @@ def backup_create(name="agent-box-state"):
         except RuntimeError:
             p = glab_api("-X", "POST", "projects", "-f", f"name={name}", "-f", f"path={name}", "-f", "visibility=private",
                          "-f", "description=a.box backups: chats, settings and uncommitted work (keep private)")
+            # GitLab protects the first branch pushed (a machine's sessions branch, which every backup
+            # force-pushes) unless a rule already covers it.
+            glab_api("-X", "POST", f"projects/{p['id']}/protected_branches", "-f", "name=sessions/*",
+                     "-f", "allow_force_push=true", "-f", "push_access_level=40")
     except (RuntimeError, ValueError, KeyError) as e:
         return {"ok": False, "error": str(e)}
     if p.get("visibility") != "private":
