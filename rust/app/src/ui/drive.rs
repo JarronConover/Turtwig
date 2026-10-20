@@ -17,6 +17,7 @@ pub(crate) const ACTIONS: &[(&str, &str)] = &[
     ("ui.submit", "{id}: press Enter in an `input` node (runs its `on.submit` with the text as `.input`)"),
     ("ui.focus / ui.blur", "{id}: give keyboard focus to a `focusable` node or an `input` (its `focus` style and `on.focus` apply); ui.blur takes it away"),
     ("ui.hover", "{id, off?}: show a node as hovered (its `hover` style, `on.hover_start`) until another ui.hover or `off: true` (`on.hover_end`)"),
+    ("ui.keystroke", "{key}: press a key (\"tab\", \"cmd-k\") through the app's own key handling, as if typed into whatever has focus (not a real key press: macOS never sees it)"),
     ("ui.key", "{key, id?}: press a key on a node (default: the focused one): its `on.key` entry, else Enter / Space click it"),
     ("ui.scroll", "{id | handle, to?: top | bottom | <y> , row?, by?, x?}: scroll a `scroll` node (its `props.handle`, or its id) or a virtual list; `row` brings that row into view, `by` scrolls that many points (positive: down)"),
     ("ui.drop", "{key, value, kind?, zone?}: drop `value` on the target with that `drop_key` (inspect.json `ui.drops`) as a drag would: its matching `on.drop_item` runs if its `valid` check passes"),
@@ -256,6 +257,16 @@ pub(crate) fn dispatch(ws: &mut Workspace, name: &str, a: &Map<String, Value>, w
                     Some(c) => ws.run_action(&c, window, cx),
                     None => ws.exprs.note(format!("ui.key: {id} has no `{key}` key")),
                 },
+            }
+        }
+        "ui.keystroke" => {
+            // Through the app's own key handling, from the focused element out, as a key press would go.
+            // Once this action is done: the key's own handlers update the workspace too.
+            match gpui::Keystroke::parse(&s("key").unwrap_or_default()) {
+                Ok(k) => window.defer(cx, move |window, cx| {
+                    window.dispatch_keystroke(k, cx);
+                }),
+                Err(e) => ws.exprs.note(format!("ui.keystroke: {e}")),
             }
         }
         "ui.scroll" => {

@@ -18,6 +18,14 @@ use gpui_kit::*;
 use std::cell::Cell;
 use std::rc::Rc;
 
+actions!(terminal, [SendTab, SendBackTab]);
+
+/** Tab and shift-Tab go to the shell: the window root binds them to moving focus, and a binding in the
+terminal's own context comes first. */
+pub fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("tab", SendTab, Some("Terminal")), KeyBinding::new("shift-tab", SendBackTab, Some("Terminal"))]);
+}
+
 /** The 16 ANSI colors unless `terminal.palette` gives its own. */
 const PALETTE: [u32; 16] = [
     0x1e1e1f, 0xe5534b, 0x3fb950, 0xd29922, 0x488efc, 0xbc8cff, 0x39c5cf, 0xd6d6d8, 0x6e7681, 0xff7b72,
@@ -562,6 +570,13 @@ impl TerminalView {
         self.keys = keys.iter().map(|(k, v)| (normalize_combo(k), v.clone())).collect();
     }
 
+    fn send_key(&mut self, bytes: &[u8]) {
+        self.blink_epoch = std::time::Instant::now();
+        self.term.selection = None;
+        self.to_bottom();
+        self.write(bytes);
+    }
+
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
         let m = &k.modifiers;
@@ -818,6 +833,8 @@ impl Render for TerminalView {
             .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
+            .on_action(cx.listener(|t, _: &SendTab, _, _| t.send_key(b"\t")))
+            .on_action(cx.listener(|t, _: &SendBackTab, _, _| t.send_key(b"\x1b[Z")))
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))

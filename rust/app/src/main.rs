@@ -111,6 +111,7 @@ fn main() {
     });
     app.run(|cx: &mut App| {
         gpui_kit::init(cx);
+        terminal::init(cx);
         // The component kit's light or dark look (the app's own colors are `theme`).
         let settings = settings::load().unwrap_or_default();
         let os = cx.window_appearance();
