@@ -2885,7 +2885,8 @@
     "repos": {
       "redo": { "primary": "~/dev/redo", "worktrees": "~/dev/redo-worktrees/{branch_slug}", "hue": 210, "forge_project": "redo/redoapp/product/redo",
                 "worktree_tool": { "bin": "wt", "bin_paths": ["~/redo-monorepo-worktrees/bin/wt", "~/dev/redo-monorepo-worktrees/bin/wt"],
-                                   "create": ["{bin}", "{branch}", "--no-start"], "remove": ["{bin}", "remove", "{path}", ["{force}"]],
+                                   "create": ["{bin}", "{branch}", "--no-start"], "adopt": ["{bin}", "adopt", "{path}", "--no-start"],
+                                   "remove": ["{bin}", "remove", "{path}", ["{force}"]],
                                    "delete": ["{bin}", "remove", "{path}", "--force", "--purge-cache"], "list": ["{bin}", "list"],
                                    "start": ["{bin}", "start", "{branch}", "-d"], "partial_note": "run `wt adopt {path}` before starting its stack",
                                    "env": { "WT_PRIMARY": "{primary}", "WT_BASE": "{worktrees_base}" } } },

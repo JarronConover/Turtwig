@@ -21,7 +21,7 @@ fi
 # Snapshot the worktree (tracked changes, untracked non-ignored files, and
 # unpushed commits) as a bundle. Never touches HEAD, the index, or a branch.
 snapshot_worktree() {
-  local top key head tree snap out tmpidx size base
+  local top key head tree snap out tmpidx size base ref
   top=$(git -C "$1" rev-parse --show-toplevel 2> /dev/null) || return 0
   key=$(wip_key "$top") || return 0
   head=$(git -C "$top" rev-parse HEAD 2> /dev/null) || return 0
@@ -43,9 +43,11 @@ snapshot_worktree() {
   fi
 
   snap=$(git -C "$top" commit-tree "$tree" -p "$head" -m "agent-box wip")
-  git -C "$top" update-ref refs/agent-box/wip "$snap"
+  # A ref of this worktree's own (refs are shared by all of a repo's worktrees, and they snapshot at once).
+  ref=refs/agent-box/wip-$(printf '%s' "$top" | git hash-object --stdin | cut -c1-12)
+  git -C "$top" update-ref "$ref" "$snap"
   mkdir -p "$(dirname "$out")"
-  if ! git -C "$top" bundle create "$out.bundle.tmp" refs/agent-box/wip --not "$base" > /dev/null 2>&1; then
+  if ! git -C "$top" bundle create "$out.bundle.tmp" "$ref" --not "$base" > /dev/null 2>&1; then
     rm -f "$out.bundle.tmp"
     log "bundle failed: $top"
     return 0
@@ -124,11 +126,17 @@ drain_queue() {
   shopt -s nullglob
   entries=("$AGENT_QUEUE_DIR"/*)
   shopt -u nullglob
-  for entry in ${entries[@]+"${entries[@]}"}; do
-    [ -f "$entry" ] || continue
-    snapshot_worktree "$(cat "$entry")"
-    rm -f "$entry"
-  done
+  # Each worktree once (a move queues a chat's folder and its worktree), snapshot_parallel at a time.
+  local max dir n=0
+  max=$(opt snapshot_parallel); max=${max:-6}
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    snapshot_worktree "$dir" &
+    n=$((n + 1))
+    [ $((n % max)) -eq 0 ] && wait
+  done < <(for entry in ${entries[@]+"${entries[@]}"}; do [ -f "$entry" ] && cat "$entry"; done | sort -u)
+  wait
+  rm -f ${entries[@]+"${entries[@]}"}
   exec 7>&-
 }
 

@@ -101,6 +101,7 @@ HOST_FALLBACK = {
 WT_TOOL = {
     "bin": "wt", "bin_paths": ["~/redo-monorepo-worktrees/bin/wt", "~/dev/redo-monorepo-worktrees/bin/wt"],
     "create": ["{bin}", "{branch}", "--no-start"],
+    "adopt": ["{bin}", "adopt", "{path}", "--no-start"],
     "remove": ["{bin}", "remove", "{path}", ["{force}"]],
     "delete": ["{bin}", "remove", "{path}", "--force", "--purge-cache"],
     "list": ["{bin}", "list"],
@@ -345,8 +346,8 @@ def worktrees_base(repo):
 
 
 def worktree_tool(repo):
-    """The repo's worktree tool ({bin, create, remove, delete, list, start, env}), its bin resolved; None:
-    plain `git worktree`."""
+    """The repo's worktree tool ({bin, create, adopt, remove, delete, list, start, env}), its bin resolved;
+    None: plain `git worktree`. adopt: set up a folder plain git checked out (so several check out at once)."""
     tool = (repos().get(repo) or {}).get("worktree_tool")
     if not tool:
         return None

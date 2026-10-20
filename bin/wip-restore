@@ -57,24 +57,27 @@ else
   git -C "$AGENT_SESSIONS_DIR" show "FETCH_HEAD:wip/$key.bundle" > "$bundle"
 fi
 
+# The snapshot's ref, whatever the sending machine named it.
+ref=$(git -C "$top" bundle list-heads "$bundle" 2> /dev/null | awk 'NR == 1 { print $2 }' || true)
+ref=${ref:-refs/agent-box/wip}
 head=$(jq -r .head <<< "$meta")
 snap=$(jq -r .snap <<< "$meta")
 # The bundle holds what isn't on origin; fetch from origin only when this
 # checkout lacks a commit it builds on: the branch and its base first, then
 # everything. Other sessions fetch in the same repo and hold ref locks, so
 # the full fetch retries.
-if ! git -C "$top" fetch -q "$bundle" refs/agent-box/wip 2> /dev/null; then
+if ! git -C "$top" fetch -q "$bundle" "$ref" 2> /dev/null; then
   branch=$(jq -r .branch <<< "$meta")
   base=$(git -C "$top" symbolic-ref -q --short refs/remotes/origin/HEAD 2> /dev/null | sed 's|^origin/||')
   for b in "$branch" ${base:-main}; do
     git -C "$top" fetch -q origin "+refs/heads/$b:refs/remotes/origin/$b" 2> /dev/null || true
   done
-  if ! git -C "$top" fetch -q "$bundle" refs/agent-box/wip 2> /dev/null; then
+  if ! git -C "$top" fetch -q "$bundle" "$ref" 2> /dev/null; then
     for i in $(seq 1 "$fetch_tries"); do
       git -C "$top" fetch -q origin 2> /dev/null && break
       sleep $((i * 3))
     done
-    git -C "$top" fetch -q "$bundle" refs/agent-box/wip
+    git -C "$top" fetch -q "$bundle" "$ref"
   fi
 fi
 

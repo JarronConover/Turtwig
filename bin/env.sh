@@ -10,6 +10,9 @@ if [ -z "${AGENT_HOST:-}" ]; then
   AGENT_BOX_REPO_URL="${AGENT_BOX_REPO_URL:-}"
 fi
 
+# A stalled connection to GitLab fails within seconds instead of holding the backup lock for good.
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3}"
+
 AGENT_HOME="$HOME/.agent-box"
 AGENT_STATE_DIR="$AGENT_HOME/state"
 AGENT_SESSIONS_DIR="$AGENT_HOME/sessions"

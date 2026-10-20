@@ -79,6 +79,8 @@ class Store:
             STORE.write_text(json.dumps(self.data, indent=2) + "\n")
             branch = abxcfg.state_branch()
             git("add", STORE.name, cwd=STATE_DIR)
+        # SC_NO_COMMIT: the caller (a move) commits it with its own state writes.
+        if self.dirty and not exc[0] and not os.environ.get("SC_NO_COMMIT"):
             git("commit", "-q", "-m", f"sc: {self.message}", cwd=STATE_DIR)
             git("pull", "-q", "--rebase", "--autostash", "origin", branch, cwd=STATE_DIR)
             git("push", "-q", "origin", f"HEAD:{branch}", cwd=STATE_DIR)
@@ -208,6 +210,27 @@ def section_cmd(args):
                     meta.pop("section")
             s.save(f"section delete {sec['name']}")
             out("section_deleted", {"section_id": sec["section_id"]})
+        elif sub == "place":
+            # For a move: the section (made with the same id when this machine has none by its name) holding
+            # these worktrees first, in order, with their labels.
+            spec = json.loads(args[1])
+            want = spec["section"]
+            sec = by(want["section_id"]) or by(want["name"])
+            created = sec is None
+            if created:
+                sec = {"section_id": want["section_id"], "name": want["name"], "kind": "manual", "rules": [],
+                       "priority": None, "collapsed": bool(want.get("collapsed")), "built_in": False}
+                secs.append(sec)
+            placed = [real(w["path"]) for w in spec["worktrees"]]
+            rest = sorted((p for p, m in s.data["worktrees"].items() if m.get("section") == sec["section_id"] and p not in placed),
+                          key=lambda p: s.data["worktrees"][p].get("order") if s.data["worktrees"][p].get("order") is not None else 1e9)
+            for n, path in enumerate(placed + rest):
+                s.wt(path).update(section=sec["section_id"], order=n)
+            for w in spec["worktrees"]:
+                if w.get("label"):
+                    s.wt(w["path"])["label"] = w["label"]
+            s.save(f"section place {sec['name']}")
+            out("section_placed", {"section_id": sec["section_id"], "created": created})
         elif sub in ("assign", "unassign"):
             path = caller_worktree()
             if sub == "assign":

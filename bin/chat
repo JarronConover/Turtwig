@@ -8,6 +8,7 @@ this host alive, so chats survive crashes and workspace restarts.
 """
 
 import argparse
+import contextlib
 import datetime
 import fcntl
 import hashlib
@@ -19,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -154,7 +156,16 @@ def run(cmd, **kw):
 
 
 def git_state(*args, check=True):
-    return run(["git", "-C", str(STATE_DIR), *args], capture_output=True, check=check)
+    # A stalled connection to GitLab fails within seconds instead of holding a move (or anything) forever.
+    env = {**os.environ, "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND") or
+           "ssh -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"}
+    try:
+        return run(["git", "-C", str(STATE_DIR), *args], capture_output=True, check=check, env=env,
+                   timeout=option("state_git_timeout_secs", 60))
+    except subprocess.TimeoutExpired as err:
+        if check:
+            raise SystemExit(f"git {' '.join(args)} in the state repo timed out")
+        return subprocess.CompletedProcess(err.cmd, 124, "", "timed out")
 
 
 class StateLock:
@@ -212,17 +223,22 @@ def load(chat_id):
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def save(chat, message, wait=False):
+def save(chat, message, wait=False, commit=True):
     """Write the registry entry now; the state branch commit and push happen in the background
-    (they take seconds), unless wait."""
+    (they take seconds), unless wait. commit False: the caller commits several at once."""
     with StateLock():
         REGISTRY.mkdir(parents=True, exist_ok=True)
         chat["updated_at"] = now()
         (REGISTRY / f"{chat['id']}.json").write_text(json.dumps(chat, indent=2) + "\n")
-        if wait:
+        if wait and commit:
             commit_state(message)
-    if not wait:
+    if commit and not wait:
         background("_commit", message)
+
+
+def commit_now(message):
+    with StateLock():
+        commit_state(message)
 
 
 def background(*args):
@@ -312,28 +328,35 @@ def worktree_dir(chat):
     return abxcfg.worktree_path(chat.get("repo") or default_repo(), chat["branch"])
 
 
-def make_worktree(repo, branch, wt_dir, base=None):
+def make_worktree(repo, branch, wt_dir, base=None, fetched=False, serial=None):
     """A worktree of `branch` at `wt_dir` (made from origin/<base or the default branch> when the branch is
-    new), by the repo's worktree_tool or plain `git worktree add`."""
+    new), by the repo's worktree_tool or plain `git worktree add`. fetched: the caller fetched the branch
+    and its base. serial: a lock held around the tool's part, when several are made at once (wt hands out
+    slots); with an `adopt` command the checkout itself is plain git, outside it."""
     primary = primary_of(repo)
     # Just this branch (and the base a new one starts from), not the whole remote: a monorepo fetch takes seconds.
-    fetch_branch(primary, branch)
+    if not fetched:
+        fetch_branch(primary, branch)
     local = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/heads/{branch}"],
                 check=False, capture_output=True).returncode == 0
     remote = run(["git", "-C", str(primary), "rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}"],
                  check=False, capture_output=True).returncode == 0
     if not local and not remote:
         base = base or abxcfg.default_base(primary)
-        fetch_branch(primary, base)
+        if not fetched:
+            fetch_branch(primary, base)
         run(["git", "-C", str(primary), "branch", "-q", "--no-track", branch, f"origin/{base}"])
-    tool = abxcfg.worktree_tool(repo)
-    if not tool or not tool.get("create"):
+    tool = abxcfg.worktree_tool(repo) or {}
+    adopt = bool(tool.get("adopt"))
+    if adopt or not tool.get("create"):
         wt_dir.parent.mkdir(parents=True, exist_ok=True)
         run(["git", "-C", str(primary), "worktree", "add", "-q", str(wt_dir), branch])
-        return
+        if not adopt:
+            return
     values = {"branch": branch, "path": str(wt_dir), "name": wt_dir.name}
-    made = run(abxcfg.tool_argv(repo, tool, "create", **values), env=abxcfg.tool_env(repo, tool, **values),
-               capture_output=True, check=False, cwd=str(primary))
+    with serial or contextlib.nullcontext():
+        made = run(abxcfg.tool_argv(repo, tool, "adopt" if adopt else "create", **values),
+                   env=abxcfg.tool_env(repo, tool, **values), capture_output=True, check=False, cwd=str(primary))
     if not wt_dir.exists():
         sys.exit(f"{tool['bin']} didn't create {wt_dir}: {made.stderr.strip()}")
     if made.returncode != 0:
@@ -344,7 +367,7 @@ def make_worktree(repo, branch, wt_dir, base=None):
 
 
 def fetch_branch(checkout, branch):
-    run(["git", "-C", str(checkout), "fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+    run(["git", "-C", str(checkout), "fetch", "-q", "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
         check=False, capture_output=True)
 
 
@@ -872,27 +895,51 @@ def snapshot_now():
                      start_new_session=True)
 
 
-def release_here(chat, snapshot=True):
-    """Stop the chat here and snapshot its WIP (snapshot False: the caller does, once for all)."""
-    chat["status"] = "moving"
-    save(chat, f"chat moving: {chat['name']}", wait=True)
-    if tmux_alive(tmux_name(chat)):
-        run(["tmux", "kill-session", "-t", tmux_name(chat)], check=False)
-    if chat.get("branch") and chat.get("dir"):
-        queue = AGENT_HOME / "queue"
-        queue.mkdir(parents=True, exist_ok=True)
-        (queue / f"move-{chat['id']}").write_text(chat["dir"] + "\n")
-    if snapshot:
-        snapshot_now()
+def release_all(chats, dirs=()):
+    """For a move: stop the chats here (one state push saying they're moving) and snapshot their WIP and
+    dirs' (worktrees without chats) at once; returns {id: {dir, real}}."""
+    for chat in chats:
+        adopt_worktree_branch(chat)
+        chat["status"] = "moving"
+        save(chat, "", commit=False)
+    for chat in chats:
+        if tmux_alive(tmux_name(chat)):
+            run(["tmux", "kill-session", "-t", tmux_name(chat)], check=False)
+    for chat in chats:
+        # a.box's own process first, so only another program's copy (super.engineering) is left to stop.
+        stop_elsewhere(chat)
+        if chat.get("branch") and chat.get("dir"):
+            queue_snapshot(chat["dir"])
+    for d in dirs:
+        queue_snapshot(d)
+    # The push saying they're moving (before the other machine writes them) goes out while the WIP saves.
+    push = threading.Thread(target=commit_now, args=(f"chats moving: {', '.join(c['name'] for c in chats)}",))
+    if chats:
+        push.start()
+    snapshot_now()
+    if chats:
+        push.join()
+    folders = [c["dir"] for c in chats if c.get("branch") and c.get("dir")] + list(dirs)
+    return {"chats": {c["id"]: {"dir": c.get("dir"), "real": os.path.realpath(c["dir"]) if c.get("dir") else None} for c in chats},
+            "keys": sorted({k for k in map(wip_key, folders) if k})}
 
 
-def take_over(chat, directory):
+def wip_key(folder):
+    """Where a worktree's WIP snapshot is filed (env.sh's wip_key): its origin's name, then its branch."""
+    origin = run(["git", "-C", folder, "remote", "get-url", "origin"], check=False, capture_output=True).stdout.strip()
+    branch = run(["git", "-C", folder, "symbolic-ref", "--quiet", "--short", "HEAD"], check=False, capture_output=True).stdout.strip()
+    if not (origin and branch):
+        return None
+    return f"{os.path.basename(origin.removesuffix('.git'))}/{branch.replace('/', '~')}"
+
+
+def take_over(chat, directory, commit=True):
     chat["host"] = HOST
     chat["dir"] = str(directory)
     chat["status"] = "running"
     # The Remote Control link takes seconds to show up; `_rc` records it once it does.
     launch(chat, resume=True, wait_rc=False)
-    save(chat, f"chat moved to {HOST}: {chat['name']}", wait=True)
+    save(chat, f"chat moved to {HOST}: {chat['name']}", wait=True, commit=commit)
     background("_rc", chat["id"])
 
 
@@ -902,41 +949,33 @@ def prepare_here(chat, frm):
     return primary_of(chat.get("repo") or default_repo())
 
 
-def real_dir(host, directory):
-    """The folder with symlinks resolved, on its own machine (Claude Code files a session under that)."""
-    if host != HOST:
-        out = sh_on(host, f"realpath -m {shlex.quote(str(directory))}")
-        return out.stdout.strip().splitlines()[-1] if out.returncode == 0 and out.stdout.strip() else str(directory)
-    return os.path.realpath(str(directory))
-
-
-def send_wip(src, dst):
-    """src's WIP snapshots straight to dst's incoming/<src>/wip, so a move needn't wait for them to go
-    through GitLab. Also makes incoming/<src>/claude there, for stage_transcript."""
+def send_wip(src, dst, keys=None):
+    """src's WIP snapshots (only `keys`' when given) straight to dst's incoming/<src>/wip, so a move needn't
+    wait for them to go through GitLab. Also makes incoming/<src>/claude there, for stage_transcript."""
     local_end(src, dst)
     inc = f".agent-box/incoming/{src}"
     sh_on(dst, f"mkdir -p {inc}/wip {inc}/claude")
     if src != HOST:
         sh_on(src, "mkdir -p .agent-box/sessions/wip")
-    out = run([*rsync(), "-a", "--delete", endpoint(src, ".agent-box/sessions/wip/"), endpoint(dst, f"{inc}/wip/")],
+    only = ["--include", "*/", *[x for k in keys for x in ("--include", f"{k}.json", "--include", f"{k}.bundle")],
+            "--exclude", "*"] if keys is not None else []
+    out = run([*rsync(), "-a", "--delete", *only, endpoint(src, ".agent-box/sessions/wip/"), endpoint(dst, f"{inc}/wip/")],
               check=False, capture_output=True)
     if out.returncode != 0:
         sys.exit(f"couldn't send the {label(src)}'s work to the {label(dst)}: {out.stderr.strip()}")
 
 
-def stage_transcript(src_dir, dst_host, chat_id):
-    """Copy a chat's transcript from here to dst's incoming/<here>/claude; `_receive` there files it under
-    the folder it gets, so the copy needs no round trip to learn that folder first."""
+def stage_transcript(src, dst, chat_id, src_dir, src_real):
+    """Copy a chat's transcript from src to dst's incoming/<src>/claude; `_receive` there files it under
+    the folder it gets, so the copy needs no round trip to learn that folder first. Compressed, and
+    against the copy the last move left there, so a long chat sends only what's new."""
     chat = load(chat_id)
     if chat and agent_def(chat).get("session") == "discovered":
-        return copy_rollouts(HOST, dst_host, chat)
-    real = os.path.realpath(str(src_dir))
-    slugs = dict.fromkeys([project_slug(real), project_slug(src_dir)])
-    slug = next((s for s in slugs if (PROJECTS / s / f"{chat_id}.jsonl").exists()), None)
-    if not slug:
-        sys.exit(f"no conversation for {chat_id} here (looked in {', '.join(slugs)})")
-    run([*rsync(), "-a", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
-         f"{PROJECTS / slug}/", endpoint(dst_host, f".agent-box/incoming/{HOST}/claude/")], check=False, capture_output=True)
+        return copy_rollouts(src, dst, chat)
+    for slug in dict.fromkeys([project_slug(src_real or src_dir), project_slug(src_dir)]):
+        run([*rsync(), "-az", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
+             endpoint(src, f".claude/projects/{slug}/"), endpoint(dst, f".agent-box/incoming/{src}/claude/")],
+            check=False, capture_output=True)
 
 
 def place_transcript(chat_id, directory, frm):
@@ -950,32 +989,11 @@ def place_transcript(chat_id, directory, frm):
         sys.exit(f"the conversation didn't arrive from the {label(frm)}")
     dest = PROJECTS / project_slug(os.path.realpath(str(directory)))
     dest.mkdir(parents=True, exist_ok=True)
-    os.replace(main, dest / main.name)
+    # Copies: the staged ones stay as the base the next move's rsync sends only changes against.
+    shutil.copy2(main, dest / main.name)
     sub = stage / chat_id
     if sub.is_dir():
         shutil.copytree(sub, dest / chat_id, dirs_exist_ok=True)
-        shutil.rmtree(sub, ignore_errors=True)
-
-
-def copy_transcript(src_host, src_dir, dst_host, dst_dir, chat_id, src_real=None):
-    """Copy a chat's transcript (and its subagent folder) between machines. Claude Code keeps a session
-    under its folder's real path, so both ends use that (a box chat in ~/dev/redo lives under ~/project);
-    the copy is checked, so a move never resumes a chat whose conversation didn't arrive."""
-    chat = load(chat_id)
-    if chat and agent_def(chat).get("session") == "discovered":
-        return copy_rollouts(src_host, dst_host, chat)
-    local_end(src_host, dst_host)
-    src_real, dst_real = src_real or real_dir(src_host, src_dir), real_dir(dst_host, dst_dir)
-    sources = [project_slug(src_real)] + ([project_slug(src_dir)] if project_slug(src_dir) != project_slug(src_real) else [])
-    dst = f".claude/projects/{project_slug(dst_real)}/"
-    sh_on(dst_host, f"mkdir -p {shlex.quote(dst)}")
-    for slug in sources:
-        src = f".claude/projects/{slug}/"
-        run([*rsync(), "-a", "--include", f"{chat_id}.jsonl", "--include", f"{chat_id}/***", "--exclude", "*",
-             endpoint(src_host, src), endpoint(dst_host, dst)], check=False, capture_output=True)
-        if sh_on(dst_host, f"test -s {shlex.quote(dst + chat_id + '.jsonl')}").returncode == 0:
-            return
-    sys.exit(f"the conversation didn't copy to the {label(dst_host)} (looked in {', '.join(sources)} on the {label(src_host)})")
 
 
 def cmd__transcript_paths(args):
@@ -1102,6 +1120,12 @@ def move_group(chat, scope):
     chats = [c for c in all_chats() if c["host"] == src and c["status"] != "archived" and c.get("dir")]
     store = sc_store(src)
     known = sorted({c["dir"] for c in chats} | set(store["worktrees"]))
+    if src == HOST and scope != "chat":
+        # Resolving every folder takes a git call or two each: here, only the ones that can move along.
+        mine = os.path.realpath(chat.get("dir") or "")
+        sid = store["worktrees"].get(mine, {}).get("section") if scope == "section" else None
+        along = {p for p, m in store["worktrees"].items() if sid and m.get("section") == sid} | {mine}
+        known = sorted(p for p in known if os.path.realpath(p) in along)
     info = json.loads(on_host(src, "_paths", *known) or "{}") if known else {}
     real = {p: v[0] for p, v in info.items()}
     here = real.get(chat.get("dir"))
@@ -1126,59 +1150,100 @@ def move_group(chat, scope):
     return section, groups
 
 
-def move_worktree(folder, branch, repo, chats, src, dst):
-    """Move one worktree's chats (or, with none, its WIP) from src to dst; returns its folder on dst.
-    One of them is this machine. The WIP and transcripts go straight across over ssh, and the far end does
-    its part in one call."""
+def move_batch(groups, src, dst, section=None, labels=None):
+    """Move worktrees' chats (or, with none, their WIP) from src to dst all at once: one stop and snapshot
+    on src, one copy of the WIP, and one call that makes every worktree on dst (into `section`, with
+    `labels`) and starts the chats there. One end is this machine. Returns [(folder, new dir or None,
+    error or None)] in the groups' order."""
     local_end(src, dst)
+    chats = [c for *_, cs in groups for c in cs]
     status = {c["id"]: c["status"] for c in chats}
+    chatless = [f for f, b, _, cs in groups if b and not cs]
     if src == HOST:
-        for c in chats:
-            adopt_worktree_branch(c)
-            # a.box's own process first, so only another program's copy (super.engineering) is left to stop.
-            release_here(c, snapshot=False)
-            stop_elsewhere(c)
-        if not chats and branch:
-            queue_snapshot(folder)
-        snapshot_now()
-        send_wip(src, dst)
-        for c in chats:
-            stage_transcript(c["dir"], dst, c["id"])
-        spec = {"repo": repo, "branch": branch or "", "from": src,
-                "chats": [{"id": c["id"], "stopped": status[c["id"]] == "stopped"} for c in chats]}
-        new = json.loads(on_host(dst, "_receive", json.dumps(spec)))["dir"]
+        released = release_all(chats, chatless)
     else:
-        released = json.loads(on_host(src, "_release", *[c["id"] for c in chats],
-                                      *(["--dir", folder] if not chats and branch else [])) or "{}")
-        send_wip(src, dst)
-        pull_state()
-        new = str(ensure_worktree({"branch": branch, "repo": repo}, restore_from=src, incoming=True) if branch else primary_of(repo))
-        for c in chats:
-            c = find(c["id"])
-            copy_transcript(src, folder, dst, new, c["id"], src_real=(released.get(c["id"]) or {}).get("real"))
-            take_over(c, Path(new))
-            if status[c["id"]] == "stopped":
-                set_status(find(c["id"]), "stopped")
-    if src == HOST:
-        pull_state()
-    return new
+        args = [c["id"] for c in chats] + [x for f in chatless for x in ("--dir", f)]
+        released = json.loads(on_host(src, "_release", *args) or "{}")
+    send_wip(src, dst, released.get("keys"))
+    each(stage_transcript, [(src, dst, c["id"], c.get("dir"), (released.get("chats", {}).get(c["id"]) or {}).get("real")) for c in chats])
+    spec = {"from": src, "section": section and {k: section.get(k) for k in ("section_id", "name", "collapsed")},
+            "worktrees": [{"folder": f, "repo": r, "branch": b or "", "label": (labels or {}).get(f),
+                           "chats": [{"id": c["id"], "stopped": status[c["id"]] == "stopped"} for c in cs]}
+                          for f, b, r, cs in groups]}
+    if dst == HOST:
+        out = receive_all(spec)
+    else:
+        out = json.loads(on_host(dst, "_receive", json.dumps(spec)))
+    return [(w["folder"], w.get("dir"), w.get("error")) for w in out["worktrees"]]
+
+
+def each(fn, calls):
+    """fn(*args) for every args in calls, side by side; returns when all have."""
+    threads = [threading.Thread(target=fn, args=a) for a in calls]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+def receive_all(spec):
+    """A move's receiving end: the worktrees (into the section first, so each lands in it), each with the
+    sender's WIP (send_wip), made side by side; then each chat's staged transcript filed under its folder
+    (stage_transcript) and the chats running here, or stopped as they were. One state push for it all."""
+    pull_state()
+    frm, wts = spec["from"], spec["worktrees"]
+    for w in wts:
+        w["dir"] = str((checked_out(primary_of(w["repo"]), w["branch"]) or worktree_dir(w)) if w["branch"] else primary_of(w["repo"]))
+    if spec.get("section"):
+        place = {"section": spec["section"], "worktrees": [{"path": w["dir"], "label": w.get("label")} for w in wts if w["branch"]]}
+        shim = Path(__file__).resolve().parent.parent / "shim" / "sc"
+        run(["python3", str(shim), "section", "place", json.dumps(place), "--json"], capture_output=True, check=False,
+            env={**os.environ, "SC_NO_COMMIT": "1"})
+    making, bases = threading.Lock(), {}
+    for w in wts:
+        if w["branch"] and not Path(w["dir"]).exists():
+            primary = primary_of(w["repo"])
+            bases[primary] = abxcfg.default_base(primary)
+
+    def prepare(w):
+        try:
+            if w["branch"]:
+                exists = Path(w["dir"]).exists()
+                if not exists:
+                    fetch_branch(primary_of(w["repo"]), w["branch"])
+                    make_worktree(w["repo"], w["branch"], Path(w["dir"]), fetched=True, serial=making)
+                wip_restore(Path(w["dir"]), frm, fresh=not exists, incoming=True)
+        except (SystemExit, Exception) as err:
+            w["error"] = str(err).strip() or type(err).__name__
+    each(fetch_branch, list(bases.items()))
+    each(prepare, [(w,) for w in wts])
+    for w in wts:
+        for c in w["chats"] if not w.get("error") else []:
+            try:
+                place_transcript(c["id"], w["dir"], frm)
+                chat = find(c["id"])
+                take_over(chat, Path(w["dir"]), commit=False)
+                if c.get("stopped"):
+                    set_status(chat, "stopped")
+            except (SystemExit, Exception) as err:
+                w["error"] = str(err).strip() or type(err).__name__
+        if w.get("error"):
+            w.pop("dir", None)
+    arrived = AGENT_HOME / "arrived"
+    arrived.mkdir(parents=True, exist_ok=True)
+    # Only a move's tidying, minutes later, reads them.
+    for old in arrived.iterdir():
+        if time.time() - old.stat().st_mtime > 86400:
+            old.unlink(missing_ok=True)
+    for w in wts:
+        if w.get("dir"):
+            (arrived / hashlib.sha1(os.path.realpath(w["dir"]).encode()).hexdigest()[:16]).write_text(f"{time.time()}\n")
+    commit_now(f"moved to {HOST}: {', '.join(Path(w['folder']).name for w in wts if w.get('dir'))}")
+    return {"worktrees": wts}
 
 
 def cmd__receive(args):
-    """A move's receiving end in one call: the worktree with the sender's WIP (send_wip), each chat's
-    staged transcript filed under it (stage_transcript), and the chats running here, or stopped as they were."""
-    spec = json.loads(args.spec)
-    pull_state()
-    if spec["branch"]:
-        new = ensure_worktree({"branch": spec["branch"], "repo": spec["repo"]}, restore_from=spec["from"], incoming=True)
-    else:
-        new = primary_of(spec["repo"])
-    for c in spec["chats"]:
-        place_transcript(c["id"], new, spec["from"])
-        take_over(find(c["id"]), Path(new))
-        if c.get("stopped"):
-            set_status(find(c["id"]), "stopped")
-    print(json.dumps({"dir": str(new)}))
+    print(json.dumps(receive_all(json.loads(args.spec))))
 
 
 def put_back(chats, src):
@@ -1247,22 +1312,6 @@ def sync_files(src, dst, moved):
         sh_on(dst, "python3 -c " + shlex.quote(REWRITE), input=payload)
 
 
-def move_section(section, src, dst, moved, labels):
-    """The section on dst: found by name or made, holding the moved worktrees in their order, with their
-    labels. On src it's removed (its worktrees stay, under their projects) unless move_keep_section."""
-    existing = next((s for s in sc_store(dst)["sections"] if s["name"] == section["name"]), None)
-    target = existing or sc_on(dst, "section", "create", section["name"], "--manual").get("response", {})
-    sid = target.get("section_id")
-    for i, new in enumerate(moved.values()):
-        if sid:
-            sc_on(dst, "worktree", "move", new, "--section", sid, "--index", str(i))
-        old = next((o for o, n in moved.items() if n == new), None)
-        if labels.get(old):
-            sc_on(dst, "worktree", "set-label", new, labels[old])
-    if not option("move_keep_section", False):
-        sc_on(src, "section", "delete", section["section_id"])
-
-
 SAVED_CHECK = r"""
 . "$(dirname "$0")/env.sh"
 top=$1
@@ -1299,6 +1348,13 @@ def cmd__drop_worktree(args):
         return
     if not saved_remotely(path):
         print(f"kept {path}: it has work that isn't in the snapshot the other machine got")
+        return
+    try:
+        came = float((AGENT_HOME / "arrived" / hashlib.sha1(path.encode()).hexdigest()[:16]).read_text())
+    except (OSError, ValueError):
+        came = 0
+    if args.since and came > args.since:
+        print(f"kept {path}: a later move brought it back")
         return
     branch = run(["git", "-C", path, "branch", "--show-current"], check=False, capture_output=True).stdout.strip()
     primary = str(primary_of(repo))
@@ -1396,58 +1452,120 @@ def cmd_move(args):
             {"folder": f, "branch": b, "repo": r, "chats": [c["name"] for c in cs]} for f, b, r, cs in groups]}, indent=2))
         return
     labels = {f: sc_store(src)["worktrees"].get(f, {}).get("label") for f, *_ in groups}
+    every = [c for *_, cs in groups for c in cs]
+    started = time.time()
+    # Tells the app each row switches machines as its worktree lands, instead of showing on both.
+    app_do([{"do": "state.set", "key": "moving", "value": {"to": dst, "branches": [b for _, b, *_ in groups if b], "at": started}}])
+    try:
+        finish_move(chat, src, dst, section, groups, labels, every, started)
+    finally:
+        app_do([{"do": "state.set", "key": "moving", "value": None}])
+
+
+def finish_move(chat, src, dst, section, groups, labels, every, started):
     # Before the move, which marks each chat "moving" as it stops it.
     running = {c["id"] for *_, cs in groups for c in cs if c["status"] == "running"}
-    moved, done = {}, []
-    for folder, branch, repo, chats in groups:
-        try:
-            moved[folder] = move_worktree(folder, branch, repo, chats, src, dst)
-            done.append((folder, branch, repo, chats))
-        except (SystemExit, Exception) as err:
-            move_log(f"moving {folder} to the {label(dst)} failed: {err}")
-            put_back(chats, src)
-            # Everything that already moved goes back, so a section never ends up split across machines.
-            stuck = []
-            for f, b, r, cs in reversed(done):
-                try:
-                    move_worktree(moved[f], b, r, [find(c["id"]) for c in cs], dst, src)
-                except (SystemExit, Exception) as back:
-                    move_log(f"couldn't move {moved[f]} back to the {label(src)}: {back}")
-                    stuck.append(b or f)
-            # The app shows only the last line, so the message is one; agent-box.log has the rest.
-            why = f"{branch or folder}: {str(err).strip().splitlines()[0] if str(err).strip() else type(err).__name__}"
-            if stuck:
-                sys.exit(f"move failed ({why}) and {', '.join(stuck)} couldn't come back, so it's still on the {label(dst)} (agent-box.log)")
-            sys.exit(f"move failed, left on the {label(src)} ({why}; agent-box.log)")
-    every = [c for *_, cs in groups for c in cs]
-    if section or any(is_orchestrator(c) for c in every):
-        sync_files(src, dst, moved)
-    if section:
-        move_section(section, src, dst, moved, labels)
-    note_moved(every, src, dst, section, moved, running)
+    try:
+        results = move_batch(groups, src, dst, section, labels)
+    except (SystemExit, Exception) as err:
+        move_log(f"moving to the {label(dst)} failed: {err}")
+        put_back(every, src)
+        sys.exit(f"move failed, left on the {label(src)} ({one_line(err)}; agent-box.log)")
+    moved = {f: d for f, d, e in results if d}
+    failed = [(f, e) for f, d, e in results if not d]
+    if failed:
+        for f, e in failed:
+            move_log(f"moving {f} to the {label(dst)} failed: {e}")
+        by_folder = {f: (b, r, cs) for f, b, r, cs in groups}
+        put_back([c for f, _ in failed for c in by_folder[f][2]], src)
+        # What already moved goes back, so a section never ends up split across machines.
+        stuck = []
+        if moved:
+            pull_state(force=True)
+            back = [(d, by_folder[f][0], by_folder[f][1], [find(c["id"]) for c in by_folder[f][2]]) for f, d in moved.items()]
+            try:
+                stuck = [d for d, nd, e in move_batch(back, dst, src) if not nd]
+            except (SystemExit, Exception) as err:
+                move_log(f"couldn't move back to the {label(src)}: {err}")
+                stuck = list(moved.values())
+            if section and any(x["section_id"] == section["section_id"] for x in sc_store(dst)["sections"]):
+                sc_on(dst, "section", "delete", section["section_id"])
+            if option("move_leftovers", "hide") != "keep":
+                background("_leave_behind", dst, *[d for d in moved.values() if d not in stuck])
+        f, e = failed[0]
+        why = f"{by_folder[f][0] or f}: {one_line(e)}"
+        if stuck:
+            sys.exit(f"move failed ({why}) and {len(stuck)} worktree(s) couldn't come back, so they're still on the {label(dst)} (agent-box.log)")
+        sys.exit(f"move failed, left on the {label(src)} ({why}; agent-box.log)")
     leftovers = [f for f, b, *_ in groups if b and f]
-    if leftovers and option("move_leftovers", "hide") != "keep":
-        # The move is done; tidying what it left on src needn't hold it up (agent-box.log has the outcome).
-        background("_leave_behind", src, *leftovers)
+    # Straight away, so the rows switch machines in the sidebar rather than show on both for a while: the
+    # moved folders (an earlier move may have hidden them) shown, what's left on src hidden.
+    set_hidden(list(moved.values()), False)
+    if option("move_leftovers", "hide") != "keep":
+        set_hidden(leftovers, True)
+    # The chats already run on dst; the rest needn't hold the move up (agent-box.log has the outcome).
+    background("_after_move", json.dumps({"at": started, "src": src, "dst": dst, "section": section, "moved": moved, "running": sorted(running),
+                                          "chats": [c["id"] for c in every], "leftovers": leftovers}))
     what = f"section {section['name']}" if section else chat["name"]
     print(f"moved {what} to the {label(dst)}: {len(every)} chat(s), {len(groups)} worktree(s)")
     for a, b in moved.items():
         print(f"  {a} -> {b}")
 
 
+def one_line(err):
+    text = str(err).strip()
+    return text.splitlines()[0] if text else type(err).__name__
+
+
+def after_move(spec):
+    """A finished move's tidying, in order: take the section off src, copy the factory ledgers, tell the
+    orchestrators, then remove or delete what it left on src (move_leftovers; cmd_move hid it already)."""
+    src, dst, section, moved = spec["src"], spec["dst"], spec["section"], spec["moved"]
+    pull_state()
+    chats = [c for c in (load(i) for i in spec["chats"]) if c]
+    mode = option("move_leftovers", "hide")
+    if section and not option("move_keep_section", False):
+        sc_on(src, "section", "delete", section["section_id"])
+    if section or any(is_orchestrator(c) for c in chats):
+        sync_files(src, dst, moved)
+    note_moved(chats, src, dst, section, moved, set(spec["running"]))
+    if mode in ("remove", "delete"):
+        for folder in spec["leftovers"]:
+            try:
+                out = on_host(src, "_drop_worktree", folder, mode, "--since", str(spec["at"])).strip()
+            except (SystemExit, subprocess.CalledProcessError) as err:
+                out = f"kept {folder}: {err}"
+            print(out)
+            # Kept: shown again; gone: nothing left to hide, and a later move may bring it back.
+            set_hidden([folder], False)
+
+
+def set_hidden(folders, hidden):
+    """Hide folders in the app's sidebar (state hidden:PATH), or show them again, in one call."""
+    app_do([{"do": "state.set", "key": f"hidden:{f}", "value": hidden or None} for f in folders])
+
+
+def app_do(actions):
+    """Run actions in the app on this machine, if it's running."""
+    if not actions:
+        return
+    try:
+        run([str(Path(__file__).parent / "abx"), "do", json.dumps(actions)], check=False, capture_output=True,
+            timeout=option("abx_call_secs", 15))
+    except subprocess.TimeoutExpired:
+        print(f"the app didn't take {json.dumps(actions)[:200]}", file=sys.stderr)
+
+
+def cmd__after_move(args):
+    out = subprocess.run([sys.executable, __file__, "_after_move_now", args.spec], capture_output=True, text=True)
+    move_log(out.stdout + out.stderr)
+
+
 def cmd__release(args):
-    """Stop chats here for a move and snapshot their WIP (and --dir's, for a worktree without chats) in
+    """Stop chats here for a move and snapshot their WIP (and each --dir's, for worktrees without chats) in
     one go; prints {id: {dir, real}}."""
     pull_state()
-    out = {}
-    for cid in args.chats:
-        chat = find(cid)
-        release_here(chat, snapshot=False)
-        out[chat["id"]] = {"dir": chat.get("dir"), "real": os.path.realpath(chat["dir"]) if chat.get("dir") else None}
-    if args.dir:
-        queue_snapshot(args.dir)
-    snapshot_now()
-    print(json.dumps(out))
+    print(json.dumps(release_all([find(c) for c in args.chats], args.dir or [])))
 
 
 def cmd__prepare(args):
@@ -1698,15 +1816,19 @@ def main():
     h.set_defaults(fn=cmd__snapshot)
     h = sub.add_parser("_release")
     h.add_argument("chats", nargs="*")
-    h.add_argument("--dir")
+    h.add_argument("--dir", action="append")
     h.set_defaults(fn=cmd__release)
     for name, fn in [("_leave_behind", cmd__leave_behind), ("_leave_behind_now", lambda a: leave_behind(a.src, a.folders))]:
         h = sub.add_parser(name)
         h.add_argument("src")
         h.add_argument("folders", nargs="+")
         h.set_defaults(fn=fn)
+    for name, fn in [("_after_move", cmd__after_move), ("_after_move_now", lambda a: after_move(json.loads(a.spec)))]:
+        h = sub.add_parser(name)
+        h.add_argument("spec")
+        h.set_defaults(fn=fn)
     h = sub.add_parser("_receive")
-    h.add_argument("spec", help="JSON: {repo, branch, from, chats: [{id, stopped}]}")
+    h.add_argument("spec", help="JSON: {from, section?, worktrees: [{folder, repo, branch, label?, chats: [{id, stopped}]}]}")
     h.set_defaults(fn=cmd__receive)
     h = sub.add_parser("_snapshot_branch")
     h.add_argument("branch")
@@ -1721,6 +1843,7 @@ def main():
     h = sub.add_parser("_drop_worktree")
     h.add_argument("dir")
     h.add_argument("mode", choices=["remove", "delete"])
+    h.add_argument("--since", type=float, help="keep it if a move brought it here after this time")
     h.set_defaults(fn=cmd__drop_worktree)
     h = sub.add_parser("_paths")
     h.add_argument("paths", nargs="*")
