@@ -2116,7 +2116,7 @@ impl Workspace {
                 // A section's orchestrator leads it; its workers follow.
                 let mut shown = self.visible_items(&s.items, |_| true);
                 if self.settings.get("sidebar.orchestrators_first").and_then(Value::as_bool) != Some(false) {
-                    shown.sort_by_key(|w| !self.chats_of(w).iter().any(|c| c.kind == "orchestrator"));
+                    shown.sort_by_key(|w| !self.chats_of(w).iter().any(|c| self.is_orchestrator(c)));
                 }
                 let gaps = self.drop_gaps(&shown);
                 let (gap, gap_end) = &section_gap;
@@ -2426,8 +2426,18 @@ impl Workspace {
             o.insert("last_message".into(), last.map(|t| Value::String(t.chars().take(self.settings.num("chat.last_message_chars", 280.) as usize).collect())).unwrap_or(Value::Null));
             let activity = self.transcripts.get(&c.id).filter(|_| c.state == "working").map(|t| t.activity()).unwrap_or_default();
             o.insert("activity".into(), Value::String(activity));
+            o.insert("orchestrator".into(), Value::Bool(self.is_orchestrator(c)));
         }
         v
+    }
+
+    /** Whether a chat leads its section (the sidebar draws the others under it): `chat.orchestrator`, a jq
+    test of the chat, default its kind being "orchestrator". */
+    pub(crate) fn is_orchestrator(&self, c: &Chat) -> bool {
+        match self.settings.chat.get("orchestrator").and_then(Value::as_str) {
+            Some(code) => self.exprs.truthy(code, &crate::ui::expr::to_val(&serde_json::to_value(c).unwrap_or(Value::Null))),
+            None => c.kind == "orchestrator",
+        }
     }
 
     pub(crate) fn select(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {

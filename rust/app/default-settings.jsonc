@@ -327,10 +327,10 @@
                               "type": "WorktreeRow",
                               "props": {
                                 "w": "{{ .w }}", "in_section": true,
-                                "child": "{{ (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) }}"
+                                "child": "{{ (.w.chats | any(.orchestrator) | not) and (.s.items | any(.chats | any(.orchestrator))) }}"
                               }
                             },
-                            { "id": "wt-chats", "type": "WorktreeChats", "props": { "w": "{{ .w }}", "indent": "{{ if (.w.chats | any(.kind == \"orchestrator\") | not) and (.s.items | any(.chats | any(.kind == \"orchestrator\"))) then 44 else 32 end }}" } }
+                            { "id": "wt-chats", "type": "WorktreeChats", "props": { "w": "{{ .w }}", "indent": "{{ if (.w.chats | any(.orchestrator) | not) and (.s.items | any(.chats | any(.orchestrator))) then 44 else 32 end }}" } }
                           ]
                         }
                       ]
@@ -602,8 +602,8 @@
           ]
         },
         { "if": ".props.child", "type": "icon", "props": { "name": "corner-down-right", "size": 12, "color": "@text_faint" }, "style": { "margin": [0, -2, 0, -14] } },
-        { "if": ".props.w.chats | any(.kind == \"orchestrator\")", "type": "icon", "props": { "name": "workflow", "size": 14, "color": "@accent" }, "tooltip": "Orchestrator" },
-        { "if": ".props.in_section and (.props.w.chats | any(.kind == \"orchestrator\") | not)", "type": "Badge", "props": { "letter": "{{ .props.w.letter }}", "hue": "{{ .props.w.hue }}", "size": 16 } },
+        { "if": ".props.w.chats | any(.orchestrator)", "type": "icon", "props": { "name": "workflow", "size": 14, "color": "@accent" }, "tooltip": "Orchestrator" },
+        { "if": ".props.in_section and (.props.w.chats | any(.orchestrator) | not)", "type": "Badge", "props": { "letter": "{{ .props.w.letter }}", "hue": "{{ .props.w.hue }}", "size": 16 } },
         { "if": ".props.in_section and .props.w.emoji", "type": "text", "props": { "text": "{{ .props.w.emoji }}" }, "style": { "width": 16, "shrink": 0, "font_size": 14 } },
         {
           "type": "row",
@@ -2416,6 +2416,10 @@
     "open_when": ["alive", "working", "waiting", "running_elsewhere"],
     // A reply "asks" (the chat.question sound) when it ends with one of these.
     "asks_endings": ["?"],
+    // Which chats lead their section, the others drawn under them (jq on a chat; `.orchestrator` in views).
+    // Chats brought in from super.engineering are all kind "feature", so a /ship-feature name or an
+    // "…orchestrator" folder counts too.
+    "orchestrator": ".kind == \"orchestrator\" or (.name | test(\"(?i)ship.feature\")) or ((.dir // \"\") | split(\"/\") | last // \"\" | test(\"(?i)orchestrat\"))",
     // A chat shows as working this long after you send, until its hook says so.
     "working_after_send_secs": 10,
     // Wait at least this long between queued messages to one chat.
