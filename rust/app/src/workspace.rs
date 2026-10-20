@@ -347,6 +347,10 @@ pub struct Workspace {
     script_timers: HashMap<u64, Task<()>>,
     pub(crate) ctx_rev: u64,
     ctx_cache: Option<(u64, std::time::Instant, std::rc::Rc<str>)>,
+    /** context_data, and what it was built for: (ctx_rev, model seq, transcript revisions, frame). */
+    ctx_data: std::cell::RefCell<Option<((u64, u64, u64, u64), std::time::Instant, Val)>>,
+    chat_json_memo: std::cell::RefCell<Option<HashMap<String, Value>>>,
+    orchestrator_memo: std::cell::RefCell<HashMap<String, (String, bool)>>,
     pub(crate) focused: bool,
     /** Events waiting for a window to run in: (name, extra context fields). */
     pending_events: Vec<(String, Map<String, Value>)>,
@@ -596,6 +600,9 @@ impl Workspace {
             script_timers: HashMap::new(),
             ctx_rev: 0,
             ctx_cache: None,
+            ctx_data: Default::default(),
+            chat_json_memo: Default::default(),
+            orchestrator_memo: Default::default(),
             focused: true,
             pending_events: vec![("app.start".into(), Map::new())],
             pending_requests: vec![],
@@ -1577,7 +1584,11 @@ impl Workspace {
     }
 
     fn on_incoming(&mut self, host: &str, msg: Incoming, window: &mut Window, cx: &mut Context<Self>) {
-        self.ctx_rev += 1;
+        // Terminal output isn't in the context, transcripts count by their own revision, and hook events
+        // (many a second while agents work) show in it only for inspecting: none rebuild it.
+        if !matches!(msg, Incoming::Event(Event::TermOutput { .. } | Event::Transcript { .. } | Event::Hook(_))) {
+            self.ctx_rev += 1;
+        }
         match msg {
             Incoming::Connected => {
                 self.host_up.insert(host.to_string(), true);
@@ -2070,8 +2081,40 @@ impl Workspace {
         v.as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
     }
 
-    /** Everything expressions can read, rebuilt each frame: model, state, theme, selection, app. */
+    /** Everything expressions can read: model, state, theme, selection, app. The bulk is rebuilt only when
+    something it shows changed (`ctx_rev`, a model push, a transcript) or `perf.context_max_age_ms` passed,
+    so frames that only animate (spinners, motion) reuse it; layout is fresh every frame. */
     pub(crate) fn context(&self) -> Val {
+        let transcripts: u64 = self.transcripts.values().map(|t| t.revision).fold(0, u64::wrapping_add);
+        let key = (self.ctx_rev, self.model.last_seq as u64, transcripts, self.render_generation);
+        let max_age = self.settings.num("perf.context_max_age_ms", 500.);
+        let fresh = |k: &(u64, u64, u64, u64), at: &std::time::Instant| {
+            (k.0, k.1, k.2) == (key.0, key.1, key.2) && (at.elapsed().as_secs_f64() * 1000.) < max_age && !self.dragging
+        };
+        let data = match self.ctx_data.borrow().as_ref() {
+            // The same frame asks more than once (render, flush): reuse it then too.
+            Some((k, at, v)) if fresh(k, at) || *k == key => Some(v.clone()),
+            _ => None,
+        };
+        let data = data.unwrap_or_else(|| {
+            let t = std::time::Instant::now();
+            let v = self.context_data();
+            self.perf.borrow_mut().spans.insert("context_build", t.elapsed().as_secs_f32() * 1000.);
+            *self.ctx_data.borrow_mut() = Some((key, std::time::Instant::now(), v.clone()));
+            v
+        });
+        let layout = self.layout_context();
+        match &data {
+            Val::Obj(_) => {
+                let app = crate::ui::expr::with(&crate::ui::expr::first_field(&data, "app"), vec![("layout".into(), layout)]);
+                crate::ui::expr::with(&data, vec![("app".into(), app)])
+            }
+            _ => data,
+        }
+    }
+
+    fn context_data(&self) -> Val {
+        *self.chat_json_memo.borrow_mut() = Some(HashMap::new());
         let worktrees: Vec<Value> = self
             .model
             .projects
@@ -2227,15 +2270,8 @@ impl Workspace {
                 }).collect::<Vec<_>>(),
             },
         }));
-        let layout = self.layout_context();
-        let ctx = crate::ui::expr::with(&ctx, vec![("settings".into(), self.settings_val.clone())]);
-        match &ctx {
-            Val::Obj(_) => {
-                let app = crate::ui::expr::with(&crate::ui::expr::first_field(&ctx, "app"), vec![("layout".into(), layout)]);
-                crate::ui::expr::with(&ctx, vec![("app".into(), app)])
-            }
-            _ => ctx,
-        }
+        *self.chat_json_memo.borrow_mut() = None;
+        crate::ui::expr::with(&ctx, vec![("settings".into(), self.settings_val.clone())])
     }
 
     /** `.settings`: the merged settings without the bulky parts the rest of the context already shows or
@@ -2414,6 +2450,19 @@ impl Workspace {
     }
 
     fn chat_json(&self, c: &Chat) -> Value {
+        // One build of the context shows a chat several times (the chat list, its worktree, its row); the
+        // memo lives only while one is being built.
+        if let Some(v) = self.chat_json_memo.borrow().as_ref().and_then(|m| m.get(&c.id)) {
+            return v.clone();
+        }
+        let v = self.chat_json_fresh(c);
+        if let Some(m) = self.chat_json_memo.borrow_mut().as_mut() {
+            m.insert(c.id.clone(), v.clone());
+        }
+        v
+    }
+
+    fn chat_json_fresh(&self, c: &Chat) -> Value {
         let mut v = serde_json::to_value(c).unwrap_or(Value::Null);
         if let Value::Object(o) = &mut v {
             o.insert("active".into(), Value::Bool(self.current_chat().map(|x| x.id == c.id).unwrap_or(false)));
@@ -2437,10 +2486,17 @@ impl Workspace {
     /** Whether a chat leads its section (the sidebar draws the others under it): `chat.orchestrator`, a jq
     test of the chat, default its kind being "orchestrator". */
     pub(crate) fn is_orchestrator(&self, c: &Chat) -> bool {
-        match self.settings.chat.get("orchestrator").and_then(Value::as_str) {
-            Some(code) => self.exprs.truthy(code, &crate::ui::expr::to_val(&serde_json::to_value(c).unwrap_or(Value::Null))),
-            None => c.kind == "orchestrator",
+        let Some(code) = self.settings.chat.get("orchestrator").and_then(Value::as_str) else { return c.kind == "orchestrator" };
+        // What the test usually reads; a changed setting or chat tests again.
+        let key = format!("{code}\u{0}{}\u{0}{}\u{0}{}", c.kind, c.name, c.dir.as_deref().unwrap_or(""));
+        if let Some((k, yes)) = self.orchestrator_memo.borrow().get(&c.id) {
+            if *k == key {
+                return *yes;
+            }
         }
+        let yes = self.exprs.truthy(code, &crate::ui::expr::to_val(&serde_json::to_value(c).unwrap_or(Value::Null)));
+        self.orchestrator_memo.borrow_mut().insert(c.id.clone(), (key, yes));
+        yes
     }
 
     pub(crate) fn select(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {

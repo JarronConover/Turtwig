@@ -43,9 +43,9 @@ impl Perf {
 }
 
 impl Workspace {
-    /** Rewrites inspect.json when what it describes changed (checked at most twice a second). */
+    /** Rewrites inspect.json when what it describes changed (checked at most every `inspect.interval_ms`). */
     pub(crate) fn write_inspect(&mut self, ctx: &jaq_json::Val, window: &Window, cx: &App) {
-        if self.inspect_at.is_some_and(|t| (t.elapsed().as_millis() as f64) < self.settings.num("inspect.interval_ms", 500.)) {
+        if self.inspect_at.is_some_and(|t| (t.elapsed().as_millis() as f64) < self.settings.num("inspect.interval_ms", 2000.)) {
             return;
         }
         self.inspect_at = Some(std::time::Instant::now());

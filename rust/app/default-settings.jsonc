@@ -102,7 +102,7 @@
     "spinner": { "icon": null, "period_ms": 800 },
     "spin_period_ms": 900,
     // How often spinners and pulsing lines redraw (each redraw repaints the window). 0 holds them still.
-    "animation_fps": 30
+    "animation_fps": 12
   },
 
   "state": {
@@ -2795,7 +2795,7 @@
 
   // inspect.json, activity.log and perf, for agents.
   "inspect": {
-    "interval_ms": 500, "activity_lines": 400, "activity_chars": 600, "perf_window_secs": 2,
+    "interval_ms": 2000, "activity_lines": 400, "activity_chars": 600, "perf_window_secs": 2,
     "hook_events": 50, "transcript_items": 20, "transcript_chars": 2000, "terminal_lines": 40,
     // Presses go in activity.log too ({"input": ..., "node": id, "count": n}), to see where clicks land.
     "log_input": true,
