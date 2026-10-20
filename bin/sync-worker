@@ -21,7 +21,7 @@ fi
 # Snapshot the worktree (tracked changes, untracked non-ignored files, and
 # unpushed commits) as a bundle. Never touches HEAD, the index, or a branch.
 snapshot_worktree() {
-  local top key head tree snap out tmpidx size
+  local top key head tree snap out tmpidx size base
   top=$(git -C "$1" rev-parse --show-toplevel 2> /dev/null) || return 0
   key=$(wip_key "$top") || return 0
   head=$(git -C "$top" rev-parse HEAD 2> /dev/null) || return 0
@@ -32,15 +32,20 @@ snapshot_worktree() {
   tree=$(GIT_INDEX_FILE=$tmpidx git -C "$top" write-tree)
   rm -f "$tmpidx"
 
+  # Only the default branch counts as already on origin: other remote-tracking refs can outlive their
+  # branch (merged and deleted), and a bundle built on one couldn't be restored anywhere else.
+  base=$(git -C "$top" symbolic-ref -q refs/remotes/origin/HEAD 2> /dev/null || echo refs/remotes/origin/main)
+  git -C "$top" rev-parse -q --verify "$base" > /dev/null || base=--remotes=origin
+
   out="$AGENT_SESSIONS_DIR/wip/$key"
-  if [ -f "$out.json" ] && [ "$(jq -r '.head + " " + .tree' "$out.json")" = "$head $tree" ]; then
+  if [ -f "$out.json" ] && [ "$(jq -r '.head + " " + .tree + " " + (.base // "")' "$out.json")" = "$head $tree $base" ]; then
     return 0
   fi
 
   snap=$(git -C "$top" commit-tree "$tree" -p "$head" -m "agent-box wip")
   git -C "$top" update-ref refs/agent-box/wip "$snap"
   mkdir -p "$(dirname "$out")"
-  if ! git -C "$top" bundle create "$out.bundle.tmp" refs/agent-box/wip --not --remotes=origin > /dev/null 2>&1; then
+  if ! git -C "$top" bundle create "$out.bundle.tmp" refs/agent-box/wip --not "$base" > /dev/null 2>&1; then
     rm -f "$out.bundle.tmp"
     log "bundle failed: $top"
     return 0
@@ -48,8 +53,8 @@ snapshot_worktree() {
   mv "$out.bundle.tmp" "$out.bundle"
   jq -n --arg path "$top" --arg branch "$(git -C "$top" symbolic-ref --short HEAD)" \
     --arg head "$head" --arg tree "$tree" --arg snap "$snap" --arg host "$AGENT_HOST" \
-    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{path: $path, branch: $branch, head: $head, tree: $tree, snap: $snap, host: $host, at: $at}' > "$out.json"
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg base "$base" \
+    '{path: $path, branch: $branch, head: $head, tree: $tree, snap: $snap, host: $host, at: $at, base: $base}' > "$out.json"
   size=$(wc -c < "$out.bundle")
   [ "$size" -gt $((warn_mb * 1048576)) ] && log "large wip bundle ($size bytes): $top"
   return 0

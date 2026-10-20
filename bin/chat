@@ -1338,11 +1338,15 @@ def leave_behind(src, folders):
             print(f"left {folder} on the {label(src)}: {err}", file=sys.stderr)
 
 
+def move_log(text):
+    with open(AGENT_HOME / "log" / "agent-box.log", "a") as log:
+        for line in str(text).strip().splitlines():
+            log.write(f"{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%dT%H:%M:%SZ} [chat move] {line}\n")
+
+
 def cmd__leave_behind(args):
     out = subprocess.run([sys.executable, __file__, "_leave_behind_now", args.src, *args.folders], capture_output=True, text=True)
-    with open(AGENT_HOME / "log" / "agent-box.log", "a") as log:
-        for line in (out.stdout + out.stderr).strip().splitlines():
-            log.write(f"{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%dT%H:%M:%SZ} [chat move] {line}\n")
+    move_log(out.stdout + out.stderr)
 
 
 def is_orchestrator(chat):
@@ -1397,14 +1401,21 @@ def cmd_move(args):
             moved[folder] = move_worktree(folder, branch, repo, chats, src, dst)
             done.append((folder, branch, repo, chats))
         except (SystemExit, Exception) as err:
+            move_log(f"moving {folder} to the {label(dst)} failed: {err}")
             put_back(chats, src)
             # Everything that already moved goes back, so a section never ends up split across machines.
+            stuck = []
             for f, b, r, cs in reversed(done):
                 try:
                     move_worktree(moved[f], b, r, [find(c["id"]) for c in cs], dst, src)
-                except (SystemExit, subprocess.CalledProcessError) as back:
-                    print(f"couldn't move {f} back to the {src}: {back}", file=sys.stderr)
-            sys.exit(f"move failed, left on the {label(src)}: {err}")
+                except (SystemExit, Exception) as back:
+                    move_log(f"couldn't move {moved[f]} back to the {label(src)}: {back}")
+                    stuck.append(b or f)
+            # The app shows only the last line, so the message is one; agent-box.log has the rest.
+            why = f"{branch or folder}: {str(err).strip().splitlines()[0] if str(err).strip() else type(err).__name__}"
+            if stuck:
+                sys.exit(f"move failed ({why}) and {', '.join(stuck)} couldn't come back, so it's still on the {label(dst)} (agent-box.log)")
+            sys.exit(f"move failed, left on the {label(src)} ({why}; agent-box.log)")
     every = [c for *_, cs in groups for c in cs]
     if section or any(is_orchestrator(c) for c in every):
         sync_files(src, dst, moved)
