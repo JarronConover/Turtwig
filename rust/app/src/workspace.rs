@@ -3889,7 +3889,8 @@ impl Workspace {
                 .into_any_element()
         });
         let row_view = chat_id.clone();
-        let rows = list(state.clone(), cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| ws.transcript_row(&row_view, ix, window, cx))).size_full();
+        let owner = crate::ui::region::owner();
+        let rows = list(state.clone(), cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| ws.as_owner(&owner, window, |ws, window| ws.transcript_row(&row_view, ix, window, cx)))).size_full();
         let jump = self.jump_chip(&chat_id, &state, &theme, window, cx);
         let overlay = self.drop_overlay(&chat_id, cx);
         let shift_holds = cs.get("code_scroll").and_then(|c| c.get("shift_holds_transcript")).and_then(Value::as_bool) != Some(false);
@@ -4462,6 +4463,7 @@ impl Render for Workspace {
         let t = std::time::Instant::now();
         self.write_inspect(&ctx, window, cx);
         self.perf.borrow_mut().spans.insert("inspect", t.elapsed().as_secs_f32() * 1000.);
+        crate::ui::region::frame_if_wanted("", window);
         self.write_problems();
         let rendered = started.elapsed();
         let perf = self.perf.clone();

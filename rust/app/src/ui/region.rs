@@ -14,6 +14,46 @@ use std::rc::Rc;
 thread_local! {
     /** The regions being drawn, innermost last. */
     static OWNERS: RefCell<Vec<String>> = const { RefCell::new(vec![]) };
+    /** Drawers with a looping animation that wants frames (at this many a second), and when each last had one. */
+    static WANTED: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
+    static LAST_TICK: RefCell<HashMap<String, std::time::Instant>> = RefCell::new(HashMap::new());
+    /** Animation frames asked for, by drawer, since the last perf summary. */
+    pub(crate) static ASKED: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
+    /** Drawers waiting on a display frame for their next tick (one wait each). */
+    static WAITING: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/** An animation drawn by `owner` wants frames, `fps` a second. */
+pub(crate) fn want_frame(owner: &str, fps: f64) {
+    WANTED.with(|w| {
+        let mut w = w.borrow_mut();
+        let e = w.entry(owner.to_string()).or_insert(fps);
+        *e = e.max(fps);
+    });
+}
+
+/** After `owner` drew: once its animation's next frame is due, the view drawing now (`owner`'s) draws
+again. Display frames count the time (timers lag when the app is in the background). */
+pub(crate) fn frame_if_wanted(owner: &str, window: &mut Window) {
+    if let Some(fps) = WANTED.with(|w| w.borrow_mut().remove(owner)) {
+        if WAITING.with(|w| w.borrow_mut().insert(owner.to_string())) {
+            tick_when_due(window, owner.to_string(), window.current_view(), fps);
+        }
+    }
+}
+
+fn tick_when_due(window: &mut Window, owner: String, view: EntityId, fps: f64) {
+    window.on_next_frame(move |window, cx| {
+        let due = LAST_TICK.with(|t| t.borrow().get(&owner).is_none_or(|at| at.elapsed().as_secs_f64() >= 0.95 / fps.max(1.)));
+        if due {
+            WAITING.with(|w| w.borrow_mut().remove(&owner));
+            LAST_TICK.with(|t| t.borrow_mut().insert(owner.clone(), std::time::Instant::now()));
+            ASKED.with(|a| *a.borrow_mut().entry(owner).or_default() += 1);
+            cx.notify(view);
+        } else {
+            tick_when_due(window, owner, view, fps);
+        }
+    });
 }
 
 /** The region whose drawing is under way ("" for the window's own). */
@@ -205,6 +245,7 @@ impl Render for Region {
         let me = cx.entity().downgrade();
         let (id, node, ctx, path, motion_off) = (self.id.clone(), self.node.clone(), self.ctx.clone(), self.path.clone(), self.motion_off);
         let el = ws.update(cx, |ws, cx| ws.draw_region(&id, me, &node, &ctx, &path, motion_off, window, cx));
+        frame_if_wanted(&self.id, window);
         let size = self.size.clone();
         let measure = canvas(move |b, _, _| size.set(Some((f32::from(b.size.width), f32::from(b.size.height)))), |_, _, _, _| {}).absolute().inset_0();
         div().relative().size_full().flex().flex_col().child(el).child(measure).into_any_element()
@@ -215,6 +256,22 @@ impl Workspace {
     pub(crate) fn begin_kept(&self) -> Marks {
         let (tooltips, drops, hovers, keys, focused) = super::drive::ui(|u| (u.tooltips.len(), u.drops.len(), u.hovers.len(), u.keys.len(), u.focused.take()));
         Marks { clickables: self.clickables.len(), menus: self.menus.len(), tooltips, drops, hovers, keys, focused }
+    }
+
+    /** Draws a list row (lists draw them as they lay out, after their region's drawing) as `owner`'s:
+    what it registers is kept with that region, and its animations redraw that region. */
+    pub(crate) fn as_owner<R>(&mut self, owner: &str, window: &mut Window, f: impl FnOnce(&mut Self, &mut Window) -> R) -> R {
+        let mark = (!owner.is_empty()).then(|| {
+            push_owner(owner);
+            self.begin_kept()
+        });
+        let out = f(self, window);
+        if let Some(m) = mark {
+            pop_owner();
+            self.end_kept(owner, m);
+        }
+        frame_if_wanted(owner, window);
+        out
     }
 
     /** Moves what was registered since `m` to region `id` (added to: a list draws its rows later). */

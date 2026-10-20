@@ -488,7 +488,7 @@ impl Workspace {
         }
         let fill = look(fill_default, props.get("fill"));
         let bar = if flag(props, "indeterminate") {
-            let t = self.anim_phase(num(props, "period_ms", 1200.) as f32, cx);
+            let t = self.pulse_phase(num(props, "period_ms", 1200.) as f32, cx);
             div().absolute().top_0().h_full().w(relative(0.3)).left(relative(t * 1.3 - 0.3))
         } else {
             div().absolute().top_0().left_0().h_full().w(relative(frac))

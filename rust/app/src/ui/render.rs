@@ -72,23 +72,36 @@ impl Workspace {
     /** Where a looping animation of `period_ms` is now (0..1). Looping animations redraw at
     `motion.animation_fps` (0: they hold still) instead of every display frame, since a frame redraws the whole window. */
     pub(crate) fn anim_phase(&mut self, period_ms: f32, cx: &mut Context<Self>) -> f32 {
-        let fps = self.settings.motion.get("animation_fps").and_then(Value::as_f64).unwrap_or(30.);
+        let fps = self.settings.motion.get("animation_fps").and_then(Value::as_f64).unwrap_or(60.);
+        self.anim_phase_at(period_ms, fps, cx)
+    }
+
+    /** A slow fade (a running step's pulse) at `motion.pulse_fps`: smooth at far fewer redraws than a spin. */
+    pub(crate) fn pulse_phase(&mut self, period_ms: f32, cx: &mut Context<Self>) -> f32 {
+        let fps = self.settings.motion.get("pulse_fps").and_then(Value::as_f64).unwrap_or(20.);
+        self.anim_phase_at(period_ms, fps, cx)
+    }
+
+    fn anim_phase_at(&mut self, period_ms: f32, fps: f64, cx: &mut Context<Self>) -> f32 {
         if fps <= 0. {
             return 0.;
         }
-        // Only the region drawing it redraws (or the window, outside any).
+        // Only the region drawing it redraws (or the window, outside any), on the display frame its next
+        // frame is due (its view asks once drawn); a slow timer stands by in case nothing does.
         let owner = super::region::owner();
-        if !self.anim_ticks.contains_key(&owner) {
-            let wait = Duration::from_secs_f64(1. / fps.min(240.));
-            let o = owner.clone();
+        super::region::want_frame(&owner, fps);
+        let key = format!("{owner}@{}", fps.round());
+        if !self.anim_ticks.contains_key(&key) {
+            let wait = Duration::from_millis(250);
+            let (o, k) = (owner, key.clone());
             let task = cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(wait).await;
                 let _ = this.update(cx, |ws, cx| {
-                    ws.anim_ticks.remove(&o);
+                    ws.anim_ticks.remove(&k);
                     ws.notify_owner(&o, cx);
                 });
             });
-            self.anim_ticks.insert(owner, task);
+            self.anim_ticks.insert(key, task);
         }
         (self.anim_epoch.elapsed().as_secs_f32() * 1000. % period_ms) / period_ms
     }
@@ -757,7 +770,10 @@ impl Workspace {
         };
         // A node lifted "above" (a popover's button while it's open) stays where it is: gliding it would read
         // its deferred position as a move.
-        let moves = self.motion.borrow().enabled && !still && self.motion_off == 0 && layer != "above" && z.is_none();
+        // Only what can move on its own glides (a node with an id, an item of a `for`); the rest moves with it,
+        // and each glide costs a little every frame.
+        let own = obj.contains_key("id") || path.ends_with(']');
+        let moves = own && self.motion.borrow().enabled && !still && self.motion_off == 0 && layer != "above" && z.is_none();
         let el = if moves {
             crate::ui::motion::Motion::new(id, el, self.motion.clone()).into_any_element()
         } else if obj.contains_key("id") && !id.contains('/') {
@@ -846,17 +862,7 @@ impl Workspace {
         let bar = scrollbar_mode(props.get("scrollbar")).map(|m| gpui_kit::component::scroll::Scrollbar::vertical(&state).mode(m));
         let rows = list(state, cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| {
             let Some(row) = ws.virtual_lists.get(&list_id).and_then(|l| l.2.get(ix).cloned()) else { return div().into_any_element() };
-            // Rows are drawn as the list lays out, after its region's drawing: they're the region's all the same.
-            let mark = (!owner.is_empty()).then(|| {
-                super::region::push_owner(&owner);
-                ws.begin_kept()
-            });
-            let el = div().w_full().flex().flex_col().children(ws.render(&row.0, &row.1, &row.2, window, cx)).into_any_element();
-            if let Some(m) = mark {
-                super::region::pop_owner();
-                ws.end_kept(&owner, m);
-            }
-            el
+            ws.as_owner(&owner, window, |ws, window| div().w_full().flex().flex_col().children(ws.render(&row.0, &row.1, &row.2, window, cx)).into_any_element())
         }))
         .size_full();
         match bar {

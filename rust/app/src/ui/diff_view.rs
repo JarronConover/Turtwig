@@ -273,14 +273,16 @@ impl Workspace {
                 scroll.sig = sig;
             }
             let l = look.clone();
-            list(scroll.list.clone(), cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| diff_row(ws, &l, &r, &f, &sh, ix, window, cx))).size_full().into_any_element()
+            let owner = super::region::owner();
+            list(scroll.list.clone(), cx.processor(move |ws: &mut Workspace, ix: usize, window, cx| ws.as_owner(&owner, window, |ws, window| diff_row(ws, &l, &r, &f, &sh, ix, window, cx)))).size_full().into_any_element()
         } else {
             let (l, k, g) = (look.clone(), key.clone(), geom.clone());
+            let owner = super::region::owner();
             uniform_list("diff-rows", rows.len(), cx.processor(move |ws: &mut Workspace, range: std::ops::Range<usize>, window, cx| {
                 if let Some(Value::Object(o)) = g.borrow_mut().get_mut(&k) {
                     o.insert("visible".into(), json!([range.start, range.end]));
                 }
-                range.map(|ix| diff_row(ws, &l, &r, &f, &sh, ix, window, cx)).collect::<Vec<_>>()
+                ws.as_owner(&owner, window, |ws, window| range.map(|ix| diff_row(ws, &l, &r, &f, &sh, ix, window, cx)).collect::<Vec<_>>())
             }))
             .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
             .with_width_from_item(Some(widest))

@@ -631,7 +631,7 @@ impl Workspace {
         let icon_el = Icon::empty().path(format!("icons/{icon}.svg")).size(px(look.icon_size)).when_some(fg, |i, c| i.text_color(c));
         let title_el = div().min_w_0().truncate().child(title.to_string());
         let title_el: AnyElement = if running && self.motion.borrow().enabled {
-            let t = self.anim_phase(look.pulse_ms, cx);
+            let t = self.pulse_phase(look.pulse_ms, cx);
             title_el.opacity(pulsating_between(look.pulse_min, look.pulse_max)(t)).into_any_element()
         } else {
             title_el.into_any_element()

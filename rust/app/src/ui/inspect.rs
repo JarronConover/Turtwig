@@ -57,6 +57,7 @@ impl Perf {
             "spans_ms": self.spans,
             "regions_fresh": counts(&self.regions_fresh),
             "regions_drawn": counts(&self.regions_drawn),
+            "animation_frames": crate::ui::region::ASKED.with(|a| json!(std::mem::take(&mut *a.borrow_mut()))),
         })
     }
 }

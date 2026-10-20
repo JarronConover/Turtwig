@@ -77,6 +77,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("focus", "{area: composer | terminal | none, chat?}: put typing in a chat's message box or the selected worktree's terminal"),
     ("chat.attach_clipboard", "{chat?}: attach the files or image on the clipboard to a chat"),
     ("<a script action>", "any name a script registers with ab.action(name, fn) works as an action everywhere"),
+    ("inspect.refresh", "write inspect.json now (`abx state` asks first; otherwise it's written every `inspect.interval_ms`)"),
     ("app.snapshot", "{path?, then?}: capture the window to path (default snapshot.png in the settings folder, for agents to look at); then `then` runs with `.path`, and the `app.snapshot_done` event fires"),
     ("drop.preview", "{key, zone: before|inside|after, kind?, value?}: show a drop target's indicator without dragging (for styling), as if `value` were being dragged; cleared by the next drag"),
     ("diff.refresh", "reload the selected worktree's diff now"),
@@ -898,6 +899,8 @@ impl Workspace {
                 }
             }
             "app.snapshot" => self.snapshot(s("path"), a.get("then").cloned(), window, cx),
+            // Nothing to do: a request always ends with inspect.json written afresh.
+            "inspect.refresh" => {}
             "ui.menu" => {
                 // Run a right-click menu item without the mouse: the node by `id` (else the first whose id or
                 // tooltip contains `node`), its item by `item` (exact, else containing; submenus included).

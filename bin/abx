@@ -22,10 +22,13 @@ DIR = Path(os.environ.get("AGENT_BOX_SETTINGS_DIR", Path.home() / ".agent-box/st
 
 
 def state():
+    # A fresh one when the app answers quickly (it writes inspect.json only now and then on its own).
+    if platform.system() == "Darwin":
+        run({"do": "inspect.refresh"}, wait=True, timeout=2.0, quiet=True, pickup=1.0)
     return json.loads((DIR / "inspect.json").read_text())
 
 
-def run(action, wait=False, read=None, timeout=10.0):
+def run(action, wait=False, read=None, timeout=10.0, quiet=False, pickup=5.0):
     """Hands an action to the app. On the Mac (where the app watches its settings folder) each request is
     its own run.d/<id>.json; elsewhere run.json, which the daemon relays to the app. With wait, returns
     the app's results/<id>.json."""
@@ -47,12 +50,15 @@ def run(action, wait=False, read=None, timeout=10.0):
                 break
             time.sleep(0.05)
         inbox.write_text(json.dumps(request))
-    for _ in range(100):
+    for _ in range(int(pickup / 0.05)):
         if not inbox.exists():
             break
         time.sleep(0.05)
     else:
-        print(f"the app didn't pick up {inbox.name} (is it running?)", file=sys.stderr)
+        if quiet:
+            inbox.unlink(missing_ok=True)
+        else:
+            print(f"the app didn't pick up {inbox.name} (is it running?)", file=sys.stderr)
         return None
     if not wait:
         return {"ok": True}
