@@ -520,7 +520,9 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
         };
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
         let status = s("status").unwrap_or_default();
-        if status == "archived" {
+        // Archived chats stay listed as closed in their worktree (closing a Mac tab archives it), so only
+        // those whose folder still exists.
+        if status == "archived" && !s("dir").is_some_and(|d| std::path::Path::new(&d).is_dir()) {
             continue;
         }
         let id = s("id").unwrap_or_default();
@@ -555,7 +557,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
         let activity = track_activity(&id, pane.as_deref().filter(|_| state == "working").and_then(|p| pane_activity(p, &agent)));
         // A name nobody chose follows the agent's own title (auto_title), and the registry learns it.
         let mut name = s("name").unwrap_or_default();
-        if config::flag("auto_title", true) && crate::titles::auto_named(&v) {
+        if config::flag("auto_title", true) && status != "archived" && crate::titles::auto_named(&v) {
             if let Some(t) = crate::titles::title(&v, &agent, transcript.as_deref()).filter(|t| *t != name) {
                 crate::titles::persist(&id, &t);
                 name = t;
