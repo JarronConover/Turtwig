@@ -1131,7 +1131,7 @@ pub struct DragItem {
 }
 
 /** Where a dragged item would land: the target's `drop_key` and before | inside | after. */
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct DropHint {
     pub key: String,
     pub zone: String,

@@ -19,6 +19,7 @@ pub(crate) const ACTIONS: &[(&str, &str)] = &[
     ("ui.hover", "{id, off?}: show a node as hovered (its `hover` style, `on.hover_start`) until another ui.hover or `off: true` (`on.hover_end`)"),
     ("ui.keystroke", "{key}: press a key (\"tab\", \"cmd-k\") through the app's own key handling, as if typed into whatever has focus (not a real key press: macOS never sees it)"),
     ("ui.key", "{key, id?}: press a key on a node (default: the focused one): its `on.key` entry, else Enter / Space click it"),
+    ("ui.file_drag", "{phase: enter | move | exit | drop | sweep, x, y, paths?, to_x?, to_y?, ms?}: files dragged over the window, through the app's own drag handling (not a real drag: macOS never sees it); sweep moves from x,y to to_x,to_y over ms at 60 moves a second"),
     ("ui.scroll", "{id | handle, to?: top | bottom | <y> , row?, by?, x?}: scroll a `scroll` node (its `props.handle`, or its id) or a virtual list; `row` brings that row into view, `by` scrolls that many points (positive: down)"),
     ("ui.drop", "{key, value, kind?, zone?}: drop `value` on the target with that `drop_key` (inspect.json `ui.drops`) as a drag would: its matching `on.drop_item` runs if its `valid` check passes"),
 ];
@@ -267,6 +268,40 @@ pub(crate) fn dispatch(ws: &mut Workspace, name: &str, a: &Map<String, Value>, w
                     window.dispatch_keystroke(k, cx);
                 }),
                 Err(e) => ws.exprs.note(format!("ui.keystroke: {e}")),
+            }
+        }
+        "ui.file_drag" => {
+            let n = |k: &str| a.get(k).and_then(Value::as_f64).unwrap_or(0.) as f32;
+            let position = point(px(n("x")), px(n("y")));
+            let paths = a.get("paths").and_then(Value::as_array).map(|l| l.iter().filter_map(Value::as_str).map(std::path::PathBuf::from).collect()).unwrap_or_default();
+            if s("phase").as_deref() == Some("sweep") {
+                let (to, ms) = (point(px(n("to_x")), px(n("to_y"))), a.get("ms").and_then(Value::as_u64).unwrap_or(1000));
+                let steps = (ms / 16).max(1);
+                cx.spawn_in(window, async move |_, cx| {
+                    for i in 1..=steps {
+                        cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                        let t = i as f32 / steps as f32;
+                        let at = point(position.x + (to.x - position.x) * t, position.y + (to.y - position.y) * t);
+                        let _ = cx.update(|window, cx| window.dispatch_event(gpui::PlatformInput::FileDrop(gpui::FileDropEvent::Pending { position: at }), cx));
+                    }
+                })
+                .detach();
+                return true;
+            }
+            let event = match s("phase").as_deref() {
+                Some("enter") => Some(gpui::FileDropEvent::Entered { position, paths: gpui::ExternalPaths(paths) }),
+                Some("move") => Some(gpui::FileDropEvent::Pending { position }),
+                Some("drop") => Some(gpui::FileDropEvent::Submit { position }),
+                Some("exit") => Some(gpui::FileDropEvent::Exited),
+                other => {
+                    ws.exprs.note(format!("ui.file_drag: phase {other:?} isn't enter, move, exit or drop"));
+                    None
+                }
+            };
+            if let Some(e) = event {
+                window.defer(cx, move |window, cx| {
+                    window.dispatch_event(gpui::PlatformInput::FileDrop(e), cx);
+                });
             }
         }
         "ui.scroll" => {

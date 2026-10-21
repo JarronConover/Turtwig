@@ -325,6 +325,8 @@ pub struct Workspace {
     pub(crate) drag_item: std::rc::Rc<std::cell::RefCell<Option<(String, Value)>>>,
     /** The drag preview's second line. */
     pub(crate) drag_note: std::rc::Rc<std::cell::RefCell<String>>,
+    /** The drag state the context was last built with. */
+    drag_sig: String,
     pub(crate) drop_preview: bool,
     pub(crate) inspect_at: Option<std::time::Instant>,
     pub(crate) inspect_digest: u64,
@@ -612,6 +614,7 @@ impl Workspace {
             drop_hint: None,
             drag_item: Default::default(),
             drag_note: Default::default(),
+            drag_sig: String::new(),
             drop_preview: false,
             inspect_at: None,
             inspect_digest: 0,
@@ -2212,7 +2215,7 @@ impl Workspace {
         let key = (self.ctx_rev, self.model.last_seq as u64, transcripts, self.render_generation);
         let max_age = self.settings.num("perf.context_max_age_ms", 500.);
         let fresh = |k: &(u64, u64, u64, u64), at: &std::time::Instant| {
-            (k.0, k.1, k.2) == (key.0, key.1, key.2) && (at.elapsed().as_secs_f64() * 1000.) < max_age && !self.dragging
+            (k.0, k.1, k.2) == (key.0, key.1, key.2) && (at.elapsed().as_secs_f64() * 1000.) < max_age
         };
         let data = match self.ctx_data.borrow().as_ref() {
             // The same frame asks more than once (render, flush): reuse it then too.
@@ -4517,6 +4520,13 @@ impl Render for Workspace {
         let into = self.drop_into().map(|(_, name)| self.tr("drag_move_to", "Move to {name}", &[("name", &name)])).unwrap_or_default();
         if *self.drag_note.borrow() != into {
             *self.drag_note.borrow_mut() = into;
+        }
+        // What a drag shows (`.app.drop`, `.app.drag`) rebuilds the context only when it changes: a drag
+        // redraws the whole window on every mouse move.
+        let sig = format!("{:?}{:?}", self.drop_hint, self.drag_item.borrow());
+        if sig != self.drag_sig {
+            self.drag_sig = sig;
+            self.ctx_rev += 1;
         }
         self.focused = window.is_window_active();
         let size = window.viewport_size();
