@@ -238,6 +238,9 @@ pub struct Transcript {
     finished: HashSet<String>,
     /** A subagent's own transcript: every line is a sidechain, so they're kept. */
     keep_sidechain: bool,
+    /** The newest prompt: its uuid, its parent's, and where it shows. A next prompt with the same parent
+    replaced it (Claude Code took it back unanswered), so it stops showing. */
+    last_prompt: Option<(String, Option<String>, Option<usize>)>,
 }
 
 /** Something a chat started that's still running: a background shell or a subagent. */
@@ -407,14 +410,38 @@ impl Transcript {
         }
         let k = self.echoes.iter().position(|(t, _)| t == text).unwrap_or(0);
         let (_, at) = self.echoes.remove(k);
-        if at < self.items.len() {
-            self.items.remove(at);
-            for i in self.tool_index.values_mut().chain(self.echoes.iter_mut().map(|e| &mut e.1)) {
-                if *i > at {
-                    *i -= 1;
-                }
+        self.remove_item(at);
+    }
+
+    fn remove_item(&mut self, at: usize) {
+        if at >= self.items.len() {
+            return;
+        }
+        self.items.remove(at);
+        for i in self.tool_index.values_mut().chain(self.echoes.iter_mut().map(|e| &mut e.1)) {
+            if *i > at {
+                *i -= 1;
             }
         }
+        if let Some(p) = &mut self.last_prompt {
+            p.2 = match p.2 {
+                Some(i) if i == at => None,
+                Some(i) if i > at => Some(i - 1),
+                other => other,
+            };
+        }
+    }
+
+    /** Takes out the newest message you sent that starts with `first_line` (one the agent gave back
+    unanswered, to edit and send again), returning its whole text. */
+    pub fn withdraw(&mut self, first_line: &str) -> Option<String> {
+        let want = first_line.trim();
+        let at = self.items.iter().rposition(|i| matches!(i, Item::User { text } if text.trim_start().starts_with(want)))?;
+        let Item::User { text } = self.items[at].clone() else { return None };
+        self.echoes.retain(|(_, i)| *i != at);
+        self.remove_item(at);
+        self.revision += 1;
+        Some(text)
     }
 
     /** Adds the older lines `from..self.start` in front. */
@@ -508,6 +535,16 @@ impl Transcript {
         }
         match kind {
             "user" => {
+                let prompt = content.is_string() || content.as_array().is_some_and(|a| a.iter().any(|b| b["type"] == "text") && !a.iter().any(|b| b["type"] == "tool_result"));
+                if let (true, Some(uuid)) = (prompt, e.get("uuid").and_then(Value::as_str)) {
+                    let parent = e.get("parentUuid").and_then(Value::as_str).map(str::to_string);
+                    if let Some((_, _, Some(at))) = self.last_prompt.clone().filter(|(u, p, _)| *p == parent && Some(u.as_str()) != parent.as_deref()) {
+                        if matches!(self.items.get(at), Some(Item::User { .. })) {
+                            self.remove_item(at);
+                        }
+                    }
+                    self.last_prompt = Some((uuid.to_string(), parent, Some(self.items.len())));
+                }
                 if let Some(text) = content.as_str() {
                     self.user_text(text);
                 } else if let Some(blocks) = content.as_array() {
@@ -859,6 +896,24 @@ mod background_tests {
         assert_eq!(bg[1].kind, "agent");
         t.append(2, &[json!({"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n<task-id>b9</task-id>\n<status>completed</status>\n</task-notification>"})]);
         assert_eq!(t.background().len(), 1);
+    }
+
+    #[test]
+    fn a_message_taken_back_unanswered_stops_showing() {
+        let prompt = |uuid: &str, parent: Option<&str>, text: &str| json!({"type": "user", "uuid": uuid, "parentUuid": parent, "message": {"role": "user", "content": text}});
+        let mut t = Transcript::default();
+        t.append(0, &[
+            prompt("u1", None, "hi"),
+            json!({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"content": [{"type": "text", "text": "hello"}]}}),
+            prompt("u2", Some("a1"), "write an essay"),
+        ]);
+        assert_eq!(t.items.len(), 3);
+        t.append(3, &[prompt("u3", Some("a1"), "write a short essay")]);
+        let texts: Vec<_> = t.items.iter().filter_map(|i| if let super::Item::User { text } = i { Some(text.as_str()) } else { None }).collect();
+        assert_eq!(texts, ["hi", "write a short essay"]);
+        t.echo("draft one\nmore");
+        assert_eq!(t.withdraw("draft one").as_deref(), Some("draft one\nmore"));
+        assert_eq!(t.items.len(), 3);
     }
 
     #[test]

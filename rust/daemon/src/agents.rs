@@ -31,6 +31,8 @@ fn builtin(agent: &str) -> Value {
             "transcripts_root": "~/.claude/projects",
             "provider": "anthropic",
             "process_names": ["claude"],
+            // Clears a prompt Claude Code put back in its input after an early Esc (see ChatKeys).
+            "clear_input_keys": ["C-c"],
             "process_session_pattern": r"--(?:resume|session-id)[ =]([0-9a-f]{8}-[0-9a-f-]{27})",
             "title": { "records": [{ "type": "custom-title", "field": "customTitle" }, { "type": "ai-title", "field": "aiTitle" }] },
         }),

@@ -449,17 +449,7 @@ impl Workspace {
                     if let Some(text) = text {
                         match name {
                             // Back into the composer (ahead of anything typed there), to change and send again.
-                            "queue.edit" => {
-                                if let Some(state) = self.composers.get(&id).cloned() {
-                                    state.update(cx, |s, cx| {
-                                        let rest = s.value().to_string();
-                                        let joined = if rest.trim().is_empty() { text.clone() } else { format!("{text}\n{rest}") };
-                                        s.set_value(joined, window, cx);
-                                        s.focus(window, cx);
-                                    });
-                                    window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
-                                }
-                            }
+                            "queue.edit" => self.refill_composer(&id, &text, window, cx),
                             "queue.send_now" => self.send_chat(&id, text, window, cx),
                             _ => {}
                         }
@@ -505,7 +495,22 @@ impl Workspace {
                     } else {
                         let agent = self.chat(&id).map(|c| c.agent.clone()).unwrap_or_default();
                         let keys = self.agent_keys(&agent, "interrupt_keys");
-                        self.call(Call::ChatKeys { chat_id: id, keys }, cx);
+                        let remote = self.route(&Call::ChatKeys { chat_id: id.clone(), keys: keys.clone() });
+                        // A message stopped before the agent took it up comes back (`restored`: its first line):
+                        // back into the composer to change, and out of the conversation.
+                        cx.spawn_in(window, async move |this, cx| {
+                            let Ok(v) = remote.call(Call::ChatKeys { chat_id: id.clone(), keys }).await else { return };
+                            let Some(first) = v["restored"].as_str().map(str::to_string) else { return };
+                            let _ = this.update_in(cx, |ws, window, cx| {
+                                let text = ws.transcripts.get_mut(&id).and_then(|t| t.withdraw(&first)).unwrap_or(first);
+                                ws.refill_composer(&id, &text, window, cx);
+                                let note = ws.tr("message_restored", "Stopped before it started: your message is back in the box to edit", &[]);
+                                ws.toast(note, window, cx);
+                                ws.ctx_rev += 1;
+                                cx.notify();
+                            });
+                        })
+                        .detach();
                     }
                 }
             }

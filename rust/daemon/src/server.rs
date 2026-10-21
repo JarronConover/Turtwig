@@ -678,15 +678,38 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         }
         Call::ChatKeys { chat_id, keys } => {
             let target = format!("={}:", util::chat_session(&chat_id));
+            let kind = registry_chat(&chat_id).as_ref().map(agents::of).unwrap_or_else(|| "claude".into());
+            let prompt = agents::text(&kind, "prompt_char", "❯");
+            let typed = || model::typed_input(&util::run("tmux", &["capture-pane", "-p", "-e", "-t", &target], &[], None, util::tmux_wait()).stdout, &prompt).unwrap_or_default();
+            let clear: Vec<String> = agents::get(&kind, "clear_input_keys").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+            let watch = keys == ["Escape"] && !clear.is_empty() && !prompt.is_empty() && typed().is_empty();
             let mut args = vec!["send-keys", "-t", target.as_str()];
             args.extend(keys.iter().map(|k| k.as_str()));
             let o = util::run("tmux", &args, &[], None, util::tmux_wait() * 2);
+            // Esc right after a message is sent takes it back: Claude Code drops it from the conversation and
+            // puts it back in its input, where the next message would be appended to it. Clear it there and
+            // say what it began with, for the app to put the message back in its own box.
+            let mut restored = None;
+            if o.ok && watch {
+                let until = std::time::Instant::now() + config::ms("escape_restore_wait_ms", 1200);
+                while std::time::Instant::now() < until {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let t = typed();
+                    if !t.is_empty() {
+                        let mut args = vec!["send-keys", "-t", target.as_str()];
+                        args.extend(clear.iter().map(|k| k.as_str()));
+                        util::run("tmux", &args, &[], None, util::tmux_wait() * 2);
+                        restored = Some(t);
+                        break;
+                    }
+                }
+            }
             // Esc ends the turn, and no hook says so: the chat is idle from here.
             if o.ok && keys == ["Escape"] && config::flag("escape_marks_idle", true) {
                 let sid = registry_chat(&chat_id).as_ref().and_then(agents::session_key).unwrap_or(chat_id.clone());
                 shared.states.lock().unwrap().insert(sid, ("idle".into(), None));
             }
-            if o.ok { Ok(json!({})) } else { Err(o.message()) }
+            if o.ok { Ok(json!({ "restored": restored })) } else { Err(o.message()) }
         }
         Call::SectionCreate { name } => sc_tool(&["section", "create", &name, "--manual"], None),
         Call::SectionCollapse { id, collapsed } => {

@@ -4349,6 +4349,18 @@ impl Workspace {
             .into_any_element()
     }
 
+    /** Puts `text` back in a chat's composer, ahead of anything typed there, to change and send again. */
+    pub(crate) fn refill_composer(&mut self, id: &str, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.composers.get(id).cloned() else { return };
+        state.update(cx, |s, cx| {
+            let rest = s.value().to_string();
+            let joined = if rest.trim().is_empty() { text.to_string() } else { format!("{text}\n{rest}") };
+            s.set_value(joined, window, cx);
+            s.focus(window, cx);
+        });
+        window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
+    }
+
     /** The keys an agent takes to stop (`interrupt_keys`) or cancel a question (`cancel_keys`), from
     settings `daemon.agents.<agent>` (default Escape). */
     pub(crate) fn agent_keys(&self, agent: &str, kind: &str) -> Vec<String> {
