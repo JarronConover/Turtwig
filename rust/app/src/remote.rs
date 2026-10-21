@@ -154,7 +154,15 @@ fn session(
     });
     let stdout = child.stdout.take().unwrap();
     while out_rx.try_recv().is_ok() {}
-    let _ = in_tx.send(Incoming::Connected);
+    // Connected once the daemon answers, not once ssh starts: an ssh still trying to reach the box
+    // isn't a connection. Id 0 matches no call, so the answer is dropped.
+    let hello = encode(&Request { id: 0, call: Call::Hello { client: "agent-box-app".into() } });
+    if let Err(e) = stdin.write_all(hello.as_bytes()).and_then(|_| stdin.flush()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return e.into();
+    }
+    let mut answered = false;
 
     let writer_rx = out_rx.clone();
     let (stop_tx, stop_rx) = flume::bounded::<()>(1);
@@ -178,6 +186,13 @@ fn session(
         match reader.read_line(&mut line) {
             Ok(0) => break anyhow!("connection closed"),
             Ok(_) => match serde_json::from_str::<ServerMessage>(&line) {
+                Ok(m) if !answered => {
+                    answered = true;
+                    let _ = in_tx.send(Incoming::Connected);
+                    if let ServerMessage::Event(e) = m {
+                        let _ = in_tx.send(Incoming::Event(e));
+                    }
+                }
                 Ok(ServerMessage::Response(r)) => {
                     if let Some(waiter) = pending.lock().unwrap().remove(&r.id) {
                         let _ = waiter.send(match r.error {

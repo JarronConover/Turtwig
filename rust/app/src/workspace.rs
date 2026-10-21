@@ -218,6 +218,12 @@ pub struct Workspace {
     /** Each host's latest model; `model` is them merged (this Mac's first). */
     pub(crate) models: HashMap<String, Model>,
     pub(crate) host_up: HashMap<String, bool>,
+    /** Since when each host that isn't up has been down (a host shows offline after `connection.offline_after_ms`). */
+    down_since: HashMap<String, std::time::Instant>,
+    /** When each host's model last arrived (epoch seconds), from the cache until it connects. */
+    last_seen: HashMap<String, f64>,
+    /** When each host's model was last written to the cache. */
+    cache_saved: HashMap<String, std::time::Instant>,
     /** Where each merged project and section came from, by index and id. */
     pub(crate) project_hosts: Vec<Vec<String>>,
     pub(crate) section_hosts: HashMap<String, String>,
@@ -528,6 +534,9 @@ impl Workspace {
             remotes: HashMap::new(),
             models: HashMap::new(),
             host_up: HashMap::new(),
+            down_since: HashMap::new(),
+            last_seen: HashMap::new(),
+            cache_saved: HashMap::new(),
             project_hosts: vec![],
             section_hosts: HashMap::new(),
             history: vec![],
@@ -696,6 +705,7 @@ impl Workspace {
             self.conns.remove(&h);
             self.remotes.remove(&h);
             self.host_up.remove(&h);
+            self.down_since.remove(&h);
             self.models.remove(&h);
         }
         for spec in specs {
@@ -712,7 +722,18 @@ impl Workspace {
                     }
                 }
             });
-            self.host_up.insert(host.clone(), false);
+            if self.host_up.insert(host.clone(), false) == Some(true) {
+                self.went_down(&host, cx);
+            }
+            if !self.models.contains_key(&host) {
+                if let Some((m, at)) = load_cached_model(&host) {
+                    // Last seen before this run: offline at once, not after the grace.
+                    self.down_since.insert(host.clone(), std::time::Instant::now() - Duration::from_secs(3600));
+                    self.last_seen.insert(host.clone(), at);
+                    self.models.insert(host.clone(), m);
+                }
+            }
+            self.down_since.entry(host.clone()).or_insert_with(std::time::Instant::now);
             self.remotes.insert(host.clone(), r);
             self.conns.insert(host, HostConn { spec, path: path.clone(), _guard: guard, _listen: listen });
         }
@@ -1633,6 +1654,7 @@ impl Workspace {
         match msg {
             Incoming::Connected => {
                 self.host_up.insert(host.to_string(), true);
+                self.down_since.remove(host);
                 self.connected = self.host_up.values().any(|u| *u);
                 self.status = self.tr("connected", "Connected", &[]);
                 self.watching.clear();
@@ -1647,6 +1669,9 @@ impl Workspace {
             }
             Incoming::Disconnected(why) => {
                 let was_up = self.host_up.insert(host.to_string(), false) == Some(true);
+                if was_up {
+                    self.went_down(host, cx);
+                }
                 self.connected = self.host_up.values().any(|u| *u);
                 self.status = self.tr("reconnecting", "Reconnecting to {host}… ({why})", &[("host", host), ("why", &why)]);
                 self.terminals.retain(|_, t| t.read(cx).host != host);
@@ -1661,6 +1686,8 @@ impl Workspace {
                 let unbacked = no_backup(&m).map(str::to_string);
                 let was_unbacked = self.models.get(host).and_then(no_backup).is_some();
                 let old = self.models.insert(host.to_string(), m);
+                self.last_seen.insert(host.to_string(), now_secs());
+                self.cache_model(host, false);
                 if let (Some(e), false) = (unbacked, was_unbacked) {
                     self.toast(format!("{host}: {e}"), window, cx);
                 }
@@ -1766,6 +1793,55 @@ impl Workspace {
     }
 
     /** Every host's model in one: this Mac's projects and sections first, then the box's. */
+    /** A host that was up dropped: cache what it showed, and redraw once it counts as offline. */
+    fn went_down(&mut self, host: &str, cx: &mut Context<Self>) {
+        self.down_since.insert(host.to_string(), std::time::Instant::now());
+        // It answered until now, however long ago its model last changed.
+        self.last_seen.insert(host.to_string(), now_secs());
+        self.cache_model(host, true);
+        let after = Duration::from_millis(self.offline_after_ms() + 50);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(after).await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.ctx_rev += 1;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn offline_after_ms(&self) -> u64 {
+        self.settings.num("connection.offline_after_ms", 8000.) as u64
+    }
+
+    /** Whether a host's daemon has been out of reach long enough to show its worktrees and chats as offline
+    (from the cache, or as they were when it dropped). */
+    pub(crate) fn host_offline(&self, host: &str) -> bool {
+        self.host_up.get(host) != Some(&true)
+            && self.models.contains_key(host)
+            && self.down_since.get(host).is_none_or(|t| t.elapsed() >= Duration::from_millis(self.offline_after_ms()))
+    }
+
+    /** Writes a host's model to the cache every `connection.cache_seconds` (and when it drops), so a
+    restart while it's out of reach still shows its worktrees. */
+    fn cache_model(&mut self, host: &str, now: bool) {
+        let every = Duration::from_secs_f64(self.settings.num("connection.cache_seconds", 30.));
+        if !now && self.cache_saved.get(host).is_some_and(|t| t.elapsed() < every) {
+            return;
+        }
+        let Some(m) = self.models.get(host) else { return };
+        self.cache_saved.insert(host.to_string(), std::time::Instant::now());
+        let text = serde_json::to_string(&json!({"at": self.last_seen.get(host).copied().unwrap_or_else(now_secs), "model": m})).unwrap_or_default();
+        let path = model_cache_path(host);
+        std::thread::spawn(move || {
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        });
+    }
+
     fn merge_models(&mut self) {
         let mut hosts: Vec<&String> = self.models.keys().collect();
         // `sidebar.host_order`: whose worktrees come first in a merged project.
@@ -2251,6 +2327,10 @@ impl Workspace {
         let current_usage_id = self.current_chat().map(usage_id);
         let usage = self.usage.context(current_usage_id.as_deref(), self.current_worktree().map(|w| (w.host.as_str(), w.path.as_str())), &tabs, &self.usage_providers(), &self.meter_options());
         let transcript = self.current_chat().and_then(|c| self.transcripts.get(&c.id)).map(|t| self.transcript_json(t)).unwrap_or_default();
+        // Hosts out of reach, with when each was last heard from.
+        let offline: Map<String, Value> = self.models.keys().filter(|h| self.host_offline(h))
+            .map(|h| (h.clone(), json!({"last_seen": self.last_seen.get(h), "ago": age_text(self.last_seen.get(h).copied(), &self.age_format())})))
+            .collect();
         let host_errors: Map<String, Value> = self.remotes.iter().map(|(h, r)| (h.clone(), json!(r.stderr()))).filter(|(_, v)| v.as_array().is_some_and(|a| !a.is_empty())).collect();
         let ctx = to_val(&json!({
             "projects": projects,
@@ -2269,6 +2349,7 @@ impl Workspace {
                 "confirm": self.confirm.as_ref().map(|c| { let mut c = c.clone(); if let Value::Object(o) = &mut c { o.remove("then"); } c }),
                 "starting": self.starting,
                 "hosts_up": self.host_up,
+                "offline": offline,
                 "completion": self.completion.as_ref().map(|(chat, trigger, items, selected)| json!({
                     "chat": chat, "trigger": trigger, "items": crate::completions::to_json(items), "selected": selected
                 })),
@@ -2467,7 +2548,9 @@ impl Workspace {
     fn worktree_json(&self, w: &Worktree, section: Value) -> Value {
         let chats = self.chats_of(w);
         // Which status wins when several apply: `sidebar.status_order`.
+        let offline = self.host_offline(&w.host);
         let applies = |s: &str| match s {
+            "offline" => offline,
             "working" => chats.iter().any(|c| c.state == "working"),
             "waiting" => chats.iter().any(|c| c.state == "waiting"),
             "merged" => w.mr.as_ref().is_some_and(|m| m.state == "merged"),
@@ -2482,7 +2565,7 @@ impl Workspace {
             .get("sidebar.status_order")
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-            .unwrap_or_else(|| ["working", "waiting", "merged", "failing", "pending", "dirty", "behind"].map(String::from).to_vec());
+            .unwrap_or_else(|| ["offline", "working", "waiting", "merged", "failing", "pending", "dirty", "behind"].map(String::from).to_vec());
         let status = order.iter().find(|s| applies(s)).map(String::as_str).unwrap_or("idle");
         let (emoji, label) = split_emoji(&w.title);
         let (_, project_letter, hue) = self.project_look(&w.repo, &w.project, w.hue);
@@ -2493,7 +2576,7 @@ impl Workspace {
             "uncommitted": w.uncommitted, "unpushed": w.unpushed, "behind": w.behind, "mr": w.mr,
             "age": w.age, "age_text": age_text(w.age, &self.age_format()), "status": status, "section": section,
             "selected": self.selected.as_deref() == Some(&w.path),
-            "host": w.host,
+            "host": w.host, "offline": offline,
             "chats": chats.iter().map(|c| self.chat_json(c)).collect::<Vec<_>>(),
         })
     }
@@ -2527,6 +2610,11 @@ impl Workspace {
             let fg = c.state == "working" && self.transcripts.get(&c.id).is_some_and(|t| t.foreground_shell());
             o.insert("foreground_shell".into(), Value::Bool(fg));
             o.insert("orchestrator".into(), Value::Bool(self.is_orchestrator(c)));
+            // Its machine is out of reach: what it was doing then isn't known now.
+            if self.host_offline(&c.host) {
+                o.insert("offline".into(), Value::Bool(true));
+                o.insert("state".into(), json!("offline"));
+            }
             // The model its newest reply came from, else the one it was started with (null: the agent's default).
             let used = self.transcripts.get(&c.id).and_then(|t| t.model.clone()).or_else(|| c.model.clone());
             o.insert("model_used".into(), json!(used));
@@ -4643,6 +4731,20 @@ fn split_emoji(title: &str) -> (Option<String>, String) {
 }
 
 /** "now", "5m", "3h", "2d", "1w" (settings `format.age`: now, m, h, d, w, each with `{n}`). */
+fn now_secs() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.)
+}
+
+/** Where a host's last model is kept between runs. */
+fn model_cache_path(host: &str) -> std::path::PathBuf {
+    settings::cache_dir().join(format!("model-{}.json", host.replace(['/', '.'], "_")))
+}
+
+fn load_cached_model(host: &str) -> Option<(Model, f64)> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(model_cache_path(host)).ok()?).ok()?;
+    Some((serde_json::from_value(v.get("model")?.clone()).ok()?, v["at"].as_f64().unwrap_or(0.)))
+}
+
 fn age_text(ts: Option<f64>, fmt: &Value) -> String {
     let Some(ts) = ts else { return String::new() };
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);

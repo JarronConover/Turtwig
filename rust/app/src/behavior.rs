@@ -29,7 +29,7 @@ pub fn host_specs(raw: &Value) -> Vec<HostSpec> {
     let default_host = host_name(raw, "default_host", "box");
     let local_host = host_name(raw, "local_host", "mac");
     let base = &raw["connection"];
-    let base_options = strings(base.get("ssh_options")).unwrap_or_else(|| ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"].map(String::from).to_vec());
+    let base_options = strings(base.get("ssh_options")).unwrap_or_else(|| ["-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"].map(String::from).to_vec());
     let base_retry = base.get("retry_seconds").and_then(Value::as_u64).unwrap_or(3);
     let base_watch = base.get("watch_ms").and_then(Value::as_u64).unwrap_or(500);
     let spec = |name: &str, c: &Value| -> Option<HostSpec> {

@@ -1,3 +1,6 @@
+// The UI context is one large json! literal.
+#![recursion_limit = "256"]
+
 mod behavior;
 mod completions;
 mod designer;

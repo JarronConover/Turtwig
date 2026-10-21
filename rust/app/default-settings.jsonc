@@ -7,8 +7,11 @@
     "ssh_host": "",
     "daemon": "~/agent-box/rust/target/release/agent-boxd",
     "retry_seconds": 3,
+    // A host that stays out of reach this long shows its worktrees and chats greyed out as offline, as they
+    // were when last heard from (kept on disk every cache_seconds, so they show after a restart too).
+    "offline_after_ms": 8000, "cache_seconds": 30,
     // Extra ssh arguments for the box connection.
-    "ssh_options": ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"],
+    "ssh_options": ["-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"],
     // How often skills, CLAUDE.md, memory and hooks are copied to the box (bin/env-push); 0 turns it off.
     "env_push_seconds": 60,
     // The copy's command (null: env-push in app.bin_dir; {bin} is that folder).
@@ -360,8 +363,8 @@
                 },
                 {
                   "type": "box",
-                  "style": { "width": 7, "height": 7, "radius": 4, "background": "{{ if .app.connected then \"@success\" else \"@warning\" end }}" },
-                  "tooltip": "{{ .app.status }}"
+                  "style": { "width": 7, "height": 7, "radius": 4, "background": "{{ if .app.connected and (.app.offline | length == 0) then \"@success\" else \"@warning\" end }}" },
+                  "tooltip": "{{ . as $r | if (.app.offline | length) > 0 then \"Out of reach: \" + ([.app.offline | to_entries[] | ($r.hosts[.key].label // .key) + \" (last heard from \" + .value.ago + \" ago)\"] | join(\", \")) else .app.status end }}"
                 }
               ]
             }
@@ -524,6 +527,7 @@
         "border_color": "{{ if .props.w.selected then \"@selection_border\" else \"transparent\" end }}",
         "background": "{{ if .props.w.selected then \"@selection\" else \"transparent\" end }}",
         "hover": "{{ if .props.w.selected then {} else {\"background\": \"@hover\"} end }}",
+        "opacity": "{{ if .props.w.offline then 0.5 else 1 end }}",
         "position": "relative"
       },
       "on": {
@@ -547,7 +551,7 @@
       "drag": { "kind": "worktree", "value": "{{ .props.w.path }}", "label": "{{ .props.w.title }}" },
       "drop_key": "wt:{{ .props.w.path }}",
       "drop_zones": "edges",
-      "tooltip": "{{ .props.w.branch // \"\" }}",
+      "tooltip": "{{ if .props.w.offline then (.hosts[.props.w.host].label // .props.w.host) + \" is out of reach (last heard from \" + (.app.offline[.props.w.host].ago // \"a while\") + \" ago). This is how it looked then.\" else (.props.w.branch // \"\") end }}",
       "menu": [
         { "label": "Rename feature label…", "do": { "do": "worktree.label", "path": "{{ .props.w.path }}" } },
         { "label": "Rename current branch", "do": { "do": "worktree.rename_branch", "path": "{{ .props.w.path }}" } },
@@ -640,6 +644,7 @@
       "type": "box",
       "style": { "width": 14, "align": "center", "justify": "center" },
       "children": [
+        { "if": ".props.status == \"offline\"", "type": "icon", "props": { "name": "cloud-off", "size": 12, "color": "@text_faint" }, "tooltip": "Out of reach: shown as it was when last heard from" },
         { "if": ".props.status == \"working\"", "type": "spinner", "props": { "size": "xsmall", "color": "@age" } },
         { "if": ".props.status == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" }, "tooltip": "Waiting for you" },
         { "if": ".props.status == \"merged\"", "type": "icon", "props": { "name": "circle-check", "size": 12, "color": "@merged" }, "tooltip": "Merged" },
@@ -893,6 +898,16 @@
                   "children": [
                     { "type": "icon", "props": { "name": "bot", "size": 14 } },
                     { "type": "text", "props": { "text": "A subagent's conversation, shown as it runs. Reply in its parent chat." } }
+                  ]
+                },
+                {
+                  "if": ".selected.chat.offline",
+                  "id": "offline-note",
+                  "type": "row",
+                  "style": { "padding": [8, 12], "margin": [0, 0, 6, 0], "gap": 8, "align": "center", "radius": 10, "border": 1, "border_color": "@line", "font_size": 13, "color": "@text_muted" },
+                  "children": [
+                    { "type": "icon", "props": { "name": "cloud-off", "size": 14 } },
+                    { "type": "text", "props": { "text": "{{ (.hosts[.selected.chat.host].label // .selected.chat.host) + \" is out of reach, so this chat can't take messages until it's back. Last heard from \" + (.app.offline[.selected.chat.host].ago // \"a while\") + \" ago.\" }}" } }
                   ]
                 },
                 {
@@ -2808,7 +2823,7 @@
 
   "sidebar": {
     // Which status a worktree shows when several apply (idle when none).
-    "status_order": ["working", "waiting", "merged", "failing", "pending", "dirty", "behind"],
+    "status_order": ["offline", "working", "waiting", "merged", "failing", "pending", "dirty", "behind"],
     // A section's orchestrator first, its workers after.
     "orchestrators_first": true,
     // Whose worktrees come first in a project shared by both machines.

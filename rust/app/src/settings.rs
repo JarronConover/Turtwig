@@ -77,7 +77,7 @@ pub struct Connection {
 }
 
 fn default_ssh_options() -> Vec<String> {
-    ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"].map(String::from).to_vec()
+    ["-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"].map(String::from).to_vec()
 }
 
 fn default_env_push() -> u64 {
@@ -108,6 +108,15 @@ impl Default for Settings {
 }
 
 /** The settings folder: `AGENT_BOX_SETTINGS_DIR`, else ~/.agent-box/state/settings. */
+/** Files the app keeps for itself, not backed up: beside the test settings when AGENT_BOX_SETTINGS_DIR
+is set, else ~/.agent-box/cache. */
+pub fn cache_dir() -> PathBuf {
+    match std::env::var("AGENT_BOX_SETTINGS_DIR") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d).join("cache"),
+        _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agent-box/cache"),
+    }
+}
+
 pub fn dir() -> PathBuf {
     match std::env::var("AGENT_BOX_SETTINGS_DIR") {
         Ok(d) if !d.is_empty() => PathBuf::from(d),
