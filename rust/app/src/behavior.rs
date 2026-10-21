@@ -199,6 +199,11 @@ pub fn agent_keys(agents: &Value, agent: &str, kind: &str) -> Vec<String> {
     strings(agents.get(agent).and_then(|a| a.get(kind))).filter(|k| !k.is_empty()).unwrap_or_else(|| vec!["Escape".into()])
 }
 
+/** The keys that move a running shell command to the background (`background_keys`); none: the agent can't. */
+pub fn background_keys(agents: &Value, agent: &str) -> Vec<String> {
+    strings(agents.get(agent).and_then(|a| a.get("background_keys"))).unwrap_or_default()
+}
+
 /** The key that picks option `n` (1-based) of a waiting chat's question: `daemon.agents.<agent>.answer_key` ("{n}"). */
 pub fn answer_key(agents: &Value, agent: &str, n: usize) -> String {
     agents.get(agent).and_then(|a| a.get("answer_key")).and_then(Value::as_str).unwrap_or("{n}").replace("{n}", &n.to_string())
@@ -307,6 +312,8 @@ mod tests {
         let agents = json!({"codex": {"interrupt_keys": ["C-c"], "answer_key": "{n}\n"}});
         assert_eq!(agent_keys(&agents, "codex", "interrupt_keys"), ["C-c"]);
         assert_eq!(agent_keys(&agents, "claude", "interrupt_keys"), ["Escape"]);
+        assert!(background_keys(&agents, "codex").is_empty());
+        assert_eq!(background_keys(&json!({"claude": {"background_keys": ["C-b"]}}), "claude"), ["C-b"]);
         assert_eq!(answer_key(&agents, "codex", 2), "2\n");
         assert_eq!(answer_key(&agents, "claude", 3), "3");
         assert_eq!(path_env(&["~/.local/bin".into(), "/bin".into()], "/h"), "/h/.local/bin:/bin");

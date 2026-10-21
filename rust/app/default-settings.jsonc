@@ -903,6 +903,15 @@
                   "children": [
                     { "type": "composer", "style": { "grow": 1, "min_width": 0 } },
                     {
+                      "if": ".selected.chat.foreground_shell and (.agents[.selected.chat.agent].background_keys // [] | length > 0)",
+                      "id": "composer-background",
+                      "type": "box",
+                      "tooltip": "Run the command in the background and keep chatting (Ctrl-B in the chat)",
+                      "style": { "width": 28, "height": 28, "shrink": 0, "radius": 14, "align": "center", "justify": "center", "border": 1, "border_color": "@line", "cursor": "pointer", "hover": { "background": "@hover" } },
+                      "on": { "click": { "do": "chat.background", "chat": "{{ .selected.chat.id }}" } },
+                      "children": [{ "type": "icon", "props": { "name": "send-to-back", "size": 14, "color": "@text" } }]
+                    },
+                    {
                       "if": ".selected.chat.state == \"working\"",
                       "id": "composer-stop",
                       "type": "box",
@@ -2996,12 +3005,13 @@
     // session), transcripts_root + backup_dir (backed up by sync-worker; backup: false skips), hooks_file +
     // hook_events (bin/agent-hooks), provider, limits_field. Claude's prompt_char and waiting_pattern are the
     // top-level keys above. The app presses interrupt_keys to stop a turn and cancel_keys to cancel a question
-    // (default ["Escape"]), and answer_key ("{n}") to pick option n.
+    // (default ["Escape"]), answer_key ("{n}") to pick option n, and background_keys to move a running shell
+    // command to the background (none: the agent can't).
     "agents": {
       "claude": {
         // --settings showThinkingSummaries: without it Claude Code logs thinking as empty blocks.
         "name": "Claude", "icon": "asterisk", "color": "@claude", "tab_icon": false,
-        "bin": "claude", "session": "assigned", "transcripts": "claude", "trust": "claude", "remote_control": true, "stop_elsewhere": true,
+        "bin": "claude", "session": "assigned", "transcripts": "claude", "trust": "claude", "remote_control": true, "stop_elsewhere": true, "background_keys": ["C-b"],
         "new": ["{bin}", "--session-id", "{id}", "--remote-control", "{name}", "--settings", "{\"showThinkingSummaries\":true}", ["--model", "{model}"], ["{prompt}"]],
         "resume": ["{bin}", "--resume", "{session}", "--remote-control", "{name}", "--settings", "{\"showThinkingSummaries\":true}", ["--model", "{model}"]],
         "fork": ["{bin}", "--resume", "{from}", "--fork-session", "--session-id", "{id}", "--remote-control", "{name}", "--settings", "{\"showThinkingSummaries\":true}", ["--model", "{model}"]],

@@ -308,9 +308,14 @@ impl Transcript {
             let done = |task: &Option<String>| self.finished.contains(id) || task.as_ref().is_some_and(|t| self.finished.contains(t));
             let kind = if o.shell_tools.contains(name) { "shell" } else if o.agent_tools.contains(name) { "agent" } else { "" };
             match kind {
-                "shell" if bg => {
+                "shell" => {
                     let Some(r) = result else { continue };
-                    let task = after(r, "running in background with ID: ").map(|s| word(s).trim_end_matches('.').to_string());
+                    // Ctrl-B during a foreground run: "Command was manually backgrounded by user with ID: …".
+                    let moved = r.starts_with("Command was manually backgrounded");
+                    if !bg && !moved {
+                        continue;
+                    }
+                    let task = after(r, "running in background with ID: ").or_else(|| after(r, "backgrounded by user with ID: ")).map(|s| word(s).trim_end_matches('.').to_string());
                     let output = after(r, "Output is being written to: ").map(|s| word(s).trim_end_matches('.').to_string());
                     if task.is_some() && !done(&task) {
                         out.push(Background { kind: "shell", label: summary.clone(), tool_id: id.clone(), task_id: task, output });
@@ -336,6 +341,17 @@ impl Transcript {
             }
         }
         out
+    }
+
+    /** Whether the current turn is waiting on a shell command run in the foreground (one the agent could
+    move to the background). */
+    pub fn foreground_shell(&self) -> bool {
+        let o = options();
+        self.items.iter().rev().take_while(|i| !matches!(i, Item::User { .. })).any(|i| {
+            matches!(i, Item::Tool { name, input, result: None, .. } if o.shell_tools.contains(name)
+                && !matches!(input.get("run_in_background"), Some(Value::Bool(true)))
+                && input.get("run_in_background").and_then(Value::as_str) != Some("true"))
+        })
     }
 
     /** Notes background work that finished, from a <task-notification> (in a queued or a delivered message). */
@@ -843,6 +859,20 @@ mod background_tests {
         assert_eq!(bg[1].kind, "agent");
         t.append(2, &[json!({"type": "queue-operation", "operation": "enqueue", "content": "<task-notification>\n<task-id>b9</task-id>\n<status>completed</status>\n</task-notification>"})]);
         assert_eq!(t.background().len(), 1);
+    }
+
+    #[test]
+    fn a_foreground_command_can_be_moved_to_the_background() {
+        let mut t = Transcript::default();
+        t.append(0, &[json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "make", "description": "Build"}},
+            {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "serve", "run_in_background": true}}
+        ]}})]);
+        assert!(t.foreground_shell());
+        t.append(1, &[json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Command was manually backgrounded by user with ID: bq. Output is being written to: /tmp/x/bq.output."}]}})]);
+        assert!(!t.foreground_shell());
+        let bg = t.background();
+        assert_eq!((bg.len(), bg[0].task_id.as_deref(), bg[0].output.as_deref()), (1, Some("bq"), Some("/tmp/x/bq.output")));
     }
 
     #[test]

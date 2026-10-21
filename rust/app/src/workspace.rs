@@ -2524,6 +2524,8 @@ impl Workspace {
             o.insert("last_message".into(), last.map(|t| Value::String(t.chars().take(self.settings.num("chat.last_message_chars", 280.) as usize).collect())).unwrap_or(Value::Null));
             let activity = self.transcripts.get(&c.id).filter(|_| c.state == "working").map(|t| t.activity()).unwrap_or_default();
             o.insert("activity".into(), Value::String(activity));
+            let fg = c.state == "working" && self.transcripts.get(&c.id).is_some_and(|t| t.foreground_shell());
+            o.insert("foreground_shell".into(), Value::Bool(fg));
             o.insert("orchestrator".into(), Value::Bool(self.is_orchestrator(c)));
             // The model its newest reply came from, else the one it was started with (null: the agent's default).
             let used = self.transcripts.get(&c.id).and_then(|t| t.model.clone()).or_else(|| c.model.clone());

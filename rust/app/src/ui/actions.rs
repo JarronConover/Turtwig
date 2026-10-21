@@ -22,6 +22,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.open", "{chat, host?, force?}: open a chat as a tab, resuming its process if it isn't running (host: where a chat from `.history` lives)"),
     ("tab.move", "{chat?, target: chat id, zone: before|after}: reorder a worktree's tabs (chat defaults to `dragged`)"),
     ("chat.interrupt", "{chat}: stop what the agent is doing (its `daemon.agents.<agent>.interrupt_keys`, default Escape), keeping the chat open"),
+    ("chat.background", "{chat}: move the shell command the agent is waiting on to the background (`daemon.agents.<agent>.background_keys`; `.selected.chat.foreground_shell` says one is running), so the chat can go on"),
     ("queue.remove / queue.edit / queue.send_now", "{chat, index}: drop a queued message, put it back in the composer to change, or send it now"),
     ("clipboard.copy", "{text, quiet?}: put text on the clipboard (quiet: no \"Copied\" notice)"),
     ("clipboard.read", "{then}: `then` runs with the clipboard's text as `.input`"),
@@ -504,6 +505,20 @@ impl Workspace {
                     } else {
                         let agent = self.chat(&id).map(|c| c.agent.clone()).unwrap_or_default();
                         let keys = self.agent_keys(&agent, "interrupt_keys");
+                        self.call(Call::ChatKeys { chat_id: id, keys }, cx);
+                    }
+                }
+            }
+            "chat.background" => {
+                if let Some(id) = chat() {
+                    let agent = self.chat(&id).map(|c| c.agent.clone()).unwrap_or_default();
+                    let agents = self.settings.get("daemon.agents").cloned().unwrap_or(Value::Null);
+                    let keys = crate::behavior::background_keys(&agents, &agent);
+                    if keys.is_empty() {
+                        let name = agents[&agent]["name"].as_str().unwrap_or(&agent).to_string();
+                        let t = self.tr("background_unsupported", "{agent} can't move a running command to the background", &[("agent", &name)]);
+                        self.toast(t, window, cx);
+                    } else {
                         self.call(Call::ChatKeys { chat_id: id, keys }, cx);
                     }
                 }
