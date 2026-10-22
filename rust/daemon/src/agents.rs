@@ -33,6 +33,9 @@ fn builtin(agent: &str) -> Value {
             "process_names": ["claude"],
             // Clears a prompt Claude Code put back in its input after an early Esc (see ChatKeys).
             "clear_input_keys": ["C-c"],
+            // Its input box: the prompt (and the no-break space after it) right under a rule. While neither
+            // shows, it's in a menu (/artifacts, /model) and the app shows its live screen (`screen`).
+            "input_box": { "rule": "──", "prompt": "❯\u{a0}" },
             "process_session_pattern": r"--(?:resume|session-id)[ =]([0-9a-f]{8}-[0-9a-f-]{27})",
             "title": { "records": [{ "type": "custom-title", "field": "customTitle" }, { "type": "ai-title", "field": "aiTitle" }] },
         }),

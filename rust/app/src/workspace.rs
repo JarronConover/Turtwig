@@ -1698,6 +1698,7 @@ impl Workspace {
                     self.toast(format!("{host}: {e}"), window, cx);
                 }
                 self.merge_models();
+                self.drop_screens(window, cx);
                 if let Some(old) = old {
                     // A chat that left this host (moved to another machine) is read from where it went now.
                     let here: HashSet<&String> = self.models.get(host).map(|m| m.chats.iter().map(|c| &c.id).collect()).unwrap_or_default();
@@ -2149,6 +2150,40 @@ impl Workspace {
         let view = cx.new(|cx| TerminalView::shell(remote, host, None, Some(cwd), Some(id.clone()), command, &ts, cx));
         self.terminals.insert(key, view.clone());
         Some(view)
+    }
+
+    /** The live terminal on a chat's own session while its agent shows a screen of its own (`screen`), made
+    (and given the typing) when it first shows. */
+    pub(crate) fn chat_screen(&mut self, chat: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
+        let key = format!("screen:{chat}");
+        if let Some(t) = self.terminals.get(&key) {
+            return Some(t.clone());
+        }
+        let c = self.chat(chat).filter(|c| c.screen && c.alive && !c.tmux.is_empty())?.clone();
+        if !self.host_up.get(&c.host).copied().unwrap_or(false) {
+            return None;
+        }
+        let (remote, ts) = (self.remote_for_host(&c.host), self.settings.terminal.clone());
+        let view = cx.new(|cx| TerminalView::shell(remote, c.host.clone(), Some(c.tmux.clone()), None, None, None, &ts, cx));
+        view.read(cx).focus_handle(cx).focus(window, cx);
+        self.terminals.insert(key, view.clone());
+        Some(view)
+    }
+
+    /** Detaches the screens of chats back at their input box; one that had the typing hands it to the composer. */
+    fn drop_screens(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let done: Vec<String> = self.terminals.keys()
+            .filter(|k| k.strip_prefix("screen:").is_some_and(|id| !self.chat(id).is_some_and(|c| c.screen && c.alive)))
+            .cloned()
+            .collect();
+        for k in done {
+            let Some(t) = self.terminals.remove(&k) else { continue };
+            let focused = t.read(cx).is_focused(window);
+            t.read(cx).kill();
+            if focused {
+                self.focus_area_action("composer", k.strip_prefix("screen:").map(str::to_string), window, cx);
+            }
+        }
     }
 
     /** A worktree's chats in tab order (`state.tab_order[path]`, set by dragging tabs), the rest after. */

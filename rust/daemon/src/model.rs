@@ -417,6 +417,30 @@ fn track_activity(id: &str, read: Option<(String, Option<f64>, Option<String>, V
     Some(next)
 }
 
+/** Whether the pane shows a screen of the agent's own instead of its input box (the agent's `input_box`:
+a line starting with `prompt` right under a `rule` line). None: the agent has no `input_box`. */
+fn own_screen(pane: &str, agent: &str) -> Option<bool> {
+    let shape = crate::agents::get(agent, "input_box")?;
+    let (rule, prompt) = (shape.get("rule")?.as_str()?, shape.get("prompt")?.as_str()?);
+    let text = strip_ansi(pane);
+    let lines: Vec<&str> = text.lines().map(str::trim_start).collect();
+    Some(!lines.windows(2).any(|w| w[0].starts_with(rule) && w[1].starts_with(prompt)))
+}
+
+/** Whether a chat is on its own screen: once it has been for `screen_after_ms`, so a redraw or the agent
+starting up doesn't flash it. */
+fn track_screen(id: &str, now_on: Option<bool>) -> bool {
+    static SINCE: Mutex<Option<HashMap<String, f64>>> = Mutex::new(None);
+    let mut since = SINCE.lock().unwrap();
+    let since = since.get_or_insert_with(HashMap::new);
+    if now_on != Some(true) {
+        since.remove(id);
+        return false;
+    }
+    let first = *since.entry(id.to_string()).or_insert_with(util::now);
+    (util::now() - first) * 1000. >= crate::config::count("screen_after_ms", 1500) as f64
+}
+
 /** What's typed after the last line starting with `prompt` (the input box), without dim or grey text
 (a placeholder or suggestion). None: no such line. */
 pub(crate) fn typed_input(pane: &str, prompt: &str) -> Option<String> {
@@ -566,6 +590,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             _ if pane_waits => ("waiting".to_string(), None),
             _ => ("idle".to_string(), None),
         };
+        let screen = track_screen(&id, pane.as_deref().filter(|_| state != "stopped" && waiting_on.is_none()).and_then(|p| own_screen(p, &agent)));
         let suggestion = if state == "idle" { pane.as_deref().and_then(suggestion) } else { None };
         let activity = track_activity(&id, pane.as_deref().filter(|_| state == "working").and_then(|p| pane_activity(p, &agent)));
         // A name nobody chose follows the agent's own title (auto_title), and the registry learns it.
@@ -603,6 +628,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             launched_at: v.get("launched_at").and_then(Value::as_f64),
             transcript: transcript.as_ref().map(|p| p.to_string_lossy().into_owned()),
             status_line: activity,
+            screen,
         });
     }
     out
@@ -730,7 +756,7 @@ pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model 
 
 #[cfg(test)]
 mod tests {
-    use super::{combine, pane_activity, parse_head, parse_remote, suggestion, track_activity, typed_input, GitInfo};
+    use super::{combine, own_screen, pane_activity, parse_head, parse_remote, suggestion, track_activity, typed_input, GitInfo};
     use serde_json::json;
 
     #[test]
@@ -761,6 +787,15 @@ mod tests {
         assert_eq!(combine(Some("working".into()), asks.clone()), asks);
         assert_eq!(combine(None, hook("working")), hook("working"));
         assert_eq!(combine(None, None), None);
+    }
+
+    #[test]
+    fn a_menu_in_place_of_the_input_box_is_the_agents_own_screen() {
+        let input = "  Reply here to resume.\n\x1b[2m────────────\x1b[0m\n❯\u{a0}1. a\n────────────\n  ⏵⏵ bypass permissions on\n";
+        assert_eq!(own_screen(input, "claude"), Some(false));
+        let menu = "   Artifacts  All   Mine   Shared\n   │ ⌕ Search artifacts…  │\n   ❯ ⧉ Verify With Logs   private · 1h ago\n     ⧉ Email Bubble Options\n   Enter to attach · d to delete\n";
+        assert_eq!(own_screen(menu, "claude"), Some(true));
+        assert_eq!(own_screen(menu, "codex"), None);
     }
 
     #[test]

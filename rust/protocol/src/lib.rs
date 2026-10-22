@@ -389,6 +389,9 @@ pub struct Chat {
     /** What the agent's own status line says while it works, read from its pane. */
     #[serde(default)]
     pub status_line: Option<Activity>,
+    /** Its agent shows a screen of its own (a menu like Claude Code's /artifacts) in place of its input box. */
+    #[serde(default)]
+    pub screen: bool,
 }
 
 /** A working agent's status line, like Claude Code's "✻ Concocting… (4m 17s · ↓ 6.5k tokens)". */

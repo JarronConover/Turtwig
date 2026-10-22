@@ -59,6 +59,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("select", "A dropdown: a button showing the chosen option that opens a menu of `props.options` ([values] or [{value, label}]) bound to `props.state` (or `props.value`), `props.placeholder` when nothing is chosen, `props.icon` (chevron-down). `on.change` gets `.value`. Look: `theme.select` and `style`. Agents: `ui.menu {id, item}` or `ui.click {id: \"ID:VALUE\"}`."),
     ("transcript", "The built-in chat transcript. `props.chat` (chat id; default the selected chat). Look: settings `chat`."),
     ("composer", "The built-in message box for a chat. `props.chat`, `props.placeholder`."),
+    ("screen", "A chat's live terminal while its agent shows a screen of its own (`.chat.screen`, a menu like Claude Code's /artifacts): typing goes to the agent. `props.chat`."),
     ("waiting", "The built-in card for a chat waiting on a permission or question, with its answer buttons. `props.chat`."),
     ("terminal", "The built-in terminal for a worktree. `props.path` (default the selected worktree). Look: settings `terminal`."),
     ("attachments", "Preview chips for files attached to a chat but not sent yet (spinner while uploading, × to remove). `props.chat` (default the selected chat), `props.size`. Look: settings `chat.attachments`, `chat.attachment`."),
@@ -372,6 +373,14 @@ impl Workspace {
                 })
                 .into_iter()
                 .collect()
+            }
+            "screen" => {
+                let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
+                let term = chat.and_then(|c| self.chat_screen(&c, window, cx));
+                if let Some(t) = &term {
+                    t.update(cx, |t, cx| t.set_overrides(&props, &theme, cx));
+                }
+                term.map(|t| div().size_full().child(t).into_any_element()).into_iter().collect()
             }
             "terminal" => {
                 let path = props.get("path").and_then(Value::as_str).map(str::to_string).or_else(|| self.selected.clone());

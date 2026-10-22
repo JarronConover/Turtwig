@@ -75,7 +75,7 @@ pub(crate) fn pop_owner() {
 pub(crate) struct Fingerprint(pub u64);
 
 /** Node types that draw from the workspace rather than the context, so they bring their own news. */
-pub(crate) const BUILTINS: &[&str] = &["transcript", "composer", "waiting", "terminal", "diff", "attachments"];
+pub(crate) const BUILTINS: &[&str] = &["transcript", "composer", "waiting", "screen", "terminal", "diff", "attachments"];
 
 /** The context paths a node's expressions read, the built-ins inside it, and whether it reads it all. */
 #[derive(Default, Clone)]

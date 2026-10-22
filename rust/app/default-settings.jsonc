@@ -865,11 +865,25 @@
           "style": { "grow": 1, "min_height": 0, "position": "relative" },
           "children": [
             {
+              "if": ".selected.chat.screen | not",
               "id": "transcript", "region": true,
               "type": "transcript",
               "props": { "empty": "{{ if .selected.worktree then \"No chat in this worktree yet. Press + above to start one.\" else \"Select a worktree\" end }}" },
               "style": { "grow": 1, "min_height": 0 }
             },
+            // While the agent shows a screen of its own (a menu like Claude Code's /artifacts), its live terminal
+            // takes the conversation's place, with the typing, until it's back at its input box.
+            {
+              "if": ".selected.chat.screen",
+              "id": "screen-note",
+              "type": "row",
+              "style": { "gap": 8, "padding": [8, 16], "align": "center", "font_size": 12.5, "color": "@text_muted", "border_bottom": 1, "border_color": "@line" },
+              "children": [
+                { "type": "icon", "props": { "name": "square-terminal", "size": 13 } },
+                { "type": "text", "props": { "text": "{{ .agents[.selected.chat.agent].name // \"The agent\" }} opened a menu. Use it here; Esc closes it and brings back the conversation." }, "style": { "grow": 1 } }
+              ]
+            },
+            { "if": ".selected.chat.screen", "id": "screen", "type": "screen", "style": { "grow": 1, "min_height": 0, "padding": [6, 10] } },
             {
               "if": ".selected.chat.status == \"running_elsewhere\"",
               "id": "elsewhere-banner",
@@ -881,9 +895,9 @@
                 { "type": "Pill", "id": "elsewhere-take-over", "props": { "text": "Take it over", "icon": "arrow-down-to-line", "do": { "do": "chat.take_over", "chat": "{{ .selected.chat.id }}" } } }
               ]
             },
-            { "id": "waiting", "type": "waiting", "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" } },
+            { "if": ".selected.chat.screen | not", "id": "waiting", "type": "waiting", "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" } },
             {
-              "if": ".selected.chat",
+              "if": ".selected.chat and (.selected.chat.screen | not)",
               "id": "composer-box", "region": true,
               "type": "box",
               "style": { "shrink": 0, "padding": [4, 20, 14, 20], "width": "full", "max_width": 900, "self": "center", "position": "relative" },

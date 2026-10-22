@@ -8,12 +8,17 @@ pub struct Term {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    session: String,
 }
 
 /** A pty running `tmux attach` to `session`; output streams to `tx` as `TermOutput`. */
 pub fn open(term_id: u64, session: &str, cols: u16, rows: u16, tx: Sender<String>) -> anyhow::Result<Term> {
     if session.starts_with("sh-") {
         crate::util::shell_options(session);
+    }
+    // A chat's own screen shows in the app without tmux's status line.
+    if session.starts_with("chat-") {
+        crate::util::run("tmux", &["set-option", "-t", &format!("={session}"), "status", "off"], &[], None, crate::util::tmux_wait());
     }
     let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
     let mut cmd = CommandBuilder::new("tmux");
@@ -39,7 +44,7 @@ pub fn open(term_id: u64, session: &str, cols: u16, rows: u16, tx: Sender<String
         }
         let _ = tx.send(encode(&ServerMessage::Event(Event::TermExit { term_id })));
     });
-    Ok(Term { master: pair.master, writer, child })
+    Ok(Term { master: pair.master, writer, child, session: session.to_string() })
 }
 
 impl Term {
@@ -52,8 +57,20 @@ impl Term {
         self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
     }
 
-    pub fn close(mut self) {
+    pub fn close(self) {}
+}
+
+impl Drop for Term {
+    fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Attaching sized a chat's window to the app's view; give it back the size its agent started at
+        // (resize-window pins the size, so unpin it for the next attach).
+        if self.session.starts_with("chat-") {
+            let target = format!("={}:", self.session);
+            let (cols, rows) = (crate::config::count("chat_tmux_cols", 220).to_string(), crate::config::count("chat_tmux_rows", 60).to_string());
+            crate::util::run("tmux", &["resize-window", "-t", &target, "-x", &cols, "-y", &rows], &[], None, crate::util::tmux_wait());
+            crate::util::run("tmux", &["set-option", "-wu", "-t", &target, "window-size"], &[], None, crate::util::tmux_wait());
+        }
     }
 }
