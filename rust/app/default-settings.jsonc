@@ -1025,6 +1025,7 @@
                 { "if": ".selected.move.scope != \"chat\"", "label": "Move only this chat to {{ if .c.host == \"box\" then \"the Mac\" else \"the cloud\" end }}", "do": { "do": "chat.move", "chat": "{{ .c.id }}", "scope": "chat", "to": "{{ if .c.host == \"box\" then \"mac\" else \"box\" end }}" } },
                 { "if": ".c.alive | not", "label": "Start", "do": { "do": "chat.start", "chat": "{{ .c.id }}" } },
                 { "label": "Fork chat", "do": { "do": "chat.fork", "chat": "{{ .c.id }}" } },
+                { "if": ".c.id | startswith(\"sub:\") | not", "label": "Rename…", "do": { "do": "chat.rename", "chat": "{{ .c.id }}" } },
                 { "separator": true },
                 { "label": "Close tab", "do": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its {{ .agents[.c.agent].name // \"agent\" }} process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
                 { "label": "Archive", "do": { "do": "chat.archive", "chat": "{{ .c.id }}" } }
@@ -2704,7 +2705,7 @@
     "menu_settings": "Settings…", "menu_palette": "Command Palette", "menu_quit": "Quit {app}",
     "settings_intro": "Everything about the app is here. Your file is merged over the built-in defaults; set a key to null to remove a default. Reference for you and agents: {docs}",
     "connecting": "Connecting…", "terminal": "Terminal", "settings_reference": "Reference", "settings_save": "Save", "prompt_title": "Enter a value",
-    "rename_section_title": "Rename section", "rename_worktree_title": "Rename worktree", "rename_branch_title": "Rename branch",
+    "rename_section_title": "Rename section", "rename_chat_title": "Rename chat", "rename_worktree_title": "Rename worktree", "rename_branch_title": "Rename branch",
     "new_worktree_title": "New {repo} worktree from branch (new or existing)", "project_settings_title": "{name} settings",
     "project_field_name": "Name", "project_field_letter": "Badge letter", "project_field_hue": "Badge color (hue, 0–360)",
     "usage_session": "Session", "usage_daily": "Daily", "usage_weekly": "Weekly", "usage_days": "{n} days", "usage_hours": "{n}h",

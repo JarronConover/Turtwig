@@ -274,6 +274,8 @@ pub struct Workspace {
     pub(crate) model: Model,
     pub(crate) selected: Option<String>,
     pub(crate) active_chat: HashMap<String, String>,
+    /** Each worktree's tabs in the order they were last shown, newest last: closing one shows the one before. */
+    tab_history: HashMap<String, Vec<String>>,
     pub(crate) state: Map<String, Value>,
     /** What the user changed (persisted); `state` is the settings' starting values with this on top. */
     user_state: Map<String, Value>,
@@ -575,6 +577,7 @@ impl Workspace {
             model: Model::default(),
             selected: None,
             active_chat: HashMap::new(),
+            tab_history: HashMap::new(),
             state,
             user_state,
             exprs: Exprs::default(),
@@ -1718,6 +1721,7 @@ impl Workspace {
                     if let Some(path) = self.all_worktrees().iter().find(|w| w.host == to && w.chat_ids.contains(&id)).map(|w| w.path.clone()) {
                         self.opened.insert(id.clone());
                         self.closed.remove(&id);
+                        self.tab_to_end(&id);
                         self.active_chat.insert(path.clone(), id);
                         self.selected = Some(path);
                         self.pending_move = None;
@@ -1726,6 +1730,7 @@ impl Workspace {
                 if let Some(id) = self.pending_select.clone() {
                     if let Some(path) = self.all_worktrees().iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone()) {
                         self.opened.insert(id.clone());
+                        self.tab_to_end(&id);
                         self.active_chat.insert(path.clone(), id);
                         self.selected = Some(path);
                         self.pending_select = None;
@@ -2076,6 +2081,7 @@ impl Workspace {
             | Call::ChatStart { chat_id }
             | Call::ChatStop { chat_id }
             | Call::ChatArchive { chat_id }
+            | Call::ChatRename { chat_id, .. }
             | Call::ChatSend { chat_id, .. }
             | Call::ChatKeys { chat_id, .. } => self.host_of_chat(chat_id),
             Call::ChatNew { dir: Some(d), .. } => self.host_of_path(d),
@@ -2149,11 +2155,26 @@ impl Workspace {
     fn chats_of(&self, w: &Worktree) -> Vec<&Chat> {
         let mut chats: Vec<&Chat> = w.chat_ids.iter().filter_map(|id| self.chat(id)).collect();
         chats.extend(self.sub_chats.iter().filter(|(p, _)| *p == w.path).map(|(_, c)| c));
-        if let Some(order) = self.state.get("tab_order").and_then(|o| o.get(&w.path)).and_then(Value::as_array) {
-            let rank = |id: &str| order.iter().position(|x| x.as_str() == Some(id)).unwrap_or(usize::MAX);
-            chats.sort_by_key(|c| rank(&c.id));
-        }
+        // Tabs dragged or opened here keep their place in `state.tab_order`; the rest follow, oldest first.
+        let order = self.state.get("tab_order").and_then(|o| o.get(&w.path)).and_then(Value::as_array);
+        let rank = |id: &str| order.and_then(|o| o.iter().position(|x| x.as_str() == Some(id))).unwrap_or(usize::MAX);
+        chats.sort_by(|a, b| rank(&a.id).cmp(&rank(&b.id)).then_with(|| a.created_at.cmp(&b.created_at)));
         chats
+    }
+
+    /** Puts a chat's tab last in its worktree's tab bar (`state.tab_order`), where a tab opened just now goes. */
+    pub(crate) fn tab_to_end(&mut self, id: &str) {
+        let Some(path) = self.all_worktrees().iter().find(|w| w.chat_ids.iter().any(|c| c == id)).map(|w| w.path.clone())
+            .or_else(|| self.sub_chats.iter().find(|(_, c)| c.id == id).map(|(p, _)| p.clone()))
+        else {
+            return;
+        };
+        let mut ids = self.chats_of_path(&path);
+        ids.retain(|x| x != id);
+        ids.push(id.to_string());
+        let mut order = self.state.get("tab_order").and_then(Value::as_object).cloned().unwrap_or_default();
+        order.insert(path, json!(ids));
+        self.set_state("tab_order".into(), Value::Object(order));
     }
 
     pub(crate) fn chats_of_path(&self, path: &str) -> Vec<String> {
@@ -2181,7 +2202,8 @@ impl Workspace {
     }
 
     /** The selected worktree's active chat: the one chosen there (this run, else as saved in
-    `state.active_tabs` from an earlier one), else its first open tab, else by `chat.open_on_select`:
+    `state.active_tabs` from an earlier one), else the open tab shown most recently before it, else its
+    first open tab, else by `chat.open_on_select`:
     "recent" (the one with the newest activity), "first" (the first tab), or none. */
     pub(crate) fn current_chat(&self) -> Option<&Chat> {
         let w = self.current_worktree()?;
@@ -2195,6 +2217,10 @@ impl Workspace {
         };
         active
             .and_then(|id| chats.iter().find(|c| c.id == id && !self.closed.contains(&c.id)).copied())
+            .or_else(|| {
+                let seen = self.tab_history.get(&w.path)?;
+                seen.iter().rev().find_map(|id| chats.iter().find(|c| &c.id == id && self.chat_open(c)).copied())
+            })
             .or_else(|| chats.iter().find(|c| self.chat_open(c)).copied())
             .or_else(fallback)
     }
@@ -2652,6 +2678,11 @@ impl Workspace {
         let Some(w) = self.current_worktree().cloned() else { return };
         if let Some(chat) = self.current_chat().cloned() {
             self.save_active_tab(&w.path, &chat.id);
+            let seen = self.tab_history.entry(w.path.clone()).or_default();
+            if seen.last() != Some(&chat.id) {
+                seen.retain(|c| c != &chat.id);
+                seen.push(chat.id.clone());
+            }
             if !self.watching.contains(&chat.id) {
                 self.watching.insert(chat.id.clone());
                 let from = self.transcripts.get(&chat.id).map(|t| t.lines).unwrap_or(0);

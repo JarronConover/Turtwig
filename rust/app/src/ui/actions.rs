@@ -18,6 +18,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.keys", "{chat, keys: [..]}: press keys in the chat's session (Enter, Escape, Up, 1, ...)"),
     ("chat.archive / chat.stop / chat.start", "{chat}"),
     ("chat.close", "{chat}: close its tab and stop its Claude process (wherever it runs)"),
+    ("chat.rename", "{chat, name?}: rename a chat and its tab; its agent's own titles no longer replace the name (asks when name is missing)"),
     ("chat.take_over", "{chat}: ask, then close a chat in the program running it (super.engineering) and continue it here"),
     ("chat.open", "{chat, host?, force?}: open a chat as a tab, resuming its process if it isn't running (host: where a chat from `.history` lives)"),
     ("tab.move", "{chat?, target: chat id, zone: before|after}: reorder a worktree's tabs (chat defaults to `dragged`)"),
@@ -388,8 +389,12 @@ impl Workspace {
                     // One super.engineering still runs opens to watch; resuming it (force) takes it over.
                     let elsewhere = self.chat(&id).is_some_and(|c| c.status == "running_elsewhere")
                         && a.get("force").and_then(Value::as_bool) != Some(true);
+                    let reopened = !self.chat(&id).is_some_and(|c| self.chat_open(c));
                     self.closed.remove(&id);
                     self.opened.insert(id.clone());
+                    if reopened {
+                        self.tab_to_end(&id);
+                    }
                     let alive = self.chat(&id).map(|c| (c.alive, c.host.clone()));
                     if let Some(p) = self.all_worktrees().iter().find(|w| w.chat_ids.contains(&id)).map(|w| w.path.clone()) {
                         self.active_chat.insert(p.clone(), id.clone());
@@ -612,6 +617,20 @@ impl Workspace {
                     }
                 }
             }
+            "chat.rename" => {
+                if let Some(id) = chat() {
+                    match s("name") {
+                        Some(n) => self.call(Call::ChatRename { chat_id: id, name: n }, cx),
+                        None => {
+                            let current = self.chat(&id).map(|c| c.name.clone()).unwrap_or_default();
+                            let title = self.tr("rename_chat_title", "Rename chat", &[]);
+                            self.name_dialog(&title, &current, window, cx, move |ws, n, cx| {
+                                ws.call(Call::ChatRename { chat_id: id.clone(), name: n }, cx)
+                            });
+                        }
+                    }
+                }
+            }
             "section.delete" => {
                 if let Some(id) = s("id") {
                     self.call(Call::SectionDelete { id }, cx);
@@ -713,6 +732,7 @@ impl Workspace {
                         }
                         self.closed.remove(&id);
                         self.opened.insert(id.clone());
+                        self.tab_to_end(&id);
                         self.active_chat.insert(path.clone(), id);
                         self.select(path, window, cx);
                     }
