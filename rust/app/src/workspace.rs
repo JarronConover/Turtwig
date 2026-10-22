@@ -313,7 +313,7 @@ pub struct Workspace {
     watching: HashSet<String>,
     pub(crate) composers: HashMap<String, Entity<TextareaState>>,
     /** Each composer's formatting turned back into plain text, and where its last typing ended (live_markdown). */
-    live_md: HashMap<String, (HashSet<usize>, Option<usize>)>,
+    live_md: HashMap<String, (HashSet<usize>, Option<usize>, Vec<(std::ops::Range<usize>, String)>)>,
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
     term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
     pub(crate) expanded_tools: HashSet<String>,
@@ -700,7 +700,13 @@ impl Workspace {
         let mut ws = ws;
         let me = cx.entity().downgrade();
         ws._subscriptions.push(cx.intercept_keystrokes(move |e, window, cx| {
-            if e.keystroke.key == "backspace" && !e.keystroke.modifiers.modified() && me.update(cx, |ws, cx| ws.unformat_on_backspace(window, cx)).unwrap_or(false) {
+            let k = &e.keystroke;
+            let key = match (k.key.as_str(), k.modifiers.modified(), k.modifiers.shift && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.alt) {
+                ("backspace" | "left" | "right", false, _) => k.key.as_str(),
+                ("enter", _, true) => "newline",
+                _ => return,
+            };
+            if me.update(cx, |ws, cx| ws.composer_key(key, window, cx)).unwrap_or(false) {
                 cx.stop_propagation();
             }
         }));
@@ -2819,16 +2825,28 @@ impl Workspace {
                     }
                 }
                 InputEvent::Change => {
-                    if let Some(c) = ws.composers.get(&id) {
+                    if let Some(c) = ws.composers.get(&id).cloned() {
                         let text = c.read(cx).value().to_string();
-                        if ws.composer_texts.get(&id) != Some(&text) {
-                            let old = ws.composer_texts.insert(id.clone(), text.clone()).unwrap_or_default();
+                        let old = ws.composer_texts.get(&id).cloned().unwrap_or_default();
+                        let md = ws.live_md.entry(id.clone()).or_default();
+                        if old != text {
                             let (start, old_end, new_end) = crate::live_markdown::edit(&old, &text);
-                            let md = ws.live_md.entry(id.clone()).or_default();
                             crate::live_markdown::shift(&mut md.0, start, old_end, new_end);
                             md.1 = (old_end == start && new_end > start).then_some(new_end);
-                            ws.restyle_composer(&id, cx);
+                            ws.sync_markdown(&id, window, cx);
                             ws.ctx_rev += 1;
+                        } else {
+                            // The same text with a hidden mark gone (undo after it formatted): keep it plain.
+                            let now: Vec<_> = c.read(cx).tokens().iter().map(|s| s.range()).collect();
+                            let gone: Vec<_> = md.2.iter().filter(|(r, _)| !now.contains(r)).map(|(r, _)| r.clone()).collect();
+                            if !gone.is_empty() {
+                                for k in crate::live_markdown::parse(&text, &md.0) {
+                                    if k.pieces.iter().any(|(r, _)| gone.contains(r)) {
+                                        md.0.insert(k.id);
+                                    }
+                                }
+                                ws.sync_markdown(&id, window, cx);
+                            }
                         }
                     }
                     ws.update_completion(&id, cx)
@@ -2837,7 +2855,7 @@ impl Workspace {
             }
         }));
         self.composers.insert(chat_id.to_string(), state);
-        self.restyle_composer(chat_id, cx);
+        self.sync_markdown(chat_id, window, cx);
     }
 
     /** Opens, narrows, or closes the completion list from the word being typed (settings
@@ -2965,48 +2983,121 @@ impl Workspace {
         }
     }
 
-    /** Paints a composer's markdown as it will show once sent (`chat.live_markdown`: `enabled`, and `styles`
-    by kind: marker, quote, heading, list, bold, italic, strike, code, code_block, link, url). */
-    pub(crate) fn restyle_composer(&mut self, id: &str, cx: &mut Context<Self>) {
+    /** Shows a composer's markdown as it will look once sent (`chat.live_markdown`): its marks hide
+    (`hide_markers`, as atomic tokens the caret steps over) and `styles` paint the rest, by kind: marker,
+    quote, heading, list, bold, italic, strike, code, code_block, link, url. */
+    pub(crate) fn sync_markdown(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::input::{InlineToken, TextDecoration};
         let Some(c) = self.composers.get(id).cloned() else { return };
-        let cfg = self.settings.chat.get("live_markdown");
-        let decs = match cfg.filter(|c| c.get("enabled").and_then(Value::as_bool) != Some(false)) {
-            Some(cfg) => {
-                let styles = cfg.get("styles").and_then(Value::as_object).cloned().unwrap_or_default();
-                let literal = self.live_md.get(id).map(|m| m.0.clone()).unwrap_or_default();
-                let text = c.read(cx).value().to_string();
-                crate::live_markdown::decorations(&text, &literal, &styles, &self.settings.theme)
-            }
-            None => vec![],
+        let cfg = self.settings.chat.get("live_markdown").filter(|c| c.get("enabled").and_then(Value::as_bool) != Some(false)).cloned();
+        let text = c.read(cx).value().to_string();
+        self.composer_texts.insert(id.to_string(), text.clone());
+        let literal = self.live_md.get(id).map(|m| m.0.clone()).unwrap_or_default();
+        let found = if cfg.is_some() { crate::live_markdown::parse(&text, &literal) } else { vec![] };
+        let hide = cfg.as_ref().is_some_and(|c| c.get("hide_markers").and_then(Value::as_bool) != Some(false));
+        let want: Vec<(std::ops::Range<usize>, &str)> = if hide {
+            let text = text.as_str();
+            found.iter().flat_map(|k| k.pieces.iter().filter_map(move |p| crate::live_markdown::token_tag(k, p, text).map(|t| (p.0.clone(), t)))).collect()
+        } else {
+            vec![]
         };
-        let decs = decs.into_iter().map(|(r, s)| gpui_kit::component::input::TextDecoration::new(r, s)).collect();
+        let have: Vec<(std::ops::Range<usize>, String)> = c.read(cx).tokens().iter().filter_map(|s| Some((s.range(), s.token().id().strip_prefix("md:")?.to_string()))).collect();
+        // Tokens keep the text as it is, so no change moves another's offsets; the caret stays where it was.
+        let sel = c.read(cx).selected_range();
+        let changes = have.iter().any(|(r, t)| !want.iter().any(|(w, u)| w == r && u == t)) || want.iter().any(|(w, u)| !have.iter().any(|(r, t)| w == r && u == t));
+        for (r, tag) in &have {
+            if !want.iter().any(|(w, t)| w == r && t == tag) {
+                let utf16 = text[..r.start].encode_utf16().count()..text[..r.end].encode_utf16().count();
+                let plain = text[r.clone()].to_string();
+                c.update(cx, |s, cx| gpui_kit::EntityInputHandler::replace_text_in_range(s, Some(utf16), &plain, window, cx));
+            }
+        }
+        for (r, tag) in &want {
+            if !have.iter().any(|(h, t)| h == r && t == tag) {
+                let token = InlineToken::new(format!("md:{tag}"), text[r.clone()].to_string());
+                c.update(cx, |s, cx| { let _ = s.replace_range_with_token(r.clone(), token, window, cx); });
+            }
+        }
+        if changes {
+            c.update(cx, |s, cx| s.set_selected_range(sel, cx));
+        }
+        if let Some(m) = self.live_md.get_mut(id) {
+            m.2 = want.iter().map(|(r, t)| (r.clone(), t.to_string())).collect();
+        }
+        let styles = cfg.as_ref().and_then(|c| c.get("styles")).and_then(Value::as_object).cloned().unwrap_or_default();
+        let decs = if cfg.is_some() { crate::live_markdown::decorations(&text, &literal, &styles, &self.settings.theme) } else { vec![] };
+        let decs = decs.into_iter().map(|(r, s)| TextDecoration::new(r, s)).collect();
         c.update(cx, |s, cx| s.set_text_decorations(decs, cx));
     }
 
-    /** The formatting a composer shows, as [{text, kind}], for inspect.json. */
+    /** The formatting a composer shows ({pieces: [{text, kind}], hidden: marks drawn otherwise, caret}), for inspect.json. */
     pub(crate) fn composer_markdown(&self, id: &str, cx: &App) -> Value {
         let Some(c) = self.composers.get(id) else { return Value::Null };
         let text = c.read(cx).value().to_string();
         let literal = self.live_md.get(id).map(|m| m.0.clone()).unwrap_or_default();
         let pieces = crate::live_markdown::parse(&text, &literal).into_iter().flat_map(|k| k.pieces);
-        Value::Array(pieces.map(|(r, k)| json!({"text": text[r].to_string(), "kind": format!("{k:?}")})).collect())
+        let pieces: Vec<Value> = pieces.map(|(r, k)| json!({"text": text[r].to_string(), "kind": format!("{k:?}")})).collect();
+        let tokens: Vec<Value> = c.read(cx).tokens().iter().map(|t| json!({"at": [t.range().start, t.range().end], "as": t.token().id().to_string()})).collect();
+        json!({"pieces": pieces, "hidden": tokens, "caret": c.read(cx).selected_range().start})
     }
 
-    /** Backspace in a composer right after the text that completed some formatting (a line's "> ", always;
-    a closing `**`, just after typing it) keeps the text and shows it plain. True when it did. */
-    fn unformat_on_backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /** Keys in a composer that act on its live markdown; true when one did and the key stops here.
+    Backspace right after what completed some formatting (a line's "> " any time, a closing `**` just after
+    typing it) keeps the text and shows it plain; otherwise backspace and the arrows step over hidden marks
+    as if they weren't there. Shift-Enter in a quote or list continues it, and on an empty item ends it. */
+    fn composer_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some((id, c)) = self.composers.iter().find(|(_, c)| c.read(cx).focus_handle(cx).is_focused(window)).map(|(i, c)| (i.clone(), c.clone())) else { return false };
+        if self.settings.chat.get("live_markdown").and_then(|c| c.get("enabled")).and_then(Value::as_bool) == Some(false) {
+            return false;
+        }
         let (sel, text) = { let s = c.read(cx); (s.selected_range(), s.value().to_string()) };
         if !sel.is_empty() {
             return false;
         }
+        let at = sel.start;
+        let hidden: Vec<std::ops::Range<usize>> = c.read(cx).tokens().iter().filter(|s| s.token().id() == "md:hide").map(|s| s.range()).collect();
         let md = self.live_md.entry(id.clone()).or_default();
-        let typed = md.1;
-        let Some(k) = crate::live_markdown::parse(&text, &md.0).into_iter().find(|k| k.trigger_end == sel.start && (k.block || typed == Some(sel.start))) else { return false };
-        md.0.insert(k.id);
-        md.1 = None;
-        self.restyle_composer(&id, cx);
-        true
+        match key {
+            "backspace" => {
+                let typed = md.1;
+                if let Some(k) = crate::live_markdown::parse(&text, &md.0).into_iter().find(|k| k.trigger_end == at && (k.block || typed == Some(at))) {
+                    md.0.insert(k.id);
+                    md.1 = None;
+                    self.sync_markdown(&id, window, cx);
+                    return true;
+                }
+                if let Some(r) = hidden.iter().find(|r| r.end == at) {
+                    c.update(cx, |s, cx| s.set_selected_range(r.start..r.start, cx));
+                }
+                false
+            }
+            "left" | "right" => {
+                let r = hidden.iter().find(|r| if key == "left" { r.end == at } else { r.start == at });
+                if let Some(r) = r {
+                    let to = if key == "left" { r.start } else { r.end };
+                    c.update(cx, |s, cx| s.set_selected_range(to..to, cx));
+                }
+                false
+            }
+            _ => {
+                let ls = text[..at].rfind('\n').map_or(0, |i| i + 1);
+                let le = text[at..].find('\n').map_or(text.len(), |i| at + i);
+                if md.0.contains(&ls) {
+                    return false;
+                }
+                let Some((n, next)) = crate::live_markdown::continuation(&text[ls..le]) else { return false };
+                if at < ls + n {
+                    return false;
+                }
+                if text[ls + n..le].trim().is_empty() {
+                    let utf16 = text[..ls].encode_utf16().count()..text[..le].encode_utf16().count();
+                    c.update(cx, |s, cx| gpui_kit::EntityInputHandler::replace_text_in_range(s, Some(utf16), "", window, cx));
+                } else {
+                    c.update(cx, |s, cx| s.insert(format!("\n{next}"), window, cx));
+                }
+                true
+            }
+        }
     }
 
     /** `focus {area, chat?}`: put typing in a chat's composer ("composer", default the selected chat's) or
@@ -4353,6 +4444,11 @@ impl Workspace {
                 self.ctx_rev += 1;
             }
         }
+        // Text set without an edit (a sent message clearing it, a completion, a draft) formats afresh.
+        if self.composer_texts.get(&chat).map(String::as_str) != Some(c.read(cx).value().as_ref()) {
+            self.live_md.remove(&chat);
+            self.sync_markdown(&chat, window, cx);
+        }
         // Claude Code's suggested next prompt shows as the placeholder; Tab fills it in (`chat.suggestions`).
         let suggestion = (self.settings.chat.get("suggestions").and_then(Value::as_bool) != Some(false))
             .then(|| self.chat(&chat).filter(|c| c.state == "idle").and_then(|c| c.suggestion.clone()))
@@ -4367,7 +4463,19 @@ impl Workspace {
         let view = cx.entity().downgrade();
         let (paste_view, paste_chat) = (view.clone(), chat.clone());
         let paste_attaches = self.settings.chat.get("paste_attach").and_then(Value::as_bool) != Some(false);
-        let textarea = Textarea::new(&c).appearance(false).on_paste(move |item, window, cx| {
+        // Hidden markdown marks (sync_markdown): a quote's "> " draws as a bar, a list's "- " as a bullet.
+        let md = self.settings.chat.get("live_markdown").cloned().unwrap_or_default();
+        let md_color = |k: &str, d: &str| crate::ui::style::color(md.get(k).unwrap_or(&Value::from(d)), &self.settings.theme).unwrap_or(gpui_kit::transparent_black());
+        let (bar, bullet) = (md_color("quote_bar", "@text_faint"), md_color("bullet", "@text_muted"));
+        let textarea = Textarea::new(&c).appearance(false).token(move |t, _, _| {
+            let h = t.line_height();
+            match t.token().id().as_ref() {
+                "md:quote" => div().w(px(14.)).h(h).flex().child(div().w(px(3.)).h_full().rounded_sm().bg(bar)).into_any_element(),
+                "md:bullet" => div().w(px(16.)).h(h).flex().items_center().text_color(bullet).child("•").into_any_element(),
+                "md:hide" => div().w(px(0.)).h(h).into_any_element(),
+                _ => div().child(t.token().label().clone()).into_any_element(),
+            }
+        }).on_paste(move |item, window, cx| {
             if !paste_attaches {
                 return false;
             }

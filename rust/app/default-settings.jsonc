@@ -2474,10 +2474,12 @@
     // ---- The message box ----
     "composer_lines": { "min": 1, "max": 10 }, "composer_gap": 6, "composer_radius": 6,
     // Markdown shows formatted as it's typed ("> " makes a quote, **x** bold once closed); the text sent stays
-    // as typed. Backspace right after what completed it shows it plain again. Each style: color, background,
-    // bold, italic, underline, strikethrough, fade (0-1). marker: the markdown characters themselves.
+    // as typed. Backspace right after what completed it shows it plain again; Shift-Enter in a quote or list
+    // continues it. hide_markers: the markdown characters hide (a quote's "> " draws as quote_bar, a list's
+    // "- " as a bullet); the caret steps over them. Each style: color, background, bold, italic, underline,
+    // strikethrough, fade (0-1). marker: markdown characters still shown (code fences, numbered lists).
     "live_markdown": {
-      "enabled": true,
+      "enabled": true, "hide_markers": true, "quote_bar": "@text_faint", "bullet": "@text_muted",
       "styles": {
         "marker": { "color": "@text_faint" },
         "quote": { "color": "@text_muted", "italic": true },

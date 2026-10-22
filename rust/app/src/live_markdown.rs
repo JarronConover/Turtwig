@@ -92,6 +92,39 @@ pub fn parse(text: &str, literal: &HashSet<usize>) -> Vec<Construct> {
     out
 }
 
+/** What a piece shows as once its markdown hides (`hide_markers`): "quote" (a bar), "bullet" (•) or "hide"
+(nothing); None: it stays text. Code fences and numbered lists stay. */
+pub fn token_tag(k: &Construct, piece: &(Range<usize>, Kind), text: &str) -> Option<&'static str> {
+    let s = &text[piece.0.clone()];
+    match piece.1 {
+        Kind::Marker if k.block => match s.as_bytes().first() {
+            Some(b'>') => Some("quote"),
+            Some(b'#') => Some("hide"),
+            _ => None,
+        },
+        Kind::Marker | Kind::Url => Some("hide"),
+        Kind::List if matches!(s, "- " | "* " | "+ ") => Some("bullet"),
+        _ => None,
+    }
+}
+
+/** For a new line typed inside a quote or list: the marker's length (with its indent), and the marker the
+next line starts with ("> ", "- ", "3. "). */
+pub fn continuation(line: &str) -> Option<(usize, String)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let body = &line[indent..];
+    let (n, kind) = block_marker(body)?;
+    let next = match kind {
+        Kind::Quote => "> ".to_string(),
+        Kind::List => match body[..n].trim_end().strip_suffix(['.', ')']).and_then(|d| d.parse::<u64>().ok()) {
+            Some(d) => format!("{}{} ", d + 1, &body[n - 2..n - 1]),
+            None => body[..n].to_string(),
+        },
+        _ => return None,
+    };
+    Some((indent + n, format!("{}{next}", &line[..indent])))
+}
+
 /** A line's own marker ("> ", "## ", "- ", "1. "): its length and what the line becomes. */
 fn block_marker(body: &str) -> Option<(usize, Kind)> {
     if body.starts_with("> ") {
@@ -280,6 +313,14 @@ mod tests {
     fn a_code_block_holds_its_lines() {
         let k = kinds("```\nlet x = **1**;\n```", &[]);
         assert_eq!(k, vec![("```".into(), Kind::Marker), ("let x = **1**;".into(), Kind::CodeBlock), ("```".into(), Kind::Marker)]);
+    }
+
+    #[test]
+    fn a_new_line_in_a_list_or_quote_continues_it() {
+        assert_eq!(super::continuation("> a"), Some((2, "> ".into())));
+        assert_eq!(super::continuation("  - a"), Some((4, "  - ".into())));
+        assert_eq!(super::continuation("9. a"), Some((3, "10. ".into())));
+        assert_eq!(super::continuation("# a"), None);
     }
 
     #[test]
