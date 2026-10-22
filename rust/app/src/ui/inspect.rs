@@ -131,15 +131,19 @@ impl Workspace {
         })
     }
 
-    /** Sends the app's files (inspect.json and the rest) to every other connected machine, at most every
-    `inspect.mirror_ms`, each only when it changed: agents there read them as they would here. */
+    /** Sends the app's files (inspect.json and the rest) to the other machines whose agents relayed an action
+    in the last `inspect.mirror_active_secs`, at most every `inspect.mirror_ms`, each only when it changed:
+    they read them as they would here. Only those: inspect.json runs to megabytes, and it would hold up
+    everything else on the connection (a chat's transcript as it opens). */
     pub(crate) fn mirror_app_files(&mut self, names: &[&str]) {
         let every = self.settings.num("inspect.mirror_ms", 1500.);
         if every <= 0. || self.mirror_at.is_some_and(|t| (t.elapsed().as_millis() as f64) < every) && names != ["snapshot.png"] {
             return;
         }
         self.mirror_at = Some(std::time::Instant::now());
-        let hosts: Vec<Remote> = self.remotes.iter().filter(|(h, _)| !self.is_local_host(h) && self.host_up.get(*h) == Some(&true)).map(|(_, r)| r.clone()).collect();
+        let active = self.settings.num("inspect.mirror_active_secs", 300.);
+        let using = |h: &str| self.relayed_at.get(h).is_some_and(|t| t.elapsed().as_secs_f64() < active);
+        let hosts: Vec<Remote> = self.remotes.iter().filter(|(h, _)| !self.is_local_host(h) && self.host_up.get(*h) == Some(&true) && using(h)).map(|(_, r)| r.clone()).collect();
         if hosts.is_empty() {
             return;
         }

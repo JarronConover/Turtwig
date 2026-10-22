@@ -25,6 +25,16 @@ def state():
     # A fresh one when the app answers quickly (it writes inspect.json only now and then on its own).
     if platform.system() == "Darwin":
         run({"do": "inspect.refresh"}, wait=True, timeout=2.0, quiet=True, pickup=1.0)
+    else:
+        # Through the relay: the app sends its files only to machines asking, the new inspect.json just
+        # after the answer.
+        path = DIR / "inspect.json"
+        before = path.stat().st_mtime if path.exists() else 0
+        if run({"do": "inspect.refresh"}, wait=True, timeout=5.0, quiet=True, pickup=3.0):
+            for _ in range(60):
+                if path.exists() and path.stat().st_mtime > before:
+                    break
+                time.sleep(0.05)
     return json.loads((DIR / "inspect.json").read_text())
 
 

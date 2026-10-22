@@ -748,7 +748,7 @@ impl Workspace {
             }
             "transcript.load_earlier" => {
                 if let Some(id) = chat() {
-                    self.load_earlier(&id, cx);
+                    self.load_earlier(&id, None, cx);
                 }
             }
             "worktree.rename_branch" => {

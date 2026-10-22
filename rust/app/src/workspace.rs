@@ -234,7 +234,8 @@ pub struct Workspace {
     /** Each `input` node's `on.submit` action and the context it was drawn in. */
     pub(crate) input_submits: HashMap<String, (Value, jaq_json::Val)>,
     /** Chats whose older lines are being fetched. */
-    loading_earlier: std::collections::HashSet<String>,
+    /** Chats loading older lines; true: filling in after a quick first page, with no chip. */
+    loading_earlier: HashMap<String, bool>,
     /** The open completion list under a composer: (chat, trigger, entries, selected). */
     pub(crate) completion: Option<(String, String, Vec<crate::completions::Entry>, usize)>,
     /** Messages typed while a chat was working, sent one per turn as it finishes (`chat.queue`). */
@@ -336,6 +337,8 @@ pub struct Workspace {
     pub(crate) inspect_digest: u64,
     /** When the app's files last went to the other machines, and what each held. */
     pub(crate) mirror_at: Option<std::time::Instant>,
+    /** When each other machine last relayed an action here: the app's files go only to those using it. */
+    pub(crate) relayed_at: HashMap<String, std::time::Instant>,
     pub(crate) mirrored: HashMap<String, u64>,
     /** A chat being moved and where to: selected there once it shows up. */
     pub(crate) pending_move: Option<(String, String)>,
@@ -624,6 +627,7 @@ impl Workspace {
             inspect_at: None,
             inspect_digest: 0,
             mirror_at: None,
+            relayed_at: HashMap::new(),
             mirrored: HashMap::new(),
             pending_move: None,
             perf: Default::default(),
@@ -1784,7 +1788,15 @@ impl Workspace {
                 self.log_action(&json!({"from": host, "action": "relayed"}));
                 let req = crate::behavior::parse_request(None, action);
                 match crate::behavior::remote_allowed(self.settings.get("inspect.remote_actions"), &req.action) {
-                    Ok(()) => self.pending_requests.push((req, Some(host.to_string()))),
+                    Ok(()) => {
+                        // A machine that starts using the app again gets every file, changed or not.
+                        let active = self.settings.num("inspect.mirror_active_secs", 300.);
+                        if self.relayed_at.insert(host.to_string(), std::time::Instant::now()).is_none_or(|t| t.elapsed().as_secs_f64() >= active) {
+                            self.mirrored.clear();
+                        }
+                        self.mirror_at = None;
+                        self.pending_requests.push((req, Some(host.to_string())))
+                    }
                     Err(why) => {
                         self.exprs.note(format!("relayed action from {host} refused: {why}"));
                         if let Some(id) = req.id.as_deref().and_then(crate::behavior::safe_id) {
@@ -2732,14 +2744,21 @@ impl Workspace {
                 let from = self.transcripts.get(&chat.id).map(|t| t.lines).unwrap_or(0);
                 let remote = self.route(&Call::TranscriptUnwatch { chat_id: chat.id.clone() });
                 let id = chat.id.clone();
-                // Only the newest `chat.transcript_tail` entries on first load: dispatcher transcripts run to 80MB.
-                let tail = self.settings.chat.get("transcript_tail").and_then(Value::as_u64).map(|n| n as usize).filter(|_| from == 0);
+                // Only the newest `chat.transcript_tail` entries on first load (dispatcher transcripts run to 80MB),
+                // the last `transcript_first` of them first, to show sooner; the rest come right after.
+                let n = |k: &str| self.settings.chat.get(k).and_then(Value::as_u64).map(|n| n as usize);
+                let (all, first) = (n("transcript_tail"), n("transcript_first"));
+                let tail = first.zip(all).map(|(f, a)| f.min(a)).or(all).filter(|_| from == 0);
+                let rest = all.zip(tail).map(|(a, t)| a - t).filter(|r| *r > 0);
                 cx.spawn(async move |this, cx| {
                     if let Ok(v) = remote.call(Call::TranscriptRead { chat_id: id.clone(), from, tail, before: None }).await {
                         let entries = v["entries"].as_array().cloned().unwrap_or_default();
                         let start = v["from"].as_u64().unwrap_or(from as u64) as usize;
                         this.update(cx, |ws, cx| {
                             ws.transcripts.entry(id.clone()).or_insert_with(|| crate::transcript::Transcript::for_chat(&id)).append(start, &entries);
+                            if let Some(page) = rest.filter(|_| start > 0) {
+                                ws.load_earlier(&id, Some(page), cx);
+                            }
                             cx.notify();
                         })
                         .ok();
@@ -4101,9 +4120,9 @@ impl Workspace {
         let working = if designer { self.designer.working } else { self.chat(&chat_id).map(|c| c.state == "working").unwrap_or(false) };
         let state = self.sync_list(&chat_id, working);
         if !designer && !state.is_following_tail() && state.item_count() > 0 && state.logical_scroll_top().item_ix <= self.settings.num("chat.load_earlier_within", 0.) as usize && self.transcripts.get(&chat_id).is_some_and(|t| t.start > 0) {
-            self.load_earlier(&chat_id, cx);
+            self.load_earlier(&chat_id, None, cx);
         }
-        let loading_earlier = self.loading_earlier.contains(&chat_id).then(|| {
+        let loading_earlier = (self.loading_earlier.get(&chat_id) == Some(&false)).then(|| {
             let st = self.settings.chat.get("loading_chip").or_else(|| self.settings.chat.get("jump")).and_then(Value::as_object).cloned().unwrap_or_default();
             let label = self.settings.chat.get("jump_labels").and_then(|l| l.get("loading")).and_then(Value::as_str).unwrap_or("Loading earlier messages…").to_string();
             div().absolute().top(px(self.settings.num("chat.loading_chip_top", 10.) as f32)).left_0().right_0().flex().justify_center()
@@ -4140,12 +4159,13 @@ impl Workspace {
 
     /** Loads `chat.transcript_page` more of a chat's older lines (when scrolled to the top), keeping
     the view where it was. */
-    pub(crate) fn load_earlier(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn load_earlier(&mut self, chat_id: &str, page: Option<usize>, cx: &mut Context<Self>) {
         let Some(t) = self.transcripts.get(chat_id) else { return };
-        if t.start == 0 || !self.loading_earlier.insert(chat_id.to_string()) {
+        if t.start == 0 || self.loading_earlier.contains_key(chat_id) {
             return;
         }
-        let page = self.settings.chat.get("transcript_page").and_then(Value::as_u64).unwrap_or(600) as usize;
+        self.loading_earlier.insert(chat_id.to_string(), page.is_some());
+        let page = page.unwrap_or_else(|| self.settings.chat.get("transcript_page").and_then(Value::as_u64).unwrap_or(600) as usize);
         let before = t.start;
         let remote = self.route(&Call::TranscriptUnwatch { chat_id: chat_id.to_string() });
         let id = chat_id.to_string();

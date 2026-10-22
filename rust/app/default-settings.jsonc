@@ -2539,8 +2539,9 @@
     // Trace-style transcript (after shadcn's Trace): user turns as bubbles, replies as text, steps as quiet lines.
     "fold_steps_after": 5,
     "step_detail_lines": 40,
-    // How many of a chat's newest transcript entries to load when it opens (long chats run to 40,000+).
-    "transcript_tail": 600,
+    // How many of a chat's newest transcript entries to load when it opens (long chats run to 40,000+);
+    // the last transcript_first of them come first, to show sooner, and the rest right after.
+    "transcript_tail": 600, "transcript_first": 150,
     // How many more older entries to load each time you scroll to the top of a long chat.
     "transcript_page": 600,
     // Typing one of these at the start of a word opens a list of matches under the composer.
@@ -2885,8 +2886,9 @@
     // Presses go in activity.log too ({"input": ..., "node": id, "count": n}), to see where clicks land.
     "log_input": true,
     // inspect.json, activity.log, problems.txt and snapshot.png also go to the other machines' settings
-    // folders (at most this often), so agents there see the app; their `abx do` reaches the app too.
-    "mirror_ms": 1500,
+    // folders (at most this often), so agents there see the app; their `abx do` reaches the app too. Only
+    // to a machine that relayed an action in the last mirror_active_secs (`abx state` there asks first).
+    "mirror_ms": 1500, "mirror_active_secs": 300,
     // Which of those relayed actions run: "all", "none", or a list of action names.
     "remote_actions": "all"
   },
