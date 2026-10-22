@@ -3587,11 +3587,11 @@ impl Workspace {
                 window.close_dialog(cx);
             })
         };
+        // Enter arrives while the workspace is already being updated, so it saves through `ws`, not `submit`.
         for (_, input) in &inputs {
-            let s2 = submit.clone();
-            self._subscriptions.push(cx.subscribe_in(input, window, move |_, _, ev: &InputEvent, window, cx| {
+            self._subscriptions.push(cx.subscribe_in(input, window, move |ws, _, ev: &InputEvent, window, cx| {
                 if matches!(ev, InputEvent::PressEnter { .. }) {
-                    s2(window, cx);
+                    ws.submit_dialog(None, window, cx);
                 }
             }));
         }
@@ -3616,7 +3616,11 @@ impl Workspace {
         let done: std::rc::Rc<dyn Fn(&mut Workspace, Vec<String>, &mut Context<Workspace>)> = done;
         self.dialog = Some(OpenDialog { title: title_text, labels, inputs, need_first, done, view: false });
         if let Some(f) = focus {
-            f.update(cx, |s, cx| s.focus(window, cx));
+            use gpui_kit::component::input::RopeExt as _;
+            f.update(cx, |s, cx| {
+                let end = s.text().offset_to_position(s.text().len());
+                s.set_cursor_position(end, window, cx)
+            });
         }
     }
 
