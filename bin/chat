@@ -852,7 +852,10 @@ def cmd_send(args):
     run(["tmux", "send-keys", "-t", name, "-l", args.text])
     time.sleep(option("chat_send_pause_secs", 0.5))
     run(["tmux", "send-keys", "-t", name, "C-m"])
-    for _ in range(option("send_enter_tries", 4) if wait else 0):
+    # A slash command can open a menu that takes a moment to show (/artifacts, /model): a retried Enter
+    # would land in it and pick its first entry.
+    retries = 0 if args.text.startswith("/") else option("send_enter_tries", 4)
+    for _ in range(retries if wait else 0):
         time.sleep(option("send_enter_wait_ms", 350) / 1000)
         line = input_line(name, prompt)
         if not line or not args.text.startswith(line[:20]):

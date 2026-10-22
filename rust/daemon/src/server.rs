@@ -654,10 +654,13 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                 return Err("couldn't type into the chat".into());
             }
             // Claude Code can drop an Enter that lands while it's still taking the paste in: press it, then
-            // again (a few times at most) while the prompt line still holds the text.
+            // again (a few times at most) while the prompt line still holds the text. Not for a slash command:
+            // it can open a menu (/artifacts, /model), slow to show, where another Enter picks the first entry.
             std::thread::sleep(config::ms("send_paste_wait_ms", 150));
             let prompt = agents::text(&kind, "prompt_char", "❯");
-            for _ in 0..config::count("send_enter_tries", 4).max(1) {
+            let tries = if text.starts_with('/') { 1 } else { config::count("send_enter_tries", 4).max(1) };
+            let head: String = text.trim().lines().next().unwrap_or("").chars().take(20).collect();
+            for _ in 0..tries {
                 if !ok(&["send-keys", "-t", &target, "C-m"]) {
                     return Err("couldn't submit the message".into());
                 }
@@ -666,7 +669,8 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                     break;
                 }
                 let pane = util::run("tmux", &["capture-pane", "-p", "-e", "-t", &target], &[], None, util::tmux_wait()).stdout;
-                if model::typed_input(&pane, &prompt).is_none_or(|t| t.is_empty()) {
+                // A menu's selected row starts with the prompt too: retry only while the input holds this text.
+                if model::typed_input(&pane, &prompt).is_none_or(|t| t.is_empty() || !t.starts_with(&head)) {
                     break;
                 }
             }
