@@ -2136,11 +2136,18 @@ impl<M: InputModeKind> TextElement<M> {
                 ..
             } => (highlighter.borrow_mut(), diagnostics),
             _ => {
+                // A textarea's decorations don't follow edits; clip them to the text as it is now.
+                let layers: Vec<Vec<TextDecoration>> = state
+                    .extras
+                    .decoration_layers()
+                    .into_iter()
+                    .map(|l| crate::input::decorations::normalize(text, l.to_vec()))
+                    .collect();
                 return (!state.masked)
                     .then(|| {
                         compose_decoration_collections(
                             Vec::new(),
-                            state.extras.decoration_layers().into_iter(),
+                            layers.iter().map(Vec::as_slice),
                             visible_byte_range,
                         )
                     })

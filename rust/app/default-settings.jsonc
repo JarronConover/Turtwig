@@ -2473,6 +2473,25 @@
     "drop_overlay_icon": "paperclip", "drop_overlay_icon_size": 22,
     // ---- The message box ----
     "composer_lines": { "min": 1, "max": 10 }, "composer_gap": 6, "composer_radius": 6,
+    // Markdown shows formatted as it's typed ("> " makes a quote, **x** bold once closed); the text sent stays
+    // as typed. Backspace right after what completed it shows it plain again. Each style: color, background,
+    // bold, italic, underline, strikethrough, fade (0-1). marker: the markdown characters themselves.
+    "live_markdown": {
+      "enabled": true,
+      "styles": {
+        "marker": { "color": "@text_faint" },
+        "quote": { "color": "@text_muted", "italic": true },
+        "heading": { "bold": true },
+        "list": { "color": "@accent" },
+        "bold": { "bold": true },
+        "italic": { "italic": true },
+        "strike": { "strikethrough": true, "color": "@text_muted" },
+        "code": { "color": "@claude", "background": "@pill" },
+        "code_block": { "color": "@text_muted", "background": "@code_bg" },
+        "link": { "color": "@accent", "underline": true },
+        "url": { "color": "@text_faint" }
+      }
+    },
     "suggestion_hint": "   ⇥ Tab",
     // Keys besides Tab that take Claude's suggestion into an empty message box.
     "suggestion_keys": [],

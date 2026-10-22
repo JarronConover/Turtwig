@@ -311,6 +311,8 @@ pub struct Workspace {
     pub(crate) transcripts: HashMap<String, Transcript>,
     watching: HashSet<String>,
     pub(crate) composers: HashMap<String, Entity<TextareaState>>,
+    /** Each composer's formatting turned back into plain text, and where its last typing ended (live_markdown). */
+    live_md: HashMap<String, (HashSet<usize>, Option<usize>)>,
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
     term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
     pub(crate) expanded_tools: HashSet<String>,
@@ -689,8 +691,15 @@ impl Workspace {
             focus: cx.focus_handle(),
             _tasks: [watch, env_push, designer_listen, usage_loop, update_loop].into_iter().chain(clicks).collect(),
             _subscriptions: vec![],
+            live_md: HashMap::new(),
         };
         let mut ws = ws;
+        let me = cx.entity().downgrade();
+        ws._subscriptions.push(cx.intercept_keystrokes(move |e, window, cx| {
+            if e.keystroke.key == "backspace" && !e.keystroke.modifiers.modified() && me.update(cx, |ws, cx| ws.unformat_on_backspace(window, cx)).unwrap_or(false) {
+                cx.stop_propagation();
+            }
+        }));
         ws.settings_val = ws.settings_context();
         ws.sync_hosts(window, cx);
         ws.configure_motion();
@@ -2794,7 +2803,12 @@ impl Workspace {
                     if let Some(c) = ws.composers.get(&id) {
                         let text = c.read(cx).value().to_string();
                         if ws.composer_texts.get(&id) != Some(&text) {
-                            ws.composer_texts.insert(id.clone(), text);
+                            let old = ws.composer_texts.insert(id.clone(), text.clone()).unwrap_or_default();
+                            let (start, old_end, new_end) = crate::live_markdown::edit(&old, &text);
+                            let md = ws.live_md.entry(id.clone()).or_default();
+                            crate::live_markdown::shift(&mut md.0, start, old_end, new_end);
+                            md.1 = (old_end == start && new_end > start).then_some(new_end);
+                            ws.restyle_composer(&id, cx);
                             ws.ctx_rev += 1;
                         }
                     }
@@ -2804,6 +2818,7 @@ impl Workspace {
             }
         }));
         self.composers.insert(chat_id.to_string(), state);
+        self.restyle_composer(chat_id, cx);
     }
 
     /** Opens, narrows, or closes the completion list from the word being typed (settings
@@ -2929,6 +2944,50 @@ impl Workspace {
             });
             window.dispatch_action(Box::new(gpui_kit::component::input::MoveToEnd), cx);
         }
+    }
+
+    /** Paints a composer's markdown as it will show once sent (`chat.live_markdown`: `enabled`, and `styles`
+    by kind: marker, quote, heading, list, bold, italic, strike, code, code_block, link, url). */
+    pub(crate) fn restyle_composer(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(c) = self.composers.get(id).cloned() else { return };
+        let cfg = self.settings.chat.get("live_markdown");
+        let decs = match cfg.filter(|c| c.get("enabled").and_then(Value::as_bool) != Some(false)) {
+            Some(cfg) => {
+                let styles = cfg.get("styles").and_then(Value::as_object).cloned().unwrap_or_default();
+                let literal = self.live_md.get(id).map(|m| m.0.clone()).unwrap_or_default();
+                let text = c.read(cx).value().to_string();
+                crate::live_markdown::decorations(&text, &literal, &styles, &self.settings.theme)
+            }
+            None => vec![],
+        };
+        let decs = decs.into_iter().map(|(r, s)| gpui_kit::component::input::TextDecoration::new(r, s)).collect();
+        c.update(cx, |s, cx| s.set_text_decorations(decs, cx));
+    }
+
+    /** The formatting a composer shows, as [{text, kind}], for inspect.json. */
+    pub(crate) fn composer_markdown(&self, id: &str, cx: &App) -> Value {
+        let Some(c) = self.composers.get(id) else { return Value::Null };
+        let text = c.read(cx).value().to_string();
+        let literal = self.live_md.get(id).map(|m| m.0.clone()).unwrap_or_default();
+        let pieces = crate::live_markdown::parse(&text, &literal).into_iter().flat_map(|k| k.pieces);
+        Value::Array(pieces.map(|(r, k)| json!({"text": text[r].to_string(), "kind": format!("{k:?}")})).collect())
+    }
+
+    /** Backspace in a composer right after the text that completed some formatting (a line's "> ", always;
+    a closing `**`, just after typing it) keeps the text and shows it plain. True when it did. */
+    fn unformat_on_backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((id, c)) = self.composers.iter().find(|(_, c)| c.read(cx).focus_handle(cx).is_focused(window)).map(|(i, c)| (i.clone(), c.clone())) else { return false };
+        let (sel, text) = { let s = c.read(cx); (s.selected_range(), s.value().to_string()) };
+        if !sel.is_empty() {
+            return false;
+        }
+        let md = self.live_md.entry(id.clone()).or_default();
+        let typed = md.1;
+        let Some(k) = crate::live_markdown::parse(&text, &md.0).into_iter().find(|k| k.trigger_end == sel.start && (k.block || typed == Some(sel.start))) else { return false };
+        md.0.insert(k.id);
+        md.1 = None;
+        self.restyle_composer(&id, cx);
+        true
     }
 
     /** `focus {area, chat?}`: put typing in a chat's composer ("composer", default the selected chat's) or

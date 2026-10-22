@@ -1607,7 +1607,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         let row = self.text.offset_to_point(offset).row;
         let logical_start = self.text.line_start_offset(row);
 
-        if self.soft_wrap && self.is_code_editor() {
+        if self.soft_wrap {
             let wrap_point = self
                 .display_map
                 .offset_to_wrap_display_point_with_affinity(offset, line_end_affinity);
@@ -1615,7 +1615,9 @@ impl<M: InputModeKind> InputBaseState<M> {
                 && let Some(range) = line.wrapped_lines.get(wrap_point.local_row)
             {
                 let visual_start = logical_start + range.start;
-                if offset != visual_start {
+                // A textarea stays on the row it's drawn on, as a macOS text view does; the code
+                // editor's second press goes on to the logical line's start.
+                if offset != visual_start || !self.is_code_editor() {
                     return visual_start;
                 }
             }
@@ -1637,7 +1639,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         let logical_start = self.text.line_start_offset(row);
         let logical_end = self.text.line_end_offset(row);
 
-        if self.soft_wrap && self.is_code_editor() {
+        if self.soft_wrap {
             // Use the row the caret is drawn on: at a wrap boundary the raw offset would name
             // the next row, and a second End press would keep walking down instead of falling
             // through to the logical line end.
@@ -1648,7 +1650,7 @@ impl<M: InputModeKind> InputBaseState<M> {
                 && let Some(range) = line.wrapped_lines.get(wrap_point.local_row)
             {
                 let visual_end = logical_start + range.end;
-                if offset != visual_end {
+                if offset != visual_end || !self.is_code_editor() {
                     return visual_end;
                 }
             }
@@ -11120,6 +11122,16 @@ impl<M: crate::input::MultiLineMode> InputBaseState<M> {
 
 /// Methods that only ordinary multi-line text offers.
 impl InputBaseState<crate::input::TextareaMode> {
+    /// Replace the styles painted over the text (UTF-8 byte ranges into [`Self::value`]). They don't
+    /// follow edits: set them again after each change.
+    pub fn set_text_decorations(&mut self, decorations: Vec<crate::input::TextDecoration>, cx: &mut Context<Self>) {
+        let decorations = crate::input::decorations::normalize(&self.text, decorations);
+        if self.extras.decorations != decorations {
+            self.extras.decorations = decorations;
+            cx.notify();
+        }
+    }
+
     /// Create a multi-line text state.
     ///
     /// Being multi-line is carried by the mode, not by the layout, so the

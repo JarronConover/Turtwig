@@ -473,7 +473,7 @@ fn adjust_range_for_edit(
     start..end
 }
 
-fn normalize<T: TrackedDecoration>(text: &Rope, decorations: Vec<T>) -> Vec<T> {
+pub(crate) fn normalize<T: TrackedDecoration>(text: &Rope, decorations: Vec<T>) -> Vec<T> {
     decorations
         .into_iter()
         .filter_map(|mut decoration| {

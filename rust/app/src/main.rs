@@ -6,6 +6,7 @@ mod completions;
 mod designer;
 mod diff;
 mod jsonc_edit;
+mod live_markdown;
 mod logo;
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
