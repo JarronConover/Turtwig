@@ -144,23 +144,7 @@ impl Workspace {
 
     /** Applies a worktree move to the local model at once, so the sidebar settles before the box confirms. */
     fn move_worktree_now(&mut self, path: &str, section: Option<&str>, before: Option<&str>) {
-        let m = &mut self.model;
-        let mut taken = None;
-        for list in m.projects.iter_mut().map(|p| &mut p.items).chain(m.sections.iter_mut().map(|s| &mut s.items)) {
-            if let Some(i) = list.iter().position(|w| w.path == path) {
-                taken = Some(list.remove(i));
-                break;
-            }
-        }
-        let Some(w) = taken else { return };
-        let list = match section {
-            Some(id) => m.sections.iter_mut().find(|s| s.id == id).map(|s| &mut s.items),
-            None => m.projects.iter_mut().find(|p| p.repo == w.repo).map(|p| &mut p.items),
-        };
-        if let Some(list) = list {
-            let at = before.and_then(|b| list.iter().position(|x| x.path == b)).unwrap_or(list.len());
-            list.insert(at, w);
-        }
+        move_worktree_in(&mut self.model, path, section, before);
     }
 
     fn rename_branch(&mut self, path: String, branch: String, cx: &mut Context<Self>) {
@@ -830,8 +814,11 @@ impl Workspace {
                     };
                     if before.as_deref() != Some(path.as_str()) {
                         self.move_worktree_now(&path, s("section").as_deref(), before.as_deref());
-                        let before = if s("section").is_none() { self.keep_worktree_order(&path) } else { before };
-                        self.call(Call::WorktreeMove { path, section: s("section"), before }, cx);
+                        let host_before = if s("section").is_none() { self.keep_worktree_order(&path) } else { before.clone() };
+                        let host = self.host_of_path(&path);
+                        self.pending_moves.retain(|m| m.path != path);
+                        self.pending_moves.push(crate::workspace::PendingMove { path: path.clone(), host, section: s("section"), before, host_before: host_before.clone(), at: std::time::Instant::now() });
+                        self.call(Call::WorktreeMove { path, section: s("section"), before: host_before }, cx);
                     }
                 }
             }
@@ -1387,6 +1374,26 @@ fn remote_parts(remote: &str) -> Option<(String, String)> {
 fn web_url(remote: &str, template: &str) -> Option<String> {
     let (host, path) = remote_parts(remote)?;
     Some(template.replace("{host}", &host).replace("{path}", &path))
+}
+
+/** Moves a worktree into a section (None: its project) before another, in a model. */
+pub(crate) fn move_worktree_in(m: &mut agent_box_protocol::Model, path: &str, section: Option<&str>, before: Option<&str>) {
+    let mut taken = None;
+    for list in m.projects.iter_mut().map(|p| &mut p.items).chain(m.sections.iter_mut().map(|s| &mut s.items)) {
+        if let Some(i) = list.iter().position(|w| w.path == path) {
+            taken = Some(list.remove(i));
+            break;
+        }
+    }
+    let Some(w) = taken else { return };
+    let list = match section {
+        Some(id) => m.sections.iter_mut().find(|s| s.id == id).map(|s| &mut s.items),
+        None => m.projects.iter_mut().find(|p| p.repo == w.repo).map(|p| &mut p.items),
+    };
+    if let Some(list) = list {
+        let at = before.and_then(|b| list.iter().position(|x| x.path == b)).unwrap_or(list.len());
+        list.insert(at, w);
+    }
 }
 
 #[cfg(test)]

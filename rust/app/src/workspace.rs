@@ -337,6 +337,8 @@ pub struct Workspace {
     pub(crate) inspect_digest: u64,
     /** When the app's files last went to the other machines, and what each held. */
     pub(crate) mirror_at: Option<std::time::Instant>,
+    /** Worktree moves not yet in their machine's model (keep_pending_moves). */
+    pub(crate) pending_moves: Vec<PendingMove>,
     /** When each other machine last relayed an action here: the app's files go only to those using it. */
     pub(crate) relayed_at: HashMap<String, std::time::Instant>,
     pub(crate) mirrored: HashMap<String, u64>,
@@ -627,6 +629,7 @@ impl Workspace {
             inspect_at: None,
             inspect_digest: 0,
             mirror_at: None,
+            pending_moves: vec![],
             relayed_at: HashMap::new(),
             mirrored: HashMap::new(),
             pending_move: None,
@@ -1958,6 +1961,31 @@ impl Workspace {
         self.apply_just_sent();
         self.project_hosts = project_hosts;
         self.section_hosts = section_hosts;
+        self.keep_pending_moves();
+    }
+
+    /** Worktrees dragged into place stay there until their machine's model shows them there (or
+    `sidebar.move_hold_secs` pass): a model it was already building when the move landed still has the
+    old order, and would put them back for a moment. */
+    fn keep_pending_moves(&mut self) {
+        let hold = self.settings.num("sidebar.move_hold_secs", 15.);
+        let moves = std::mem::take(&mut self.pending_moves);
+        for mv in moves {
+            let shown = self.models.get(&mv.host).is_some_and(|m| {
+                let mut lists = m.projects.iter().map(|p| (None, &p.items)).chain(m.sections.iter().map(|s| (Some(&s.id), &s.items)));
+                lists.any(|(section, items)| {
+                    let at = |p: &str| items.iter().position(|w| w.path == p);
+                    section == mv.section.as_ref() && at(&mv.path).is_some_and(|i| match &mv.host_before {
+                        Some(b) => at(b) == Some(i + 1),
+                        None => i + 1 == items.len(),
+                    })
+                })
+            });
+            if !shown && mv.at.elapsed().as_secs_f64() < hold {
+                crate::ui::actions::move_worktree_in(&mut self.model, &mv.path, mv.section.as_deref(), mv.before.as_deref());
+                self.pending_moves.push(mv);
+            }
+        }
     }
 
     /** Asks every connected host (or those in `hosts`) for its past chats; `.history` holds them newest first. */
@@ -5432,4 +5460,15 @@ mod order_tests {
         apply_order(&mut items, &["b1", "m1", "gone"], key);
         assert_eq!(paths(&items), ["b1", "m0", "m1"]);
     }
+}
+
+/** A worktree move the sidebar shows before its machine confirms it: `before` is where it went in the sidebar,
+`host_before` where its machine puts it (the next of its own worktrees there). */
+pub(crate) struct PendingMove {
+    pub path: String,
+    pub host: String,
+    pub section: Option<String>,
+    pub before: Option<String>,
+    pub host_before: Option<String>,
+    pub at: std::time::Instant,
 }
