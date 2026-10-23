@@ -125,6 +125,97 @@ pub fn continuation(line: &str) -> Option<(usize, String)> {
     Some((indent + n, format!("{}{next}", &line[..indent])))
 }
 
+/** Tab or shift-tab (`out`) in a list: its items in `range` move in under the item above at their level,
+or out to their parent's, nested items with them, numbered ones renumbered for where they land. */
+pub struct Reindent {
+    pub range: Range<usize>,
+    pub text: String,
+    /** Each changed line: (start before, prefix length before, start after, prefix length after). */
+    lines: Vec<(usize, usize, usize, usize)>,
+}
+
+impl Reindent {
+    /** Where offset `p` of the old text is in the new. */
+    pub fn map(&self, p: usize) -> usize {
+        let Some(&(ls, old, ns, new)) = self.lines.iter().rev().find(|l| l.0 <= p) else { return p };
+        let col = p - ls;
+        ns + if col >= old { col - old + new } else { col.min(new) }
+    }
+}
+
+/** None when `range` starts on a line that isn't a list item, so Tab does what it otherwise does. */
+pub fn reindent(text: &str, range: Range<usize>, out: bool, literal: &HashSet<usize>) -> Option<Reindent> {
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+    let mut fenced = false;
+    let list: Vec<bool> = lines
+        .iter()
+        .zip(&starts)
+        .map(|(l, ls)| {
+            if l.trim_start_matches(' ').starts_with("```") {
+                fenced = !fenced;
+                return false;
+            }
+            !fenced && !literal.contains(ls) && matches!(block_marker(l.trim_start_matches(' ')), Some((_, Kind::List)))
+        })
+        .collect();
+    let line_of = |p: usize| starts.iter().rposition(|s| *s <= p).unwrap_or(0);
+    let first = line_of(range.start);
+    let last = if range.end > range.start && starts.contains(&range.end) { line_of(range.end - 1) } else { line_of(range.end) };
+    if !list[first] {
+        return None;
+    }
+    let indent = |l: &str| l.len() - l.trim_start_matches(' ').len();
+    let before = lines.clone();
+    let mut changed_to = first;
+    let mut i = first;
+    while i <= last {
+        if !list[i] {
+            i += 1;
+            continue;
+        }
+        let ind = indent(&lines[i]);
+        // The nearest item above whose indent passes `want`, within this run of list lines.
+        let above = |lines: &[String], want: &dyn Fn(usize) -> bool| (0..i).rev().take_while(|j| list[*j]).find(|j| want(indent(&lines[*j])));
+        let to = if out {
+            above(&lines, &|d| d < ind).map_or(0, |j| indent(&lines[j]))
+        } else {
+            match above(&lines, &|d| d <= ind) {
+                Some(j) if indent(&lines[j]) == ind => ind + block_marker(&lines[j][ind..]).map_or(2, |(n, _)| n),
+                _ => ind,
+            }
+        };
+        let mut end = i + 1;
+        while end < lines.len() && list[end] && indent(&lines[end]) > ind {
+            end += 1;
+        }
+        if to != ind {
+            for line in &mut lines[i..end] {
+                let d = indent(line);
+                *line = format!("{}{}", " ".repeat((d + to).saturating_sub(ind)), &line[d..]);
+            }
+            let body = lines[i][to..].to_string();
+            let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0 {
+                let sibling = (0..i).rev().take_while(|j| list[*j] && indent(&lines[*j]) >= to).find(|j| indent(&lines[*j]) == to);
+                let n = sibling.and_then(|j| lines[j][to..].split(['.', ')']).next()?.parse::<u64>().ok()).map_or(1, |n| n + 1);
+                lines[i] = format!("{}{n}{}", " ".repeat(to), &body[digits..]);
+            }
+            changed_to = changed_to.max(end - 1);
+        }
+        i = end;
+    }
+    let prefix = |l: &str| indent(l) + block_marker(l.trim_start_matches(' ')).map_or(0, |(n, _)| n);
+    let mut at = starts[first];
+    let mut map = vec![];
+    for j in first..=changed_to {
+        map.push((starts[j], prefix(&before[j]), at, prefix(&lines[j])));
+        at += lines[j].len() + 1;
+    }
+    Some(Reindent { range: starts[first]..starts[changed_to] + before[changed_to].len(), text: lines[first..=changed_to].join("\n"), lines: map })
+}
+
 /** A line's own marker ("> ", "## ", "- ", "1. "): its length and what the line becomes. */
 fn block_marker(body: &str) -> Option<(usize, Kind)> {
     if body.starts_with("> ") {
@@ -321,6 +412,23 @@ mod tests {
         assert_eq!(super::continuation("  - a"), Some((4, "  - ".into())));
         assert_eq!(super::continuation("9. a"), Some((3, "10. ".into())));
         assert_eq!(super::continuation("# a"), None);
+    }
+
+    #[test]
+    fn tab_nests_a_list_item_under_the_one_above() {
+        let tab = |text: &str, at: usize, out: bool| {
+            super::reindent(text, at..at, out, &HashSet::new()).map(|r| (format!("{}{}{}", &text[..r.range.start], r.text, &text[r.range.end..]), r.map(at)))
+        };
+        assert_eq!(tab("- a\n- b", 7, false), Some(("- a\n  - b".into(), 9)));
+        assert_eq!(tab("- a\n- b", 3, false), Some(("- a\n- b".into(), 3)));
+        assert_eq!(tab("- a\n  - b", 9, true), Some(("- a\n- b".into(), 7)));
+        assert_eq!(tab("1. a\n2. b\n3. c", 9, false), Some(("1. a\n   1. b\n3. c".into(), 12)));
+        assert_eq!(tab("1. a\n   1. b\n3. c", 12, true), Some(("1. a\n2. b\n3. c".into(), 9)));
+        assert_eq!(tab("- a\n- b\n  - c\n- d", 6, false), Some(("- a\n  - b\n    - c\n- d".into(), 8)));
+        assert_eq!(tab("text\n- a", 2, false), None);
+        assert_eq!(tab("```\n- a\n```", 6, false), None);
+        let r = super::reindent("- a\n- b\n- c", 4..11, false, &HashSet::new()).unwrap();
+        assert_eq!(r.text, "  - b\n  - c");
     }
 
     #[test]

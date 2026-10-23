@@ -707,6 +707,8 @@ impl Workspace {
             let key = match (k.key.as_str(), k.modifiers.modified(), k.modifiers.shift && !k.modifiers.platform && !k.modifiers.control && !k.modifiers.alt) {
                 ("backspace" | "left" | "right", false, _) => k.key.as_str(),
                 ("enter", _, true) => "newline",
+                ("tab", false, _) => "tab",
+                ("tab", _, true) => "outdent",
                 _ => return,
             };
             if me.update(cx, |ws, cx| ws.composer_key(key, window, cx)).unwrap_or(false) {
@@ -3072,13 +3074,30 @@ impl Workspace {
     /** Keys in a composer that act on its live markdown; true when one did and the key stops here.
     Backspace right after what completed some formatting (a line's "> " any time, a closing `**` just after
     typing it) keeps the text and shows it plain; otherwise backspace and the arrows step over hidden marks
-    as if they weren't there. Shift-Enter in a quote or list continues it, and on an empty item ends it. */
+    as if they weren't there. Shift-Enter in a quote or list continues it, and on an empty item ends it.
+    Tab and Shift-Tab in a list nest its items a level in or out (the selected ones, or the caret's). */
     fn composer_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some((id, c)) = self.composers.iter().find(|(_, c)| c.read(cx).focus_handle(cx).is_focused(window)).map(|(i, c)| (i.clone(), c.clone())) else { return false };
         if self.settings.chat.get("live_markdown").and_then(|c| c.get("enabled")).and_then(Value::as_bool) == Some(false) {
             return false;
         }
         let (sel, text) = { let s = c.read(cx); (s.selected_range(), s.value().to_string()) };
+        if key == "tab" || key == "outdent" {
+            if self.completion.as_ref().is_some_and(|x| x.0 == id) {
+                return false;
+            }
+            let literal = self.live_md.get(&id).map(|m| m.0.clone()).unwrap_or_default();
+            let Some(r) = crate::live_markdown::reindent(&text, sel.clone(), key == "outdent", &literal) else { return false };
+            if r.text != text[r.range.clone()] {
+                let utf16 = |b: usize| text[..b].encode_utf16().count();
+                let (from, to) = (r.map(sel.start), r.map(sel.end));
+                c.update(cx, |s, cx| {
+                    gpui_kit::EntityInputHandler::replace_text_in_range(s, Some(utf16(r.range.start)..utf16(r.range.end)), &r.text, window, cx);
+                    s.set_selected_range(from..to, cx);
+                });
+            }
+            return true;
+        }
         if !sel.is_empty() {
             return false;
         }
