@@ -1056,8 +1056,13 @@ impl Workspace {
             let base = st.get("opacity").and_then(Value::as_f64).unwrap_or(1.) as f32;
             st.insert("opacity".into(), Value::from((o + (base - o) * e) as f64));
         }
-        for (k, side) in [("x", "left"), ("y", "top")] {
+        // A node held by its far edge alone (`bottom: 0`) shifts by that edge: setting `top` would move it there.
+        for (k, side, far) in [("x", "left", "right"), ("y", "top", "bottom")] {
             if let Some(d) = f(k) {
+                let (side, d) = match (st.get(side).and_then(Value::as_f64), st.get(far).and_then(Value::as_f64)) {
+                    (None, Some(_)) => (far, -d),
+                    _ => (side, d),
+                };
                 let base = st.get(side).and_then(Value::as_f64).unwrap_or(0.) as f32;
                 st.insert(side.into(), Value::from((base + d * (1. - e)) as f64));
             }

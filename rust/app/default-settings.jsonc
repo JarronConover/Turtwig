@@ -1060,7 +1060,7 @@
                   "on": { "click": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its {{ .agents[.c.agent].name // \"agent\" }} process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
                   "children": [{ "type": "icon", "props": { "name": "x", "size": 11, "color": "@text_muted" } }]
                 },
-                { "if": ".c.active", "type": "box", "style": { "position": "absolute", "left": 0, "right": 0, "bottom": 0, "height": 2, "background": "@accent" } }
+                { "if": ".c.active", "type": "box", "motion": false, "style": { "position": "absolute", "left": 0, "right": 0, "bottom": 0, "height": 2, "background": "@accent" } }
               ]
             }
           ]
