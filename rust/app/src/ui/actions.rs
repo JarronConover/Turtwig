@@ -583,11 +583,14 @@ impl Workspace {
                     if follow {
                         self.pending_move = Some((id.clone(), to.clone()));
                     }
+                    let moving = self.chat_move(&id, &to, s("scope").as_deref());
+                    let serial = moving.serial;
+                    self.moves.push(moving);
                     let mut args = vec!["chat".into(), "move".into(), id, "--to".into(), to];
                     if let Some(scope) = s("scope") {
                         args.extend(["--scope".into(), scope]);
                     }
-                    self.run_local(args, window, cx);
+                    self.run_local_then(args, window, cx, move |ws, _| ws.moves.retain(|m| m.serial != serial));
                 }
             }
             "section.new" => self.new_section(s("name"), s("assign"), s("host"), window, cx),

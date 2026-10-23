@@ -622,7 +622,7 @@
             { "for": ".props.w.host as $h | [.props.w.chats[] | select(.open) | .host] | unique | map(select(. != $h))", "as": "h", "type": "HostIcon", "props": { "host": "{{ .h }}", "size": 11 } }
           ]
         },
-        { "type": "StatusIcon", "props": { "status": "{{ .props.w.status }}" } },
+        { "type": "StatusIcon", "props": { "status": "{{ .props.w.status }}", "to": "{{ .props.w.moving }}" } },
         { "type": "text", "props": { "text": "{{ .props.w.age_text }}" }, "style": { "min_width": 22, "text_align": "right", "font_size": 12.5, "color": "@age" } }
       ]
     },
@@ -640,11 +640,12 @@
     },
 
     "StatusIcon": {
-      "about": "A small icon for a worktree status. props: status (working | waiting | merged | failing | pending | dirty | behind | idle).",
+      "about": "A small icon for a worktree status. props: status (moving | offline | working | waiting | merged | failing | pending | dirty | behind | idle), to (the host it's moving to).",
       "type": "box",
       "style": { "width": 14, "align": "center", "justify": "center" },
       "children": [
         { "if": ".props.status == \"offline\"", "type": "icon", "props": { "name": "cloud-off", "size": 12, "color": "@text_faint" }, "tooltip": "Out of reach: shown as it was when last heard from" },
+        { "if": ".props.status == \"moving\"", "type": "spinner", "props": { "size": "xsmall", "color": "@accent" }, "tooltip": "Moving to {{ if .props.to == \"box\" then \"the cloud\" else \"the Mac\" end }}…" },
         { "if": ".props.status == \"working\"", "type": "spinner", "props": { "size": "xsmall", "color": "@age" } },
         { "if": ".props.status == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" }, "tooltip": "Waiting for you" },
         { "if": ".props.status == \"merged\"", "type": "icon", "props": { "name": "circle-check", "size": 12, "color": "@merged" }, "tooltip": "Merged" },
@@ -895,6 +896,16 @@
                 { "type": "Pill", "id": "elsewhere-take-over", "props": { "text": "Take it over", "icon": "arrow-down-to-line", "do": { "do": "chat.take_over", "chat": "{{ .selected.chat.id }}" } } }
               ]
             },
+            {
+              "if": ".selected.worktree.moving",
+              "id": "moving-banner",
+              "type": "row",
+              "style": { "gap": 10, "padding": [8, 14], "margin": [0, 28, 8, 28], "align": "center", "radius": 10, "border": 1, "border_color": "@line", "background": "@card", "font_size": 13, "width": "full", "max_width": 860, "self": "center" },
+              "children": [
+                { "type": "spinner", "props": { "size": "xsmall", "color": "@accent" } },
+                { "type": "text", "props": { "text": "Moving {{ if .selected.move.scope == \"section\" then \"this section\" elif .selected.move.scope == \"chat\" then \"this chat\" else \"this worktree\" end }} to {{ if .selected.worktree.moving == \"box\" then \"the cloud\" else \"the Mac\" end }}… Its chats stop here and pick up there." }, "style": { "grow": 1, "color": "@text_muted" } }
+              ]
+            },
             { "if": ".selected.chat.screen | not", "id": "waiting", "type": "waiting", "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" } },
             {
               "if": ".selected.chat and (.selected.chat.screen | not)",
@@ -1050,7 +1061,7 @@
                 { "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 12 } },
                 { "type": "AgentIcon", "props": { "agent": "{{ .c.agent }}", "size": 12 } },
                 { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "max_width": 240, "truncate": true } },
-                { "if": ".c.state == \"working\"", "type": "spinner", "props": { "size": "xsmall" } },
+                { "if": ".c.state == \"working\" or .c.moving", "type": "spinner", "props": { "size": "xsmall", "color": "{{ if .c.moving then \"@accent\" else null end }}" } },
                 { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" } },
                 {
                   "id": "chat-tab-close",
@@ -2878,7 +2889,7 @@
 
   "sidebar": {
     // Which status a worktree shows when several apply (idle when none).
-    "status_order": ["offline", "working", "waiting", "merged", "failing", "pending", "dirty", "behind"],
+    "status_order": ["moving", "offline", "working", "waiting", "merged", "failing", "pending", "dirty", "behind"],
     // A section's orchestrator first, its workers after.
     "orchestrators_first": true,
     // Whose worktrees come first in a project shared by both machines.

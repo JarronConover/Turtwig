@@ -349,6 +349,9 @@ pub struct Workspace {
     pub(crate) mirrored: HashMap<String, u64>,
     /** A chat being moved and where to: selected there once it shows up. */
     pub(crate) pending_move: Option<(String, String)>,
+    /** Moves this app started that haven't finished: their rows and tabs show a spinner. */
+    pub(crate) moves: Vec<ChatMove>,
+    move_serial: std::cell::Cell<u64>,
     pub(crate) perf: std::rc::Rc<std::cell::RefCell<crate::ui::inspect::Perf>>,
     /** The redraw a looping animation (spinner, pulse) asked for, at `motion.animation_fps`. */
     /** Each drawer's (region, or "" for the window) pending looping-animation redraw. */
@@ -638,6 +641,8 @@ impl Workspace {
             relayed_at: HashMap::new(),
             mirrored: HashMap::new(),
             pending_move: None,
+            moves: vec![],
+            move_serial: Default::default(),
             perf: Default::default(),
             anim_ticks: HashMap::new(),
             regions: HashMap::new(),
@@ -2294,6 +2299,7 @@ impl Workspace {
             || (has("working") && c.state == "working")
             || (has("waiting") && c.state == "waiting")
             || (has("running_elsewhere") && c.status == "running_elsewhere")
+            || self.chat_moving_to(c).is_some()
     }
 
     pub(crate) fn current_worktree(&self) -> Option<&Worktree> {
@@ -2677,8 +2683,10 @@ impl Workspace {
         let chats = self.chats_of(w);
         // Which status wins when several apply: `sidebar.status_order`.
         let offline = self.host_offline(&w.host);
+        let moving = self.moving_to(w);
         let applies = |s: &str| match s {
             "offline" => offline,
+            "moving" => moving.is_some(),
             "working" => chats.iter().any(|c| c.state == "working"),
             "waiting" => chats.iter().any(|c| c.state == "waiting"),
             "merged" => w.mr.as_ref().is_some_and(|m| m.state == "merged"),
@@ -2693,7 +2701,7 @@ impl Workspace {
             .get("sidebar.status_order")
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-            .unwrap_or_else(|| ["offline", "working", "waiting", "merged", "failing", "pending", "dirty", "behind"].map(String::from).to_vec());
+            .unwrap_or_else(|| ["moving", "offline", "working", "waiting", "merged", "failing", "pending", "dirty", "behind"].map(String::from).to_vec());
         let status = order.iter().find(|s| applies(s)).map(String::as_str).unwrap_or("idle");
         let (emoji, label) = split_emoji(&w.title);
         let (_, project_letter, hue) = self.project_look(&w.repo, &w.project, w.hue);
@@ -2704,7 +2712,7 @@ impl Workspace {
             "uncommitted": w.uncommitted, "unpushed": w.unpushed, "behind": w.behind, "mr": w.mr,
             "age": w.age, "age_text": age_text(w.age, &self.age_format()), "status": status, "section": section,
             "selected": self.selected.as_deref() == Some(&w.path),
-            "host": w.host, "offline": offline,
+            "host": w.host, "offline": offline, "moving": moving,
             "chats": chats.iter().map(|c| self.chat_json(c)).collect::<Vec<_>>(),
         })
     }
@@ -2727,6 +2735,7 @@ impl Workspace {
         if let Value::Object(o) = &mut v {
             o.insert("active".into(), Value::Bool(self.current_chat().map(|x| x.id == c.id).unwrap_or(false)));
             o.insert("open".into(), Value::Bool(self.chat_open(c)));
+            o.insert("moving".into(), json!(self.chat_moving_to(c)));
             o.insert("queued".into(), json!(self.queued.get(&c.id).cloned().unwrap_or_default()));
             o.insert("age_text".into(), Value::String(age_text(c.last_activity, &self.age_format())));
             o.insert("attachments".into(), self.attachments_json(&c.id));
@@ -3613,6 +3622,41 @@ impl Workspace {
         }
     }
 
+    /** What moving `chat` to `to` takes along, as `move_plan` works it out. */
+    pub(crate) fn chat_move(&self, chat: &str, to: &str, scope: Option<&str>) -> ChatMove {
+        let w = self.all_worktrees().into_iter().find(|w| w.chat_ids.iter().any(|c| c == chat));
+        let scope = scope.map(str::to_string).unwrap_or_else(|| self.settings.text("daemon.move_together", "section"));
+        let section = w.filter(|_| scope == "section").and_then(|w| self.model.sections.iter().find(|s| s.items.iter().any(|x| x.path == w.path && x.host == w.host)));
+        let worktrees: Vec<&Worktree> = match (w, section) {
+            (Some(w), Some(s)) => s.items.iter().filter(|x| x.host == w.host).collect(),
+            (w, _) => w.into_iter().collect(),
+        };
+        let mut chats: HashSet<String> = if scope == "chat" { HashSet::new() } else { worktrees.iter().flat_map(|w| self.chats_of(w)).map(|c| c.id.clone()).collect() };
+        chats.insert(chat.to_string());
+        self.move_serial.set(self.move_serial.get() + 1);
+        ChatMove { serial: self.move_serial.get(), to: to.to_string(), worktrees: worktrees.into_iter().map(move_key).collect(), chats }
+    }
+
+    /** Where a worktree is being moved: by a move this app started, else by `state.moving` (bin/chat's). */
+    pub(crate) fn moving_to(&self, w: &Worktree) -> Option<String> {
+        let key = move_key(w);
+        if let Some(m) = self.moves.iter().find(|m| m.worktrees.contains(&key)) {
+            return Some(m.to.clone());
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
+        let mv = self.state.get("moving").filter(|v| v["at"].as_f64().is_some_and(|at| now - at < 600.))?;
+        let branch = w.branch.as_deref()?;
+        mv["branches"].as_array()?.iter().any(|b| b.as_str() == Some(branch)).then(|| mv["to"].as_str().unwrap_or_default().to_string())
+    }
+
+    pub(crate) fn chat_moving_to(&self, c: &Chat) -> Option<String> {
+        if let Some(m) = self.moves.iter().find(|m| m.chats.contains(&c.id)) {
+            return Some(m.to.clone());
+        }
+        let to = self.state.get("moving").and_then(|m| m["to"].as_str())?;
+        (c.status == "moving").then(|| to.to_string())
+    }
+
     /** Records a press for the innermost node that sees it (the first to call this for that event). */
     pub(crate) fn note_press(&mut self, id: &str, at: Point<Pixels>, count: usize) {
         let now = std::time::Instant::now();
@@ -4143,19 +4187,24 @@ impl Workspace {
     }
 
     pub(crate) fn run_local(&mut self, args: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_local_then(args, window, cx, |_, _| {});
+    }
+
+    /** `run_local`, then `after` once the command exits. */
+    pub(crate) fn run_local_then(&mut self, args: Vec<String>, window: &mut Window, cx: &mut Context<Self>, after: impl FnOnce(&mut Self, &mut Context<Self>) + 'static) {
         let mut cmd = std::process::Command::new(self.bin_dir().join(&args[0]));
         cmd.args(&args[1..]);
-        self.run_command(cmd, true, window, cx);
+        self.run_command(cmd, true, window, cx, after);
     }
 
     pub(crate) fn run_shell(&mut self, script: String, env: Vec<(String, String)>, notify: bool, window: &mut Window, cx: &mut Context<Self>) {
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.arg("-c").arg(script).envs(env);
-        self.run_command(cmd, notify, window, cx);
+        self.run_command(cmd, notify, window, cx, |_, _| {});
     }
 
     /** Runs a Mac command off the UI thread with a usable PATH; `notify` shows its last output line. */
-    fn run_command(&mut self, mut cmd: std::process::Command, notify: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_command(&mut self, mut cmd: std::process::Command, notify: bool, window: &mut Window, cx: &mut Context<Self>, after: impl FnOnce(&mut Self, &mut Context<Self>) + 'static) {
         cmd.env("PATH", self.path_env());
         if notify {
             let t = self.tr("working", "Working…", &[]);
@@ -4164,6 +4213,11 @@ impl Workspace {
         let (done, failed) = (self.tr("done", "Done", &[]), self.tr("failed", "Failed", &[]));
         cx.spawn_in(window, async move |this, cx| {
             let out = cx.background_spawn(async move { cmd.output() }).await;
+            this.update(cx, |ws, cx| {
+                after(ws, cx);
+                cx.notify();
+            })
+            .ok();
             if !notify {
                 return;
             }
@@ -5627,6 +5681,18 @@ mod order_tests {
         apply_order(&mut items, &["b1", "m1", "gone"], key);
         assert_eq!(paths(&items), ["b1", "m0", "m1"]);
     }
+}
+
+/** A move under way: where to, and the worktrees (`move_key`) and chats it takes along. */
+pub(crate) struct ChatMove {
+    pub serial: u64,
+    pub to: String,
+    pub worktrees: HashSet<String>,
+    pub chats: HashSet<String>,
+}
+
+fn move_key(w: &Worktree) -> String {
+    w.branch.as_ref().map_or_else(|| w.path.clone(), |b| format!("{}\0{b}", w.repo))
 }
 
 /** A worktree move the sidebar shows before its machine confirms it: `before` is where it went in the sidebar,
