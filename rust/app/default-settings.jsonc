@@ -2476,8 +2476,8 @@
     // Markdown shows formatted as it's typed ("> " makes a quote, **x** bold once closed); the text sent stays
     // as typed. Backspace right after what completed it shows it plain again; Shift-Enter in a quote or list
     // continues it. hide_markers: the markdown characters hide (a quote's "> " draws as quote_bar, a list's
-    // "- " as a bullet); the caret steps over them. Each style: color, background, bold, italic, underline,
-    // strikethrough, fade (0-1). marker: markdown characters still shown (code fences, numbered lists).
+    // "- " as a bullet); the caret steps over them. Each style: color, background, bold, italic, underline (wavy,
+    // underline_color), strikethrough, fade (0-1). marker: markdown characters still shown (code fences, numbered lists).
     "live_markdown": {
       "enabled": true, "hide_markers": true, "quote_bar": "@text_faint", "bullet": "@text_muted",
       "styles": {
@@ -2494,6 +2494,24 @@
         "url": { "color": "@text_faint" }
       }
     },
+    // Misspelled words get the Mac's spelling marks (its dictionary and language settings) once typing pauses
+    // for delay_ms; not in code, links, paths or the word still being typed. Longer than max_chars: unchecked.
+    // language: a code like "en" or "en_GB" (default: the Mac's first spelling language).
+    "spellcheck": { "enabled": true, "language": null, "delay_ms": 400, "max_chars": 20000, "style": { "underline": true, "wavy": true, "underline_color": "@danger" } },
+    // Right-click in the message box. `.spelling` is the misspelled word there ({chat, word, from, to, guesses}),
+    // `.composer` {chat, selection}.
+    "composer_menu": [
+      { "for": ".spelling.guesses // []", "as": "g", "label": "{{ .g }}", "do": { "do": "spelling.correct", "chat": "{{ .spelling.chat }}", "from": "{{ .spelling.from }}", "to": "{{ .spelling.to }}", "text": "{{ .g }}" } },
+      { "if": ".spelling and (.spelling.guesses | length) == 0", "label": "No guesses", "disabled": true },
+      { "if": ".spelling", "separator": true },
+      { "if": ".spelling", "label": "Learn spelling", "do": { "do": "spelling.learn", "word": "{{ .spelling.word }}" } },
+      { "if": ".spelling", "label": "Ignore spelling", "do": { "do": "spelling.ignore", "word": "{{ .spelling.word }}" } },
+      { "if": ".spelling", "separator": true },
+      { "label": "Cut", "disabled": ".composer.selection | not", "do": { "do": "composer.edit", "chat": "{{ .composer.chat }}", "op": "cut" } },
+      { "label": "Copy", "disabled": ".composer.selection | not", "do": { "do": "composer.edit", "chat": "{{ .composer.chat }}", "op": "copy" } },
+      { "label": "Paste", "do": { "do": "composer.edit", "chat": "{{ .composer.chat }}", "op": "paste" } },
+      { "label": "Select all", "do": { "do": "composer.edit", "chat": "{{ .composer.chat }}", "op": "select_all" } }
+    ],
     "suggestion_hint": "   ⇥ Tab",
     // Keys besides Tab that take Claude's suggestion into an empty message box.
     "suggestion_keys": [],

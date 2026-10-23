@@ -309,7 +309,7 @@ fn inline(text: &str, span: Range<usize>, literal: &HashSet<usize>, out: &mut Ve
 }
 
 /** A style from `chat.live_markdown.styles`: color, background, bold, italic, underline, strikethrough, fade. */
-fn style(v: &Value, theme: &Map<String, Value>) -> HighlightStyle {
+pub fn style(v: &Value, theme: &Map<String, Value>) -> HighlightStyle {
     let c = |k: &str| v.get(k).and_then(|x| crate::ui::style::color(x, theme));
     let on = |k: &str| v.get(k).and_then(Value::as_bool) == Some(true);
     let color = c("color");
@@ -318,14 +318,15 @@ fn style(v: &Value, theme: &Map<String, Value>) -> HighlightStyle {
         background_color: c("background"),
         font_weight: on("bold").then_some(FontWeight::BOLD),
         font_style: on("italic").then_some(FontStyle::Italic),
-        underline: on("underline").then(|| UnderlineStyle { thickness: px(1.), color, wavy: false }),
+        underline: on("underline").then(|| UnderlineStyle { thickness: px(1.), color: c("underline_color").or(color), wavy: on("wavy") }),
         strikethrough: on("strikethrough").then(|| StrikethroughStyle { thickness: px(1.), color }),
         fade_out: v.get("fade").and_then(Value::as_f64).map(|f| f as f32),
     }
 }
 
-/** The text's formatting as styles to paint, flattened so none overlap: a line's style under its inline ones. */
-pub fn decorations(text: &str, literal: &HashSet<usize>, styles: &Map<String, Value>, theme: &Map<String, Value>) -> Vec<(Range<usize>, HighlightStyle)> {
+/** The text's formatting as styles to paint, flattened so none overlap: a line's style under its inline ones,
+`over` (spelling marks) on top. */
+pub fn decorations(text: &str, literal: &HashSet<usize>, styles: &Map<String, Value>, theme: &Map<String, Value>, over: Vec<(Range<usize>, HighlightStyle)>) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut pieces: Vec<(Range<usize>, HighlightStyle, bool)> = vec![];
     for k in parse(text, literal) {
         for (r, kind) in k.pieces {
@@ -334,6 +335,7 @@ pub fn decorations(text: &str, literal: &HashSet<usize>, styles: &Map<String, Va
             }
         }
     }
+    pieces.extend(over.into_iter().map(|(r, s)| (r, s, false)));
     let mut cuts: Vec<usize> = pieces.iter().flat_map(|(r, _, _)| [r.start, r.end]).collect();
     cuts.sort_unstable();
     cuts.dedup();

@@ -14,6 +14,8 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod video;
 mod remote;
+#[cfg(target_os = "macos")]
+mod spelling;
 mod script;
 mod settings;
 mod terminal;

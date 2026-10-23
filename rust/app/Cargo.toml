@@ -29,11 +29,11 @@ wasmtime = { version = "49", default-features = false, features = ["cranelift", 
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSDictionary", "NSObject", "NSUserNotification", "NSData", "NSURL", "NSValue"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSDictionary", "NSObject", "NSUserNotification", "NSData", "NSURL", "NSValue", "NSRange", "NSArray"] }
 objc2-av-foundation = { version = "0.3", features = ["AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVAsset", "objc2-core-media", "objc2-core-video"] }
 objc2-core-media = { version = "0.3", features = ["CMTime"] }
 objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer"] }
 objc2-core-foundation = "0.3"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder", "NSWindow", "NSGraphics", "NSImage", "NSSound"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder", "NSWindow", "NSGraphics", "NSImage", "NSSound", "NSSpellChecker"] }
 objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationResponse", "UNNotification", "UNNotificationTrigger", "block2"] }
 block2 = "0.6"

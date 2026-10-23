@@ -75,6 +75,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("completion.move / completion.close", "{by?}: move the composer's completion highlight, or close the list"),
     ("composer.set / composer.type", "{chat?, text}: replace or add to the text in a chat's message box (the designer's is chat `designer`)"),
     ("composer.accept_suggestion", "{chat?}: put the agent's suggested next prompt in the message box"),
+    ("composer.edit", "{chat?, op: cut | copy | paste | select_all}: what those keys do in a chat's message box (its right-click menu, `chat.composer_menu`)"),
+    ("composer.menu", "{chat?, at?}: open the message box's right-click menu (`chat.composer_menu`), with the caret at byte offset `at` first"),
+    ("spelling.correct", "{chat?, from, to, text}: replace the misspelled word at from..to (byte offsets, as `.spelling` gives them) with text"),
+    ("spelling.learn / spelling.ignore", "{word}: add a word to the Mac's dictionary, or stop marking it until a.box quits"),
     ("composer.recall", "{chat?, by?: -1 | 1}: put an earlier message you sent back in the box (-1 older, 1 newer; past the newest empties it)"),
     ("focus", "{area: composer | terminal | none, chat?}: put typing in a chat's message box or the selected worktree's terminal"),
     ("chat.attach_clipboard", "{chat?}: attach the files or image on the clipboard to a chat"),
@@ -1324,6 +1328,32 @@ impl Workspace {
                     if !files.is_empty() {
                         self.attach(id, files, window, cx);
                     }
+                }
+            }
+            "composer.edit" => {
+                if let (Some(id), Some(op)) = (chat(), s("op")) {
+                    self.composer_edit(&id, &op, window, cx);
+                }
+            }
+            "composer.menu" => {
+                if let Some(id) = chat() {
+                    let at = a.get("at").and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok())).map(|n| n as usize);
+                    if let (Some(at), Some(c)) = (at, self.composers.get(&id).cloned()) {
+                        c.update(cx, |s, cx| s.set_selected_range(at..at, cx));
+                    }
+                    let pos = self.motion.borrow().bounds.get("composer-box").map(|b| point(px(b[0] + 20.), px(b[1]))).unwrap_or_default();
+                    self.composer_menu(&id, pos, window, cx);
+                }
+            }
+            "spelling.correct" => {
+                let at = |k: &str| a.get(k).and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok())).map(|n| n as usize);
+                if let (Some(id), Some(from), Some(to), Some(text)) = (chat(), at("from"), at("to"), s("text")) {
+                    self.spelling_correct(&id, from, to, &text, window, cx);
+                }
+            }
+            "spelling.learn" | "spelling.ignore" => {
+                if let Some(word) = s("word").filter(|w| !w.is_empty()) {
+                    self.spelling_accept(&word, name == "spelling.learn", cx);
                 }
             }
             "composer.recall" => {

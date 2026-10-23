@@ -314,6 +314,11 @@ pub struct Workspace {
     pub(crate) composers: HashMap<String, Entity<TextareaState>>,
     /** Each composer's formatting turned back into plain text, and where its last typing ended (live_markdown). */
     live_md: HashMap<String, (HashSet<usize>, Option<usize>, Vec<(std::ops::Range<usize>, String)>)>,
+    /** Each composer's misspelled words (`chat.spellcheck`), a count that lets only the latest check land, and
+    the text the words' offsets are in. */
+    spelling: HashMap<String, (Vec<std::ops::Range<usize>>, u64, String)>,
+    /** Words "Ignore spelling" took out of the marks until a.box quits. */
+    spell_ignored: HashSet<String>,
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
     term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
     pub(crate) expanded_tools: HashSet<String>,
@@ -699,6 +704,8 @@ impl Workspace {
             _tasks: [watch, env_push, designer_listen, usage_loop, update_loop].into_iter().chain(clicks).collect(),
             _subscriptions: vec![],
             live_md: HashMap::new(),
+            spelling: HashMap::new(),
+            spell_ignored: HashSet::new(),
         };
         let mut ws = ws;
         let me = cx.entity().downgrade();
@@ -2884,6 +2891,12 @@ impl Workspace {
                 _ => {}
             }
         }));
+        let (view, id) = (cx.entity().downgrade(), chat_id.to_string());
+        state.update(cx, |s, _| {
+            s.on_context_menu(std::rc::Rc::new(move |_, _, at, window, cx| {
+                let _ = view.update(cx, |ws, cx| ws.composer_menu(&id, at, window, cx));
+            }))
+        });
         self.composers.insert(chat_id.to_string(), state);
         self.sync_markdown(chat_id, window, cx);
     }
@@ -3017,7 +3030,7 @@ impl Workspace {
     (`hide_markers`, as atomic tokens the caret steps over) and `styles` paint the rest, by kind: marker,
     quote, heading, list, bold, italic, strike, code, code_block, link, url. */
     pub(crate) fn sync_markdown(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_kit::component::input::{InlineToken, TextDecoration};
+        use gpui_kit::component::input::InlineToken;
         let Some(c) = self.composers.get(id).cloned() else { return };
         let cfg = self.settings.chat.get("live_markdown").filter(|c| c.get("enabled").and_then(Value::as_bool) != Some(false)).cloned();
         let text = c.read(cx).value().to_string();
@@ -3054,13 +3067,143 @@ impl Workspace {
         if let Some(m) = self.live_md.get_mut(id) {
             m.2 = want.iter().map(|(r, t)| (r.clone(), t.to_string())).collect();
         }
-        let styles = cfg.as_ref().and_then(|c| c.get("styles")).and_then(Value::as_object).cloned().unwrap_or_default();
-        let decs = if cfg.is_some() { crate::live_markdown::decorations(&text, &literal, &styles, &self.settings.theme) } else { vec![] };
+        self.paint_composer(id, cx);
+    }
+
+    /** A composer's live markdown styles and spelling marks, painted over its text. */
+    fn paint_composer(&mut self, id: &str, cx: &mut Context<Self>) {
+        use gpui_kit::component::input::TextDecoration;
+        let Some(c) = self.composers.get(id).cloned() else { return };
+        let text = c.read(cx).value().to_string();
+        let literal = self.live_md.get(id).map(|m| m.0.clone()).unwrap_or_default();
+        let cfg = self.settings.chat.get("live_markdown").filter(|c| c.get("enabled").and_then(Value::as_bool) != Some(false));
+        let styles = cfg.and_then(|c| c.get("styles")).and_then(Value::as_object).cloned().unwrap_or_default();
+        let look = self.settings.chat.get("spellcheck").and_then(|s| s.get("style")).cloned().unwrap_or_else(|| json!({"underline": true, "wavy": true, "underline_color": "@danger"}));
+        self.follow_spelling(id, &text, cx);
+        let marks = self.spelling.get(id).map(|(w, _, _)| w.iter().filter(|r| r.end <= text.len()).map(|r| (r.clone(), crate::live_markdown::style(&look, &self.settings.theme))).collect()).unwrap_or_default();
+        let decs = crate::live_markdown::decorations(&text, &literal, &styles, &self.settings.theme, marks);
         let decs = decs.into_iter().map(|(r, s)| TextDecoration::new(r, s)).collect();
         c.update(cx, |s, cx| s.set_text_decorations(decs, cx));
     }
 
-    /** The formatting a composer shows ({pieces: [{text, kind}], hidden: marks drawn otherwise, caret}), for inspect.json. */
+    /** After an edit: marks after it move with their words, ones it touched go, and a check is due. */
+    pub(crate) fn follow_spelling(&mut self, id: &str, text: &str, cx: &mut Context<Self>) -> bool {
+        if self.settings.chat.get("spellcheck").and_then(|s| s.get("enabled")).and_then(Value::as_bool) == Some(false) {
+            return self.spelling.remove(id).is_some();
+        }
+        match self.spelling.get_mut(id) {
+            Some((_, _, seen)) if seen == text => return false,
+            Some((words, _, seen)) => {
+                let (start, old_end, new_end) = crate::live_markdown::edit(seen, text);
+                let d = new_end as isize - old_end as isize;
+                words.retain(|r| r.end < start || r.start > old_end);
+                for r in words.iter_mut().filter(|r| r.start > old_end) {
+                    *r = (r.start as isize + d) as usize..(r.end as isize + d) as usize;
+                }
+                *seen = text.to_string();
+            }
+            None => {
+                self.spelling.insert(id.to_string(), (vec![], 0, text.to_string()));
+            }
+        }
+        self.check_spelling(id, cx);
+        true
+    }
+
+    /** Checks a composer's spelling once its typing pauses (`chat.spellcheck.delay_ms`), then repaints it. */
+    pub(crate) fn check_spelling(&mut self, id: &str, cx: &mut Context<Self>) {
+        let cfg = self.settings.chat.get("spellcheck").cloned().unwrap_or(Value::Null);
+        let entry = self.spelling.entry(id.to_string()).or_default();
+        entry.1 += 1;
+        let (run, id) = (entry.1, id.to_string());
+        let delay = Duration::from_millis(cfg.get("delay_ms").and_then(Value::as_u64).unwrap_or(400));
+        let max = cfg.get("max_chars").and_then(Value::as_u64).unwrap_or(20000) as usize;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |ws, cx| {
+                if ws.spelling.get(&id).map(|s| s.1) != Some(run) {
+                    return;
+                }
+                let Some(c) = ws.composers.get(&id).cloned() else { return };
+                let (text, sel) = { let s = c.read(cx); (s.value().to_string(), s.selected_range()) };
+                let words = if text.len() > max { vec![] } else {
+                    let literal = ws.live_md.get(&id).map(|m| m.0.clone()).unwrap_or_default();
+                    use crate::live_markdown::Kind;
+                    let skip: Vec<_> = crate::live_markdown::parse(&text, &literal).into_iter().flat_map(|k| k.pieces)
+                        .filter(|(_, k)| matches!(k, Kind::Code | Kind::CodeBlock | Kind::Url | Kind::Marker)).map(|(r, _)| r).collect();
+                    let lang = cfg.get("language").and_then(Value::as_str);
+                    let found = crate::spelling::misspelled(&text, lang).into_iter().filter(|r| !ws.spell_ignored.contains(&text[r.clone()])).collect();
+                    crate::spelling::shown(&text, found, &skip, sel.is_empty().then_some(sel.start))
+                };
+                ws.spelling.insert(id.clone(), (words, run, text));
+                ws.paint_composer(&id, cx);
+            });
+        })
+        .detach();
+    }
+
+    /** Right-click in a composer: `chat.composer_menu` at the pointer, with `.spelling` the misspelled word
+    there ({chat, word, from, to, guesses}) if any. */
+    pub(crate) fn composer_menu(&mut self, id: &str, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(c) = self.composers.get(id).cloned() else { return };
+        let (text, sel) = { let s = c.read(cx); (s.value().to_string(), s.selected_range()) };
+        let word = self.spelling.get(id).filter(|s| s.2 == text).and_then(|(w, _, _)| w.iter().find(|r| r.start <= sel.start && sel.end <= r.end && r.end <= text.len()).cloned());
+        let spelling = word.map(|r| json!({"chat": id, "word": &text[r.clone()], "from": r.start, "to": r.end, "guesses": crate::spelling::guesses(&text, r.clone(), self.settings.chat.get("spellcheck").and_then(|s| s.get("language")).and_then(Value::as_str)).into_iter().take(6).collect::<Vec<_>>()}));
+        let ctx = crate::ui::expr::with(&self.context(), vec![
+            ("spelling".into(), crate::ui::expr::to_val(&spelling.unwrap_or(Value::Null))),
+            ("composer".into(), crate::ui::expr::to_val(&json!({"chat": id, "selection": !sel.is_empty()}))),
+        ]);
+        let spec = self.settings.chat.get("composer_menu").and_then(Value::as_array).cloned().unwrap_or_default();
+        // It opens over the chat's message box (`composer-box`), which the designer's isn't drawn in.
+        if spec.is_empty() || id == crate::designer::CHAT_ID {
+            return;
+        }
+        crate::ui::drive::toggle_menu(self, "composer-box", &spec, &ctx, at, window, cx);
+    }
+
+    /** `composer.edit {chat, op}`: cut, copy, paste or select_all in a chat's composer, as its keys would. */
+    pub(crate) fn composer_edit(&mut self, chat: &str, op: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::input as input;
+        let Some(c) = self.composers.get(chat).cloned() else { return };
+        c.update(cx, |s, cx| s.focus(window, cx));
+        let action: Box<dyn gpui::Action> = match op {
+            "cut" => Box::new(input::Cut),
+            "copy" => Box::new(input::Copy),
+            "paste" => Box::new(input::Paste),
+            "select_all" => Box::new(input::SelectAll),
+            _ => return,
+        };
+        window.dispatch_action(action, cx);
+    }
+
+    /** `spelling.correct {chat, from, to, text}`: puts `text` in place of the misspelled word at from..to. */
+    pub(crate) fn spelling_correct(&mut self, chat: &str, from: usize, to: usize, word: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(c) = self.composers.get(chat).cloned() else { return };
+        let text = c.read(cx).value().to_string();
+        if to > text.len() || from > to || !text.is_char_boundary(from) || !text.is_char_boundary(to) {
+            return;
+        }
+        let utf16 = text[..from].encode_utf16().count()..text[..to].encode_utf16().count();
+        c.update(cx, |s, cx| {
+            gpui_kit::EntityInputHandler::replace_text_in_range(s, Some(utf16), word, window, cx);
+            s.focus(window, cx);
+        });
+    }
+
+    /** `spelling.learn` / `spelling.ignore {word}`: stop marking a word, in every composer. */
+    pub(crate) fn spelling_accept(&mut self, word: &str, learn: bool, cx: &mut Context<Self>) {
+        if learn {
+            crate::spelling::learn(word);
+        } else {
+            self.spell_ignored.insert(word.to_string());
+        }
+        let ids: Vec<String> = self.composers.keys().cloned().collect();
+        for id in ids {
+            self.check_spelling(&id, cx);
+        }
+    }
+
+    /** The formatting a composer shows ({pieces: [{text, kind}], hidden: marks drawn otherwise, caret, misspelled}), for inspect.json. */
     pub(crate) fn composer_markdown(&self, id: &str, cx: &App) -> Value {
         let Some(c) = self.composers.get(id) else { return Value::Null };
         let text = c.read(cx).value().to_string();
@@ -3068,7 +3211,8 @@ impl Workspace {
         let pieces = crate::live_markdown::parse(&text, &literal).into_iter().flat_map(|k| k.pieces);
         let pieces: Vec<Value> = pieces.map(|(r, k)| json!({"text": text[r].to_string(), "kind": format!("{k:?}")})).collect();
         let tokens: Vec<Value> = c.read(cx).tokens().iter().map(|t| json!({"at": [t.range().start, t.range().end], "as": t.token().id().to_string()})).collect();
-        json!({"pieces": pieces, "hidden": tokens, "caret": c.read(cx).selected_range().start})
+        let misspelled: Vec<&str> = self.spelling.get(id).map(|(w, _, _)| w.iter().filter_map(|r| text.get(r.clone())).collect()).unwrap_or_default();
+        json!({"pieces": pieces, "hidden": tokens, "caret": c.read(cx).selected_range().start, "misspelled": misspelled, "spelling_current": self.spelling.get(id).is_some_and(|s| s.2 == text)})
     }
 
     /** Keys in a composer that act on its live markdown; true when one did and the key stops here.
@@ -4495,6 +4639,10 @@ impl Workspace {
         if self.composer_texts.get(&chat).map(String::as_str) != Some(c.read(cx).value().as_ref()) {
             self.live_md.remove(&chat);
             self.sync_markdown(&chat, window, cx);
+        }
+        let text = c.read(cx).value().to_string();
+        if self.follow_spelling(&chat, &text, cx) {
+            self.paint_composer(&chat, cx);
         }
         // Claude Code's suggested next prompt shows as the placeholder; Tab fills it in (`chat.suggestions`).
         let suggestion = (self.settings.chat.get("suggestions").and_then(Value::as_bool) != Some(false))
