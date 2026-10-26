@@ -12,29 +12,59 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Map, Value};
 
-/** One row of the transcript list: a message, a run of steps, or the "Thinking"/"Working" line. */
+/** One row of the transcript list: a message, a run of steps, the turns the agent started on its own
+(folded), or the "Thinking"/"Working" line. */
 pub(crate) enum Block {
     One(usize),
     Steps(Vec<usize>),
+    Background(Vec<usize>),
     Pending(&'static str),
 }
 
-/** Groups items into rows: each run of thinking and tool calls is one row. */
+/** Groups items into rows: each run of thinking and tool calls is one row, and so is each run of turns the
+agent started on its own, up to the next thing you sent. */
 pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
+    let mut blocks = steps_of(items, 0..items.len());
+    if crate::transcript::options().fold_background {
+        let mut folded: Vec<Block> = vec![];
+        for b in blocks {
+            let at = |b: &Block| match b {
+                Block::One(i) => Some(*i),
+                Block::Steps(v) => v.first().copied(),
+                _ => None,
+            };
+            let first = at(&b).unwrap_or(0);
+            let yours = matches!(items[first], Item::User { .. } | Item::Image { .. });
+            match (&items[first], folded.last_mut()) {
+                (_, Some(Block::Background(v))) if !yours => v.extend(match b {
+                    Block::Steps(s) => s,
+                    _ => vec![first],
+                }),
+                (Item::Wake, _) => folded.push(Block::Background(vec![first])),
+                _ => folded.push(b),
+            }
+        }
+        blocks = folded;
+    }
+    let last_is_steps = matches!(blocks.last(), Some(Block::Steps(_) | Block::Background(_)));
+    let tail_running = items.last().is_some_and(|i| matches!(i, Item::Tool { result: None, .. }));
+    if working && crate::transcript::options().pending && !(last_is_steps && tail_running) {
+        blocks.push(Block::Pending(if last_is_steps { "Working" } else { "Thinking" }));
+    }
+    blocks
+}
+
+/** The rows of `items[range]`: each run of thinking and tool calls is one row. */
+fn steps_of(items: &[Item], range: std::ops::Range<usize>) -> Vec<Block> {
     let mut blocks: Vec<Block> = vec![];
     let group = crate::transcript::options().group_steps;
-    for (i, item) in items.iter().enumerate() {
-        let step = matches!(item, Item::Tool { .. } | Item::Thinking { .. });
+    for i in range {
+        let step = matches!(items[i], Item::Tool { .. } | Item::Thinking { .. });
         match (step, blocks.last_mut()) {
             (true, Some(Block::Steps(v))) if group => v.push(i),
             (true, _) => blocks.push(Block::Steps(vec![i])),
             (false, _) => blocks.push(Block::One(i)),
         }
-    }
-    let last_is_steps = matches!(blocks.last(), Some(Block::Steps(_)));
-    let tail_running = items.last().is_some_and(|i| matches!(i, Item::Tool { result: None, .. }));
-    if working && crate::transcript::options().pending && !(last_is_steps && tail_running) {
-        blocks.push(Block::Pending(if last_is_steps { "Working" } else { "Thinking" }));
     }
     blocks
 }
@@ -205,6 +235,22 @@ impl Workspace {
                     }
                 }
                 Some(trace.into_any_element())
+            }
+            Block::Background(v) => {
+                let key = format!("{chat_id}:background:{}", v[0]);
+                let open = self.expanded_tools.contains(&key);
+                let wakes = v.iter().filter(|i| matches!(items[**i], Item::Wake)).count();
+                let title = label_n("background_updates", "{n} background update{s}", wakes, &[]);
+                let icon = LineLook::of(&cs).icon("background", "bell");
+                let mut lines = vec![];
+                if open {
+                    let inner = steps_of(items, v[0]..v.last().map_or(v[0], |l| l + 1));
+                    for j in 0..inner.len() {
+                        lines.extend(self.render_block(chat_id, items, &inner, j, false, window, cx));
+                    }
+                }
+                let line = self.trace_line(&key, &icon, &title, false, false, true, open, lines, &st, &theme, cx);
+                Some(style::apply(v_flex(), &st("trace"), &theme).child(line).into_any_element())
             }
         }
     }
@@ -743,6 +789,32 @@ mod tests {
         assert_eq!(blocks_of(&items[..3], false).len(), 3, "a row per step");
         crate::transcript::set_options(&serde_json::json!({}));
     }
+
+    #[test]
+    fn turns_the_agent_starts_itself_fold_until_you_send() {
+        use serde_json::json;
+        let said = |role: &str, text: &str| json!({"type": role, "message": {"content": if role == "user" { json!(text) } else { json!([{"type": "text", "text": text}]) }}});
+        let mut t = crate::transcript::Transcript::default();
+        t.append(0, &[
+            said("user", "ship it"),
+            said("assistant", "On it."),
+            said("user", "Another Claude session sent a message: <teammate-message teammate_id=\"r1\">\n{\"type\":\"idle_notification\"}\n</teammate-message>"),
+            said("assistant", "Review round 1 is done."),
+            said("user", "<task-notification><summary>Wait finished</summary></task-notification>"),
+            said("assistant", "Verified."),
+            said("user", "thanks"),
+            said("assistant", "Sure."),
+        ]);
+        let b = blocks_of(&t.items, false);
+        assert!(matches!(b.as_slice(), [Block::One(0), Block::One(1), Block::Background(v), Block::One(_), Block::One(_)]
+            if v.iter().filter(|i| matches!(t.items[**i], Item::Wake)).count() == 2 && v.iter().any(|i| matches!(&t.items[*i], Item::Assistant { text } if text == "Verified."))));
+        assert!(!t.woke_last(), "you sent the newest turn");
+        t.append(8, &[said("user", "<task-notification><summary>Wait finished</summary></task-notification>")]);
+        assert!(t.woke_last());
+        crate::transcript::set_options(&json!({"fold_background": false}));
+        assert!(!blocks_of(&t.items, false).iter().any(|b| matches!(b, Block::Background(_))));
+        crate::transcript::set_options(&json!({}));
+    }
 }
 
 /** Markdown hides anything shaped like an HTML tag, so "Move to <name>" loses "<name>". Outside code,
@@ -886,6 +958,7 @@ pub(crate) fn inspect(ws: &crate::workspace::Workspace) -> serde_json::Value {
                     Item::Thinking { text } => serde_json::json!({"kind": "thinking", "text": cut(text)}),
                     Item::Notice { text } => serde_json::json!({"kind": "notice", "text": cut(text)}),
                     Item::Image { media_type, .. } => serde_json::json!({"kind": "image", "media_type": media_type}),
+                    Item::Wake => serde_json::json!({"kind": "wake"}),
                     Item::Tool { name, summary, result, is_error, .. } => serde_json::json!({
                         "kind": "tool", "tool": name, "summary": summary, "is_error": is_error,
                         "has_result": result.is_some(), "text": result.as_deref().map(cut),

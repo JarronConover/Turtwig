@@ -2329,6 +2329,8 @@
   // Sounds when things happen, focused or not ("when": "unfocused" to only play in the background).
   // A name is a macOS sound (Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi
   // Submarine Tink) or an audio file path; null silences one. chat.question: a turn that ends asking you.
+  // chat.background_finished: a turn the agent started on its own (a subagent or background task
+  // reporting back) finished; silent unless set, and no banner unless `events` sets one.
   "sounds": {
     "enabled": true,
     "volume": 1,
@@ -2423,6 +2425,7 @@
     "labels": {
       "plural": "s",
       "steps": "{n} step{s}{failed}", "steps_failed": ", {n} failed", "earlier_steps": "{n} earlier step{s}",
+      "background_updates": "{n} background update{s}",
       "thinking": "Thinking", "thought": "Thought", "pending_thinking": "Thinking", "pending_working": "Working",
       "activity_thinking": "Thinking", "activity_writing": "Writing", "more_lines": "… {n} more lines",
       // A finished thought's title: its summary's first line.
@@ -2448,6 +2451,9 @@
     // Each run of thinking and tool calls as one row (false: a row per step); fold_running: a long run
     // folds its earlier steps while it's still going.
     "group_steps": true, "fold_running": true,
+    // Turns the agent starts on its own (a subagent or background task reporting back) fold into one
+    // "N background updates" row, up to the next thing you send.
+    "fold_background": true,
     // Show thinking as Markdown instead of plain text.
     "thinking_markdown": false,
     // A failed step's line: style keys over trace_line.
@@ -2456,7 +2462,7 @@
     // icons may also set pending_thinking / pending_working (each falls back to pending).
     "step_line": {
       "icon_size": 14, "chevron_size": 12, "pulse_ms": 1400, "pulse_min": 0.35, "pulse_max": 1,
-      "icons": { "pending": "brain", "thinking": "brain", "fold": "list-checks", "open": "chevron-down", "closed": "chevron-right" }
+      "icons": { "pending": "brain", "thinking": "brain", "fold": "list-checks", "background": "bell", "open": "chevron-down", "closed": "chevron-right" }
     },
     "step_detail": {
       "removed": "@diff_del", "removed_background": "@diff_del_bg", "added": "@diff_add", "added_background": "@diff_add_bg",

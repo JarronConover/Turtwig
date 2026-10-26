@@ -30,6 +30,8 @@ pub struct Options {
     pub pending: bool,
     /** Each run of thinking and tool calls as one row (`chat.group_steps`); false: a row per step. */
     pub group_steps: bool,
+    /** Folds the turns an agent starts on its own into one row (`chat.fold_background`). */
+    pub fold_background: bool,
     pub summary_chars: usize,
     pub labels: Value,
     pub tools: Value,
@@ -53,6 +55,7 @@ impl Default for Options {
             errors: true,
             pending: true,
             group_steps: true,
+            fold_background: true,
             summary_chars: 140,
             labels: Value::Null,
             tools: Value::Null,
@@ -90,6 +93,7 @@ pub fn set_options(chat: &Value) {
         errors: b("errors", d.errors),
         pending: chat["pending"].get("show").and_then(Value::as_bool).unwrap_or(d.pending),
         group_steps: chat.get("group_steps").and_then(Value::as_bool).unwrap_or(d.group_steps),
+        fold_background: chat.get("fold_background").and_then(Value::as_bool).unwrap_or(d.fold_background),
         summary_chars: chat.get("summary_chars").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(d.summary_chars),
         labels: chat.get("labels").cloned().unwrap_or(Value::Null),
         tools: chat.get("tools").cloned().unwrap_or(Value::Null),
@@ -215,6 +219,9 @@ pub enum Item {
     Thinking { text: String },
     Tool { id: String, name: String, summary: String, input: Value, result: Option<String>, is_error: bool },
     Notice { text: String },
+    /** Where the agent starts a turn on its own (a subagent or background task reporting back): the
+    transcript folds such turns (`chat.fold_background`). Draws nothing. */
+    Wake,
 }
 
 #[derive(Default)]
@@ -302,6 +309,12 @@ impl Transcript {
     }
 
     /** Background shells and subagents started in the loaded lines that haven't finished. */
+    /** The newest turn started on its own (a subagent or background task reporting back), not by you. */
+    pub fn woke_last(&self) -> bool {
+        let at = |f: fn(&Item) -> bool| self.items.iter().rposition(f);
+        at(|i| matches!(i, Item::Wake)) > at(|i| matches!(i, Item::User { .. } | Item::Image { .. }))
+    }
+
     pub fn background(&self) -> Vec<Background> {
         let o = options();
         let mut out = vec![];
@@ -631,13 +644,17 @@ impl Transcript {
         if t.contains("<teammate-message") || t.contains("<cross-session-message") || t.starts_with("Another Claude session sent a message") {
             self.note_finished(t);
             match opts.agent_messages.as_str() {
-                "hidden" => return,
+                "hidden" => {
+                    self.items.push(Item::Wake);
+                    return;
+                }
                 "message" => {
                     self.items.push(Item::User { text: t.to_string() });
                     return;
                 }
                 _ => {}
             }
+            self.items.push(Item::Wake);
             for (from, summary, body) in agent_messages(t) {
                 let id = format!("agent-msg:{}", self.lines);
                 self.items.push(Item::Tool {
@@ -658,9 +675,9 @@ impl Transcript {
             let fallback = label("background_finished", "A background task finished", &[]);
             let summary = between(t, "<summary>", "</summary>").map(str::to_string).unwrap_or(fallback);
             match opts.task_notifications.as_str() {
-                "hidden" => {}
+                "hidden" => self.items.push(Item::Wake),
                 "message" => self.items.push(Item::User { text: t.to_string() }),
-                _ => self.items.push(Item::Notice { text: summary }),
+                _ => self.items.extend([Item::Wake, Item::Notice { text: summary }]),
             }
             return;
         }
@@ -961,11 +978,11 @@ mod options_tests {
         set_options(&json!({}));
         let mut t = Transcript::default();
         t.append(0, &lines);
-        assert!(matches!(t.items.as_slice(), [Item::Notice { text }] if text == "done"));
+        assert!(matches!(t.items.as_slice(), [Item::Wake, Item::Notice { text }] if text == "done"));
         set_options(&json!({"show": {"meta": true, "wrappers": true, "task_notifications": "hidden"}, "labels": {"activity_thinking": "Pondering"}}));
         let mut t = Transcript::default();
         t.append(0, &lines);
-        assert_eq!(t.items.len(), 2);
+        assert_eq!(t.items.len(), 3, "the two notices, and where the hidden notification woke it");
         assert_eq!(t.activity(), "");
         t.append(3, &[json!({"type": "user", "message": {"content": "hi"}})]);
         assert_eq!(t.activity(), "Pondering");

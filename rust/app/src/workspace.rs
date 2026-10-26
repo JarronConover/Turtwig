@@ -1505,7 +1505,8 @@ impl Workspace {
 
     /** Runs `events` from settings for chat state changes, named by `events_options.transitions`
     (chat.waiting, chat.finished, chat.stopped by default) plus chat.state for any change. The chat is
-    `.chat`, its old state `.from`. */
+    `.chat`, its old state `.from`. A turn the agent started on its own finishes as chat.background_finished,
+    which notifies and sounds nothing by default. */
     fn fire_chat_events(&mut self, before: &HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) {
         let rules = self.settings.get("events_options.transitions").cloned();
         let mut fired = vec![];
@@ -1515,6 +1516,8 @@ impl Workspace {
                 fired.push(("chat.state".to_string(), c.clone(), old.clone()));
             }
             for event in crate::behavior::transition_events(rules.as_ref(), old, &c.state) {
+                let woke = self.transcripts.get(&c.id).is_some_and(|t| t.woke_last());
+                let event = if event == "chat.finished" && woke { "chat.background_finished".to_string() } else { event };
                 fired.push((event, c.clone(), old.clone()));
             }
         }
@@ -2578,6 +2581,7 @@ impl Workspace {
                 Item::Thinking { text } => json!({"kind": "thinking", "text": cut(text)}),
                 Item::Notice { text } => json!({"kind": "notice", "text": cut(text)}),
                 Item::Image { .. } => json!({"kind": "image"}),
+                Item::Wake => json!({"kind": "wake"}),
                 Item::Tool { name, summary, result, is_error, .. } => json!({"kind": "tool", "tool": name, "summary": summary, "text": result.as_deref().map(cut), "is_error": is_error, "done": result.is_some()}),
             })
             .collect()
@@ -4584,7 +4588,7 @@ impl Workspace {
                 use crate::ui::trace_view::Block;
                 let holds = |b: &Block| match b {
                     Block::One(i) => *i == item,
-                    Block::Steps(v) => v.contains(&item),
+                    Block::Steps(v) | Block::Background(v) => v.contains(&item),
                     Block::Pending(_) => false,
                 };
                 let found = blocks.iter().position(holds).or_else(|| blocks.iter().position(|b| first_item(b).is_some_and(|f| f >= item)));
@@ -5298,7 +5302,7 @@ fn load_state() -> Map<String, Value> {
 impl TranscriptList {
     pub(crate) fn kinds(&self) -> Vec<String> {
         use crate::ui::trace_view::Block;
-        self.blocks.iter().map(|b| match b { Block::One(i) => format!("one:{i}"), Block::Steps(v) => format!("steps:{}", v.len()), Block::Pending(t) => t.to_string() }).collect()
+        self.blocks.iter().map(|b| match b { Block::One(i) => format!("one:{i}"), Block::Steps(v) => format!("steps:{}", v.len()), Block::Background(v) => format!("background:{}", v.len()), Block::Pending(t) => t.to_string() }).collect()
     }
 }
 
@@ -5617,7 +5621,7 @@ fn first_item(b: &crate::ui::trace_view::Block) -> Option<usize> {
     use crate::ui::trace_view::Block;
     match b {
         Block::One(i) => Some(*i),
-        Block::Steps(v) => v.first().copied(),
+        Block::Steps(v) | Block::Background(v) => v.first().copied(),
         Block::Pending(_) => None,
     }
 }
@@ -5630,11 +5634,13 @@ fn block_sig(items: &[Item], b: &crate::ui::trace_view::Block) -> u64 {
         Some(Item::Tool { id, result, is_error, .. }) => (1u8, id.len(), result.as_ref().map(|r| r.len() + 1).unwrap_or(0), *is_error).hash(&mut h),
         Some(Item::User { text }) | Some(Item::Assistant { text }) | Some(Item::Thinking { text }) | Some(Item::Notice { text }) => (2u8, i, text.len()).hash(&mut h),
         Some(Item::Image { data, .. }) => (3u8, data.len()).hash(&mut h),
+        Some(Item::Wake) => 4u8.hash(&mut h),
         None => 0u8.hash(&mut h),
     };
     match b {
         Block::One(i) => one(*i),
         Block::Steps(v) => v.iter().for_each(|i| one(*i)),
+        Block::Background(v) => v.iter().for_each(|i| one(*i)),
         Block::Pending(t) => t.hash(&mut h),
     }
     h.finish()
