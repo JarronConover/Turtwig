@@ -31,8 +31,9 @@ fn builtin(agent: &str) -> Value {
             "transcripts_root": "~/.claude/projects",
             "provider": "anthropic",
             "process_names": ["claude"],
-            // Clears a prompt Claude Code put back in its input after an early Esc (see ChatKeys).
-            "clear_input_keys": ["C-c"],
+            // Clears a prompt Claude Code put back in its input after an early Esc (see ChatKeys), a line a
+            // press. Not C-c: with no turn running, that also stops every background agent.
+            "clear_input_keys": ["C-u"],
             // Its input box: the prompt (and the no-break space after it) right under a rule. While neither
             // shows, it's in a menu (/artifacts, /model) and the app shows its live screen (`screen`).
             "input_box": { "rule": "──", "prompt": "❯\u{a0}" },

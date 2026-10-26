@@ -700,9 +700,16 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                     std::thread::sleep(std::time::Duration::from_millis(150));
                     let t = typed();
                     if !t.is_empty() {
-                        let mut args = vec!["send-keys", "-t", target.as_str()];
-                        args.extend(clear.iter().map(|k| k.as_str()));
-                        util::run("tmux", &args, &[], None, util::tmux_wait() * 2);
+                        // Its first line goes last: press until that's gone.
+                        for _ in 0..config::count("clear_input_rounds", 20) {
+                            let mut args = vec!["send-keys", "-t", target.as_str()];
+                            args.extend(std::iter::repeat_n(clear.iter().map(|k| k.as_str()), 10).flatten());
+                            util::run("tmux", &args, &[], None, util::tmux_wait() * 2);
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            if typed().is_empty() {
+                                break;
+                            }
+                        }
                         restored = Some(t);
                         break;
                     }
