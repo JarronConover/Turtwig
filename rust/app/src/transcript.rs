@@ -32,6 +32,9 @@ pub struct Options {
     pub group_steps: bool,
     /** Folds the turns an agent starts on its own into one row (`chat.fold_background`). */
     pub fold_background: bool,
+    /** A reply ending in this (`chat.quiet_reply`) has nothing new: a turn the agent started on its own
+    that ends with one folds whole. */
+    pub quiet_reply: String,
     pub summary_chars: usize,
     pub labels: Value,
     pub tools: Value,
@@ -56,6 +59,7 @@ impl Default for Options {
             pending: true,
             group_steps: true,
             fold_background: true,
+            quiet_reply: "(quiet)".into(),
             summary_chars: 140,
             labels: Value::Null,
             tools: Value::Null,
@@ -94,6 +98,7 @@ pub fn set_options(chat: &Value) {
         pending: chat["pending"].get("show").and_then(Value::as_bool).unwrap_or(d.pending),
         group_steps: chat.get("group_steps").and_then(Value::as_bool).unwrap_or(d.group_steps),
         fold_background: chat.get("fold_background").and_then(Value::as_bool).unwrap_or(d.fold_background),
+        quiet_reply: chat.get("quiet_reply").and_then(Value::as_str).map_or(d.quiet_reply.clone(), str::to_string),
         summary_chars: chat.get("summary_chars").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(d.summary_chars),
         labels: chat.get("labels").cloned().unwrap_or(Value::Null),
         tools: chat.get("tools").cloned().unwrap_or(Value::Null),
@@ -224,6 +229,12 @@ pub enum Item {
     Wake,
 }
 
+/** A reply that says there's nothing new (ends in `chat.quiet_reply`). */
+pub fn is_quiet(text: &str) -> bool {
+    let o = options();
+    !o.quiet_reply.is_empty() && text.trim_end().ends_with(o.quiet_reply.as_str())
+}
+
 #[derive(Default)]
 pub struct Transcript {
     pub lines: usize,
@@ -309,11 +320,11 @@ impl Transcript {
     }
 
     /** The newest turn started on its own (a subagent or background task reporting back), not by you, and
-    ended without a reply. */
+    ended without a reply or with a quiet one. */
     pub fn woke_quietly(&self) -> bool {
         let at = |f: fn(&Item) -> bool| self.items.iter().rposition(f);
         at(|i| matches!(i, Item::Wake)) > at(|i| matches!(i, Item::User { .. } | Item::Image { .. }))
-            && !matches!(self.items.last(), Some(Item::Assistant { .. }))
+            && !matches!(self.items.last(), Some(Item::Assistant { text }) if !is_quiet(text))
     }
 
     /** Background shells and subagents started in the loaded lines that haven't finished. */

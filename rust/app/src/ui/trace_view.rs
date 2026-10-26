@@ -22,7 +22,7 @@ pub(crate) enum Block {
 }
 
 /** Groups items into rows: each run of thinking and tool calls is one row, and so is each run of turns the
-agent started on its own, up to the next thing you sent or the reply one of them ends with. */
+agent started on its own, up to the next thing you sent or a reply one of them ends with that isn't quiet. */
 pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
     let mut blocks = steps_of(items, 0..items.len());
     if crate::transcript::options().fold_background {
@@ -35,7 +35,7 @@ pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
             };
             let first = at(&b).unwrap_or(0);
             let yours = matches!(items[first], Item::User { .. } | Item::Image { .. });
-            let reply = matches!(items[first], Item::Assistant { .. })
+            let reply = matches!(&items[first], Item::Assistant { text } if !crate::transcript::is_quiet(text))
                 && match items.get(first + 1) {
                     None => !working,
                     Some(next) => matches!(next, Item::Wake | Item::User { .. } | Item::Image { .. }),
@@ -821,6 +821,10 @@ mod tests {
         let n = t.lines;
         t.append(n, &[said("user", "<task-notification><summary>Wait finished</summary></task-notification>"), said("assistant", "CI passed.")]);
         assert!(!t.woke_quietly(), "it replied");
+        let n = t.lines;
+        t.append(n, &[said("user", "<task-notification><summary>Wait finished</summary></task-notification>"), said("assistant", "Nothing new. (quiet)")]);
+        assert!(t.woke_quietly(), "a quiet reply");
+        assert!(matches!(blocks_of(&t.items, false).last(), Some(Block::Background(_))), "a quiet reply folds with its turn");
         assert!(matches!(blocks_of(&t.items, true).as_slice(), [.., Block::Background(_), Block::Pending(_)]), "mid-turn text stays folded");
         let n = t.lines;
         t.append(n, &[said("user", "<task-notification><summary>Wait finished</summary></task-notification>")]);
