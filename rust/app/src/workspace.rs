@@ -1516,7 +1516,7 @@ impl Workspace {
                 fired.push(("chat.state".to_string(), c.clone(), old.clone()));
             }
             for event in crate::behavior::transition_events(rules.as_ref(), old, &c.state) {
-                let woke = self.transcripts.get(&c.id).is_some_and(|t| t.woke_last());
+                let woke = self.transcripts.get(&c.id).is_some_and(|t| t.woke_quietly());
                 let event = if event == "chat.finished" && woke { "chat.background_finished".to_string() } else { event };
                 fired.push((event, c.clone(), old.clone()));
             }

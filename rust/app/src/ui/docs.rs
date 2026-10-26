@@ -271,7 +271,7 @@ Examples:
 | `chat.added` / `chat.removed` | a chat appeared on / left a host | `.chat`, `.host` |
 | `chat.state` | any chat state change | `.chat`, `.from` |
 | `chat.waiting` / `chat.finished` / `chat.stopped` | by `events_options.transitions` | `.chat` (`.chat.asks`: its last reply ends in a question), `.from` |
-| `chat.background_finished` | a chat.finished for a turn the agent started on its own (a subagent or background task reporting back); nothing handles it by default | `.chat`, `.from` |
+| `chat.background_finished` | a chat.finished for a turn the agent started on its own (a subagent or background task reporting back) that ended without a reply; nothing handles it by default | `.chat`, `.from` |
 | `chat.message` | a new message arrived in an open chat | `.chat`, `.message {kind, text}` |
 | `worktree.added` / `worktree.removed` | a worktree appeared / went | `.worktree`, `.host` |
 | `worktree.mr` | a worktree's merge request or its checks changed | `.worktree`, `.from` (the old one) |

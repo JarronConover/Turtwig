@@ -308,13 +308,15 @@ impl Transcript {
         self.finished.len()
     }
 
-    /** Background shells and subagents started in the loaded lines that haven't finished. */
-    /** The newest turn started on its own (a subagent or background task reporting back), not by you. */
-    pub fn woke_last(&self) -> bool {
+    /** The newest turn started on its own (a subagent or background task reporting back), not by you, and
+    ended without a reply. */
+    pub fn woke_quietly(&self) -> bool {
         let at = |f: fn(&Item) -> bool| self.items.iter().rposition(f);
         at(|i| matches!(i, Item::Wake)) > at(|i| matches!(i, Item::User { .. } | Item::Image { .. }))
+            && !matches!(self.items.last(), Some(Item::Assistant { .. }))
     }
 
+    /** Background shells and subagents started in the loaded lines that haven't finished. */
     pub fn background(&self) -> Vec<Background> {
         let o = options();
         let mut out = vec![];

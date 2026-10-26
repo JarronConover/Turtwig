@@ -2330,7 +2330,7 @@
   // A name is a macOS sound (Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi
   // Submarine Tink) or an audio file path; null silences one. chat.question: a turn that ends asking you.
   // chat.background_finished: a turn the agent started on its own (a subagent or background task
-  // reporting back) finished; silent unless set, and no banner unless `events` sets one.
+  // reporting back) finished without a reply; silent unless set, and no banner unless `events` sets one.
   "sounds": {
     "enabled": true,
     "volume": 1,
@@ -2452,7 +2452,7 @@
     // folds its earlier steps while it's still going.
     "group_steps": true, "fold_running": true,
     // Turns the agent starts on its own (a subagent or background task reporting back) fold into one
-    // "N background updates" row, up to the next thing you send.
+    // "N background updates" row, up to the next thing you send. A reply such a turn ends with shows.
     "fold_background": true,
     // Show thinking as Markdown instead of plain text.
     "thinking_markdown": false,

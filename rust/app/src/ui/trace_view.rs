@@ -22,7 +22,7 @@ pub(crate) enum Block {
 }
 
 /** Groups items into rows: each run of thinking and tool calls is one row, and so is each run of turns the
-agent started on its own, up to the next thing you sent. */
+agent started on its own, up to the next thing you sent or the reply one of them ends with. */
 pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
     let mut blocks = steps_of(items, 0..items.len());
     if crate::transcript::options().fold_background {
@@ -35,8 +35,13 @@ pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
             };
             let first = at(&b).unwrap_or(0);
             let yours = matches!(items[first], Item::User { .. } | Item::Image { .. });
+            let reply = matches!(items[first], Item::Assistant { .. })
+                && match items.get(first + 1) {
+                    None => !working,
+                    Some(next) => matches!(next, Item::Wake | Item::User { .. } | Item::Image { .. }),
+                };
             match (&items[first], folded.last_mut()) {
-                (_, Some(Block::Background(v))) if !yours => v.extend(match b {
+                (_, Some(Block::Background(v))) if !yours && !reply => v.extend(match b {
                     Block::Steps(s) => s,
                     _ => vec![first],
                 }),
@@ -799,18 +804,27 @@ mod tests {
             said("user", "ship it"),
             said("assistant", "On it."),
             said("user", "Another Claude session sent a message: <teammate-message teammate_id=\"r1\">\n{\"type\":\"idle_notification\"}\n</teammate-message>"),
-            said("assistant", "Review round 1 is done."),
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}}),
             said("user", "<task-notification><summary>Wait finished</summary></task-notification>"),
+            said("assistant", "Checking."),
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}}]}}),
             said("assistant", "Verified."),
             said("user", "thanks"),
             said("assistant", "Sure."),
         ]);
+        let text = |i: usize| match &t.items[i] { Item::Assistant { text } => text.as_str(), _ => "" };
         let b = blocks_of(&t.items, false);
-        assert!(matches!(b.as_slice(), [Block::One(0), Block::One(1), Block::Background(v), Block::One(_), Block::One(_)]
-            if v.iter().filter(|i| matches!(t.items[**i], Item::Wake)).count() == 2 && v.iter().any(|i| matches!(&t.items[*i], Item::Assistant { text } if text == "Verified."))));
-        assert!(!t.woke_last(), "you sent the newest turn");
-        t.append(8, &[said("user", "<task-notification><summary>Wait finished</summary></task-notification>")]);
-        assert!(t.woke_last());
+        assert!(matches!(b.as_slice(), [Block::One(0), Block::One(1), Block::Background(v), Block::One(r), Block::One(_), Block::One(_)]
+            if v.iter().filter(|i| matches!(t.items[**i], Item::Wake)).count() == 2 && v.iter().any(|i| text(*i) == "Checking.") && text(*r) == "Verified."),
+            "two quiet wakes fold together, and the reply that ends one shows");
+        assert!(!t.woke_quietly(), "you sent the newest turn");
+        let n = t.lines;
+        t.append(n, &[said("user", "<task-notification><summary>Wait finished</summary></task-notification>"), said("assistant", "CI passed.")]);
+        assert!(!t.woke_quietly(), "it replied");
+        assert!(matches!(blocks_of(&t.items, true).as_slice(), [.., Block::Background(_), Block::Pending(_)]), "mid-turn text stays folded");
+        let n = t.lines;
+        t.append(n, &[said("user", "<task-notification><summary>Wait finished</summary></task-notification>")]);
+        assert!(t.woke_quietly());
         crate::transcript::set_options(&json!({"fold_background": false}));
         assert!(!blocks_of(&t.items, false).iter().any(|b| matches!(b, Block::Background(_))));
         crate::transcript::set_options(&json!({}));
