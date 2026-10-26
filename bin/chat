@@ -192,7 +192,22 @@ def pull_state(force=False):
     if not force and time.time() - PULLED["at"] < option("state_pull_reuse_secs", 20):
         return
     git_state("pull", "-q", "--rebase", "--autostash", "origin", abxcfg.state_branch(), check=False)
+    unstick_state()
     PULLED["at"] = time.time()
+
+
+def unstick_state():
+    """A pull whose autostash doesn't apply cleanly leaves conflicted files, and every later pull fails on
+    them: take the pulled copy of each (the local change stays in the stash) and say so in agent-box.log."""
+    stuck = git_state("diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+    for path in stuck:
+        if git_state("cat-file", "-e", f"HEAD:{path}", check=False).returncode == 0:
+            git_state("checkout", "HEAD", "--", path, check=False)
+        else:
+            git_state("rm", "-q", "--cached", "--ignore-unmatch", path, check=False)
+            (STATE_DIR / path).unlink(missing_ok=True)
+    if stuck:
+        move_log(f"took the pulled copy of {', '.join(stuck)}: this machine's change didn't apply on top (it's in `git stash list`)", tag="state")
 
 
 def remote_called():
@@ -1402,10 +1417,10 @@ def leave_behind(src, folders):
             print(f"left {folder} on the {label(src)}: {err}", file=sys.stderr)
 
 
-def move_log(text):
+def move_log(text, tag="chat move"):
     with open(AGENT_HOME / "log" / "agent-box.log", "a") as log:
         for line in str(text).strip().splitlines():
-            log.write(f"{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%dT%H:%M:%SZ} [chat move] {line}\n")
+            log.write(f"{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%dT%H:%M:%SZ} [{tag}] {line}\n")
 
 
 def cmd__leave_behind(args):
