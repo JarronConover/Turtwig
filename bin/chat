@@ -344,8 +344,15 @@ def worktree_dir(chat):
 
 
 def add_worktree(primary, wt_dir, branch, serial=None):
-    """`git worktree add`, with git's own error when it fails. Several side by side in one repo can fail
-    (exit 255): a failed one tries again on its own, holding `serial`."""
+    """`git worktree add`, with git's own error when it fails. Given only origin's branch, git makes the
+    local one and writes its upstream to the repo's config, and several doing that side by side fail on
+    the config lock (exit 255, the branch made but untracked): so the branch is made first, holding
+    `serial`. A failed one still tries again on its own."""
+    git = lambda *a: run(["git", "-C", str(primary), *a], check=False, capture_output=True)
+    with serial or contextlib.nullcontext():
+        if git("rev-parse", "-q", "--verify", f"refs/heads/{branch}").returncode != 0 \
+                and git("rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}").returncode == 0:
+            git("branch", "-q", "--track", branch, f"origin/{branch}")
     cmd = ["git", "-C", str(primary), "worktree", "add", "-q", str(wt_dir), branch]
     for attempt in range(3):
         with (serial if attempt and serial else contextlib.nullcontext()):
