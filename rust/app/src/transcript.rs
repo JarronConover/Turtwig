@@ -459,10 +459,12 @@ impl Transcript {
     }
 
     /** Takes out the newest message you sent that starts with `first_line` (one the agent gave back
-    unanswered, to edit and send again), returning its whole text. */
+    unanswered, to edit and send again), returning its whole text. Claude Code gives a long message back
+    as "[Pasted text #1 +40 lines]": that's the newest one. */
     pub fn withdraw(&mut self, first_line: &str) -> Option<String> {
         let want = first_line.trim();
-        let at = self.items.iter().rposition(|i| matches!(i, Item::User { text } if text.trim_start().starts_with(want)))?;
+        let pasted = want.contains("[Pasted text #");
+        let at = self.items.iter().rposition(|i| matches!(i, Item::User { text } if pasted || text.trim_start().starts_with(want)))?;
         let Item::User { text } = self.items[at].clone() else { return None };
         self.echoes.retain(|(_, i)| *i != at);
         self.remove_item(at);
@@ -944,6 +946,8 @@ mod background_tests {
         t.echo("draft one\nmore");
         assert_eq!(t.withdraw("draft one").as_deref(), Some("draft one\nmore"));
         assert_eq!(t.items.len(), 3);
+        t.echo("a long one\nwith many lines");
+        assert_eq!(t.withdraw("[Pasted text #1 +40 lines]").as_deref(), Some("a long one\nwith many lines"));
     }
 
     #[test]
