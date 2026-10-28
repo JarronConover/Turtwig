@@ -85,7 +85,7 @@
   "logo": {
     "art": "logo.png",
     "ink": "#111111",
-    "tint": true,
+    "tint": false,
     "tile": "#ffffff",
     "corner": 0.225,
     "padding": 0,
