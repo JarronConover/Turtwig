@@ -240,6 +240,9 @@ pub struct Workspace {
     pub(crate) completion: Option<(String, String, Vec<crate::completions::Entry>, usize)>,
     /** Messages typed while a chat was working, sent one per turn as it finishes (`chat.queue`). */
     pub(crate) queued: HashMap<String, Vec<String>>,
+    /** Text quoted from transcripts (`chat.add_selection`), going out at the top of each chat's next message. */
+    pub(crate) quotes: HashMap<String, Vec<String>>,
+    pub(crate) select_tip: Option<crate::ui::quote_view::SelectTip>,
     /** Subagent conversations opened as tabs (read-only): (worktree path, a chat with id `sub:PARENT:AGENT`). */
     pub(crate) sub_chats: Vec<(String, Chat)>,
     queue_saved: String,
@@ -579,6 +582,8 @@ impl Workspace {
             nav_at: 0,
             nav_jumping: false,
             sub_chats: vec![],
+            quotes: HashMap::new(),
+            select_tip: None,
             view_handle: None,
             placeholders: HashMap::new(),
             queue_sent: HashMap::new(),
@@ -3903,6 +3908,7 @@ impl Workspace {
             self.toast(t, window, cx);
             return;
         };
+        let typed = crate::ui::quote_view::with_quotes(&self.quotes.remove(id).unwrap_or_default(), &typed);
         let text = [typed, paths.join(" ")].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
         if text.is_empty() {
             return;
@@ -4479,10 +4485,26 @@ impl Workspace {
         // names the chat has rendered yet.
         let (drop_view, drop_chat) = (cx.entity().downgrade(), chat_id.to_string());
         let drop_attaches = self.settings.chat.get("drop_on_transcript").and_then(Value::as_bool) != Some(false);
+        let tip = self.selection_tip(&chat_id, window, cx);
+        let tip_chat = chat_id.clone();
         div()
             .id(SharedString::from(format!("transcript-drop:{chat_id}")))
             .relative()
             .size_full()
+            .on_mouse_down(MouseButton::Left, cx.listener(|ws, _, _, cx| {
+                if ws.select_tip.take().is_some() {
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(move |ws, e: &MouseUpEvent, _, cx| {
+                ws.select_tip = Some(crate::ui::quote_view::SelectTip { chat: tip_chat.clone(), at: e.position, text: String::new() });
+                cx.notify();
+            }))
+            .on_scroll_wheel(cx.listener(|ws, _, _, cx| {
+                if ws.select_tip.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .when(drop_attaches, |d| d.on_drop(move |paths: &ExternalPaths, window, cx| {
                 let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
                 let chat = drop_chat.clone();
@@ -4494,6 +4516,7 @@ impl Workspace {
             .children(jump)
             .children(loading_earlier)
             .children(overlay)
+            .children(tip)
             .into_any_element()
     }
 

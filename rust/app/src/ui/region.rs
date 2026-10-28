@@ -325,6 +325,8 @@ impl Workspace {
                     self.composer_texts.get(id).hash(&mut s);
                     self.attachments_json(id).to_string().hash(&mut s);
                     self.queued.get(id).hash(&mut s);
+                    self.quotes.get(id).hash(&mut s);
+                    self.select_tip.as_ref().filter(|t| &t.chat == id).map(|t| format!("{:?}", t.at)).hash(&mut s);
                 }
             }
             "diff" => {

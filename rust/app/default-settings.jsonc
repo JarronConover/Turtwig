@@ -2352,6 +2352,8 @@
     // `not_in`: leave the key to the focused "terminal", "composer", or other "input" (cmd-k clears a terminal).
     { "key": "cmd-k", "do": "palette.open", "not_in": ["terminal"] },
     { "key": "cmd-shift-p", "do": "palette.open" },
+    // Quote the text selected in the transcript in your next message.
+    { "key": "cmd-l", "do": "chat.add_selection", "not_in": ["terminal"] },
     { "key": "cmd-\\", "do": { "do": "state.toggle", "key": "sidebar_open" } },
     { "key": "cmd-j", "do": { "do": "state.toggle", "key": "terminal_open" } },
     { "key": "cmd-,", "do": "settings.open" },
@@ -2598,6 +2600,21 @@
     "message_actions": true,
     // Select and copy message text with the mouse.
     "selectable": true,
+    // Over text you select in the transcript: "Add to chat" and the key bound to chat.add_selection; it quotes
+    // the text in your next message (false: no tip). style: the tip; key: its key; offset: gap above the pointer.
+    "selection_tip": {
+      "style": { "gap": 8, "padding": [4, 9], "radius": 6, "background": "@card", "border": 1, "border_color": "@line", "font_size": 12.5, "color": "@text", "shadow": "md", "hover": { "background": "@hover" } },
+      "key": { "color": "@text_faint", "font_size": 11.5 },
+      "offset": 10
+    },
+    // A quote waiting over the message box: icon, icon_size, chars (how much of the quote shows), style.
+    "quote_chip": {
+      "icon": "message-square-quote", "icon_size": 13, "chars": 24,
+      "style": { "gap": 6, "padding": [4, 8], "margin": [0, 6, 6, 0], "radius": 6, "background": "@pill", "border": 1, "border_color": "@line", "font_size": 12, "color": "@text_muted" }
+    },
+    // The corner of each code block: its language and a copy button (false: just the language).
+    // icon, icon_size, tooltip, color, hover.
+    "code_copy": { "icon": "copy", "icon_size": 13, "tooltip": "Copy code", "color": "@text_faint", "hover": "@hover" },
     // How replies' Markdown looks. Style objects take the usual style keys (padding, radius, font_size,
     // font_family, background, overflow_x...). Tables scroll sideways instead of squeezing.
     "markdown": {

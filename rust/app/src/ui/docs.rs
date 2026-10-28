@@ -384,7 +384,7 @@ fn all_node_types() -> impl Iterator<Item = &'static (&'static str, &'static str
 }
 
 fn all_actions() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
-    ACTIONS.iter().chain(crate::ui::trace_view::ACTIONS).chain(crate::ui::diff_view::ACTIONS).chain(crate::terminal::ACTIONS).chain(crate::ui::drive::ACTIONS)
+    ACTIONS.iter().chain(crate::ui::trace_view::ACTIONS).chain(crate::ui::quote_view::ACTIONS).chain(crate::ui::diff_view::ACTIONS).chain(crate::terminal::ACTIONS).chain(crate::ui::drive::ACTIONS)
 }
 
 fn schema() -> Value {

@@ -349,6 +349,9 @@ impl Workspace {
                 shown.map(|el| h_flex().w_full().justify_end().child(self.zoomable(format!("img:{key}"), el, action, cx)).into_any_element())
             }
             Item::Assistant { text } => {
+                for (n, code) in fenced_code(text).into_iter().enumerate() {
+                    self.clickables.push((format!("{key}:code{n}"), "Copy code".into(), serde_json::json!({"do": "clipboard.copy", "text": code})));
+                }
                 let props = serde_json::json!({"kind": "assistant", "text": text, "index": i, "chat": chat_id, "key": key});
                 let body = match self.chat_part("assistant", props, &format!("chat:{key}"), window, cx) {
                     Some(el) => el,
@@ -380,10 +383,58 @@ impl Workspace {
         let angles = md.and_then(|m| m.get("show_angle_brackets")).and_then(Value::as_bool) != Some(false);
         let text = if angles { show_angle_brackets(text) } else { text.to_string() };
         let view = TextView::markdown(SharedString::from(key.to_string()), text).selectable(selectable);
+        let view = match self.code_copy_button(theme) {
+            Some(button) => view.code_block_actions(move |block, _, _| button(block)),
+            None => view,
+        };
         match md.and_then(|md| self.markdown_style_of(md, theme)) {
             Some(st) => view.style(st),
             None => view,
         }
+    }
+
+    /** `chat.code_copy`: the corner of each code block, its language and a button copying the code (`icon`,
+`icon_size`, `tooltip`, `color`, `hover`); false: just the language. */
+    fn code_copy_button(&self, theme: &Map<String, Value>) -> Option<impl Fn(&gpui_kit::base::text::CodeBlock) -> AnyElement + Send + Sync + 'static> {
+        let cfg = self.settings.chat.get("code_copy").cloned().unwrap_or(Value::Bool(true));
+        if cfg == Value::Bool(false) {
+            return None;
+        }
+        let tok = |k: &str, d: &str| style::color(&cfg.get(k).cloned().unwrap_or_else(|| Value::from(d)), theme);
+        let (muted, hover) = (tok("color", "@text_faint").unwrap_or(gpui_kit::black()), tok("hover", "@hover").unwrap_or(gpui_kit::black()));
+        let icon = format!("icons/{}.svg", cfg.get("icon").and_then(Value::as_str).unwrap_or("copy"));
+        let size = cfg.get("icon_size").and_then(Value::as_f64).unwrap_or(13.) as f32;
+        let tip = SharedString::from(cfg.get("tooltip").and_then(Value::as_str).unwrap_or("Copy code").to_string());
+        let copied = self.tr("copied", "Copied", &[]);
+        let view = self.view_handle.clone();
+        Some(move |block: &gpui_kit::base::text::CodeBlock| {
+            let (code, tip, copied, view) = (block.code(), tip.clone(), copied.clone(), view.clone());
+            h_flex()
+                .gap(px(6.))
+                .items_center()
+                .text_size(px(11.))
+                .text_color(muted)
+                .children(block.lang().filter(|l| !l.is_empty()))
+                .child(
+                    div()
+                        .id("copy")
+                        .p(px(3.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover))
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                        .child(Icon::empty().path(icon.clone()).size(px(size)).text_color(muted))
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
+                            if let Some(v) = view.as_ref().and_then(|v| v.upgrade()) {
+                                let copied = copied.clone();
+                                v.update(cx, |ws, cx| ws.toast(copied, window, cx));
+                            }
+                        }),
+                )
+                .into_any_element()
+        })
     }
 
     /** settings `chat.markdown`: paragraph_gap (rem), heading_sizes (h1..h6 points), style objects for
@@ -897,6 +948,25 @@ mod angle_tests {
     }
 }
 
+/** The code in each fenced block of `text`, for the copy buttons' entries in `abx clickable`. */
+fn fenced_code(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut open: Option<Vec<&str>> = None;
+    for line in text.lines() {
+        let fence = line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~");
+        match (&mut open, fence) {
+            (Some(lines), true) => {
+                out.push(lines.join("\n"));
+                open = None;
+            }
+            (None, true) => open = Some(vec![]),
+            (Some(lines), false) => lines.push(line),
+            (None, false) => {}
+        }
+    }
+    out
+}
+
 /** Actions this module handles (named in SETTINGS.md with the rest). */
 pub(crate) const ACTIONS: &[(&str, &str)] = &[
     ("step.toggle / step.expand / step.collapse", "{chat?, id | index}: open or close one step line in a transcript (`id` as inspect.json views.transcripts lists it, or the item `index`)"),
@@ -1024,6 +1094,7 @@ pub(crate) fn inspect(ws: &crate::workspace::Workspace) -> serde_json::Value {
                 }),
                 "items": items, "expanded": expanded, "background": background, "finished": t.finished_count(),
                 "attachments": ws.attachments_json(chat),
+                "quotes": ws.quotes.get(chat),
             }),
         );
     }

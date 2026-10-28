@@ -158,7 +158,11 @@ impl Workspace {
 
     pub(crate) fn attachments_view(&mut self, chat: Option<String>, props: &Map<String, Value>, cx: &mut Context<Self>) -> Option<AnyElement> {
         let chat = chat?;
-        let list = self.attachments.get(&chat).filter(|v| !v.is_empty())?.clone();
+        let list = self.attachments.get(&chat).cloned().unwrap_or_default();
+        let quotes = self.quote_chips(&chat, cx);
+        if list.is_empty() && quotes.is_empty() {
+            return None;
+        }
         let theme = self.settings.theme.clone();
         let cs = self.settings.chat.clone();
         let st = |k: &str| cs.get(k).and_then(Value::as_object).cloned().unwrap_or_default();
@@ -180,7 +184,7 @@ impl Workspace {
         let rm_hover = rm.get("hover").and_then(Value::as_object).cloned().unwrap_or_default();
         let on_click = self.attachment_setting("on_click").filter(|a| !a.is_null());
         let digits = self.stamp_digits("chips");
-        let mut row = style::apply(div().flex().flex_row().flex_wrap(), &st("attachments"), &theme);
+        let mut row = style::apply(div().flex().flex_row().flex_wrap(), &st("attachments"), &theme).children(quotes);
         for (index, p) in list.into_iter().enumerate() {
             let (chat2, id) = (chat.clone(), p.id);
             let shown = crate::ui::trace_view::strip_stamp(&p.name, digits);
