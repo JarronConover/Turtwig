@@ -197,17 +197,35 @@ def pull_state(force=False):
 
 
 def unstick_state():
-    """A pull whose autostash doesn't apply cleanly leaves conflicted files, and every later pull fails on
-    them: take the pulled copy of each (the local change stays in the stash) and say so in agent-box.log."""
-    stuck = git_state("diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
-    for path in stuck:
-        if git_state("cat-file", "-e", f"HEAD:{path}", check=False).returncode == 0:
-            git_state("checkout", "HEAD", "--", path, check=False)
-        else:
-            git_state("rm", "-q", "--cached", "--ignore-unmatch", path, check=False)
-            (STATE_DIR / path).unlink(missing_ok=True)
-    if stuck:
-        move_log(f"took the pulled copy of {', '.join(stuck)}: this machine's change didn't apply on top (it's in `git stash list`)", tag="state")
+    """A pull whose rebase or autostash doesn't apply cleanly leaves conflicted files, and every later pull
+    and push fails on them: take the pulled copy of each, finish the rebase (or call off one that still
+    can't go on), and say so in agent-box.log."""
+    git_dir = STATE_DIR / ".git"
+    rebasing = lambda: (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+    taken, parked = [], False
+    for _ in range(int(option("state_rebase_steps", 200))):
+        stuck = git_state("diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+        for path in stuck:
+            if git_state("cat-file", "-e", f"HEAD:{path}", check=False).returncode == 0:
+                git_state("checkout", "HEAD", "--", path, check=False)
+            else:
+                git_state("rm", "-q", "--cached", "--ignore-unmatch", path, check=False)
+                (STATE_DIR / path).unlink(missing_ok=True)
+        taken += stuck
+        if not rebasing():
+            break
+        # Files changed since (this daemon keeps writing) would stop the rebase from going on.
+        if not parked and git_state("diff", "--quiet", check=False).returncode != 0:
+            parked = git_state("stash", "push", "-q", "--keep-index", "-m", "state: unstick", check=False).returncode == 0
+        if git_state("-c", "core.editor=true", "rebase", "--continue", check=False).returncode != 0 \
+                and not git_state("diff", "--name-only", "--diff-filter=U", check=False).stdout.strip():
+            git_state("rebase", "--abort", check=False)
+            move_log("called off a state rebase that couldn't go on; this machine's commits stay unpushed until the next pull", tag="state")
+            break
+    if parked:
+        git_state("stash", "pop", "-q", check=False)
+    if taken:
+        move_log(f"took the pulled copy of {', '.join(sorted(set(taken)))}: this machine's change didn't apply on top (it's in `git stash list` or the state log)", tag="state")
 
 
 def remote_called():
@@ -217,6 +235,7 @@ def remote_called():
 def commit_state(message):
     """Commit and push the state branch (`state_push_tries` tries, `state_push_wait_secs` apart); a failed
     push retries next write."""
+    unstick_state()
     git_state("add", "-A")
     if git_state("diff", "--cached", "--quiet", check=False).returncode != 0:
         git_state("commit", "-q", "-m", message)
