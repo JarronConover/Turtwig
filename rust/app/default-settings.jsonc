@@ -2454,7 +2454,7 @@
     // folds its earlier steps while it's still going.
     "group_steps": true, "fold_running": true,
     // Turns the agent starts on its own (a subagent or background task reporting back) fold into one
-    // "N background updates" row, up to the next thing you send. A reply such a turn ends with shows,
+    // "N background updates" row, up to the next thing you send (or a compaction). A reply such a turn ends with shows,
     // unless it ends in `quiet_reply` (an agent's way of saying nothing's new).
     "fold_background": true,
     "quiet_reply": "(quiet)",

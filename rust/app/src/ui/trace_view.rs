@@ -22,7 +22,7 @@ pub(crate) enum Block {
 }
 
 /** Groups items into rows: each run of thinking and tool calls is one row, and so is each run of turns the
-agent started on its own, up to the next thing you sent or a reply one of them ends with that isn't quiet. */
+agent started on its own, up to the next thing you sent (or a compaction) or a reply one of them ends with that isn't quiet. */
 pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
     let mut blocks = steps_of(items, 0..items.len());
     if crate::transcript::options().fold_background {
@@ -34,12 +34,14 @@ pub(crate) fn blocks_of(items: &[Item], working: bool) -> Vec<Block> {
                 _ => None,
             };
             let first = at(&b).unwrap_or(0);
-            let yours = matches!(items[first], Item::User { .. } | Item::Image { .. });
+            // A compaction starts the session over, so it ends a fold like something you sent.
+            let yours = |i: &Item| matches!(i, Item::User { .. } | Item::Image { .. }) || matches!(i, Item::Tool { name, .. } if name == "Compaction");
             let reply = matches!(&items[first], Item::Assistant { text } if !crate::transcript::is_quiet(text))
                 && match items.get(first + 1) {
                     None => !working,
-                    Some(next) => matches!(next, Item::Wake | Item::User { .. } | Item::Image { .. }),
+                    Some(next) => matches!(next, Item::Wake) || yours(next),
                 };
+            let yours = yours(&items[first]);
             match (&items[first], folded.last_mut()) {
                 (_, Some(Block::Background(v))) if !yours && !reply => v.extend(match b {
                     Block::Steps(s) => s,
@@ -887,6 +889,16 @@ mod tests {
         let n = t.lines;
         t.append(n, &[said("user", "<task-notification><summary>Wait finished</summary></task-notification>")]);
         assert!(t.woke_quietly());
+        let n = t.lines;
+        t.append(n, &[
+            said("user", "<task-notification><summary>Wait finished</summary></task-notification>"),
+            said("assistant", "Here's the answer."),
+            json!({"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted", "compactMetadata": {"trigger": "auto"}}),
+            json!({"type": "user", "isCompactSummary": true, "message": {"role": "user", "content": "This session is being continued…"}}),
+        ]);
+        let b = blocks_of(&t.items, false);
+        let text = |i: usize| match &t.items[i] { Item::Assistant { text } => text.as_str(), _ => "" };
+        assert!(matches!(b.as_slice(), [.., Block::Background(_), Block::One(r), Block::Steps(_)] if text(*r) == "Here's the answer."), "a compaction after a reply leaves the reply out of the fold");
         crate::transcript::set_options(&json!({"fold_background": false}));
         assert!(!blocks_of(&t.items, false).iter().any(|b| matches!(b, Block::Background(_))));
         crate::transcript::set_options(&json!({}));
