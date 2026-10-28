@@ -5459,7 +5459,10 @@ pub(crate) fn split_uploads(text: &str) -> (Vec<std::path::PathBuf>, String) {
 
 /** The image's size scaled down to fit within `max_w` x `max_h`. */
 pub fn fit(path: &std::path::Path, max_w: f32, max_h: f32) -> (f32, f32) {
-    let Ok(d) = imagesize::size(path) else { return (max_w, max_h) };
+    imagesize::size(path).map_or((max_w, max_h), |d| fit_size(d, max_w, max_h))
+}
+
+pub fn fit_size(d: imagesize::ImageSize, max_w: f32, max_h: f32) -> (f32, f32) {
     let (w, h) = (d.width as f32, d.height as f32);
     let k = (max_w / w).min(max_h / h).min(1.);
     (w * k, h * k)

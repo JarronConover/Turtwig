@@ -338,7 +338,14 @@ impl Workspace {
             Item::Image { media_type, data } => {
                 let image = self.images.entry(key.clone()).or_insert_with(|| crate::workspace::decode_image(media_type, data)).clone();
                 let action = serde_json::json!({"do": "image.view", "chat": chat_id, "index": i});
-                let shown = image.map(|i| style::apply_plain(img(i).object_fit(ObjectFit::Contain), &st("image"), theme).into_any_element());
+                // Sized up front: the image decodes after the list measures its row, which would keep a zero height.
+                let image_style = st("image");
+                let max = |k: &str, d: f32| image_style.get(k).and_then(Value::as_f64).map(|x| x as f32).unwrap_or(d);
+                let (mw, mh) = (max("max_width", 360.), max("max_height", 240.));
+                let shown = image.map(|i| {
+                    let (w, h) = imagesize::blob_size(&i.bytes).map_or((mw, mh), |d| crate::workspace::fit_size(d, mw, mh));
+                    style::apply_plain(img(i).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme).into_any_element()
+                });
                 shown.map(|el| h_flex().w_full().justify_end().child(self.zoomable(format!("img:{key}"), el, action, cx)).into_any_element())
             }
             Item::Assistant { text } => {
