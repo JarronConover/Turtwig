@@ -330,7 +330,7 @@ impl Workspace {
                         }
                     })
                     .collect();
-                let body = (!rest.is_empty()).then(|| self.markdown(&format!("{key}:u"), &rest, theme));
+                let body = (!rest.is_empty()).then(|| self.markdown(&format!("{key}:u"), &crate::live_markdown::as_typed(&rest), theme));
                 let bubble = style::apply(v_flex(), &st("user"), theme).children(body).children(thumbs);
                 let row = h_flex().w_full().justify_end().child(bubble).into_any_element();
                 Some(self.with_message_actions(chat_id, i, &key, text, true, row, theme))

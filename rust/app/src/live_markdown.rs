@@ -356,6 +356,37 @@ pub fn decorations(text: &str, literal: &HashSet<usize>, styles: &Map<String, Va
     out
 }
 
+/** Markdown that shows as the message box drew it: each new line is a line break (not a space), and a line
+without a quote's `>` or a list's marker, right after one, starts a paragraph of its own. */
+pub fn as_typed(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut code = false;
+    // The line before, when it's text (not blank, not in or opening a code block).
+    let mut prev: Option<&str> = None;
+    for (i, line) in text.split('\n').enumerate() {
+        let body = line.trim_start_matches(' ');
+        let fence = body.starts_with("```") || body.starts_with("~~~");
+        let text_line = !code && !fence && !body.is_empty();
+        if i > 0 {
+            if let (Some(p), true) = (prev, text_line) {
+                let pb = p.trim_start_matches(' ');
+                let after_quote = pb.starts_with('>') && !body.starts_with('>');
+                let after_item = matches!(block_marker(pb), Some((_, Kind::List))) && body.len() == line.len() && block_marker(body).is_none();
+                if after_quote || after_item {
+                    out.push('\n');
+                } else if !p.ends_with("  ") {
+                    out.push_str("  ");
+                }
+            }
+            out.push('\n');
+        }
+        out.push_str(line);
+        code ^= fence;
+        prev = Some(line).filter(|_| text_line);
+    }
+    out
+}
+
 /** Moves `literal`'s offsets over an edit that replaced `start..old_end` with text ending at `new_end`;
 formatting whose start was deleted goes. */
 pub fn shift(literal: &mut HashSet<usize>, start: usize, old_end: usize, new_end: usize) {
@@ -431,6 +462,15 @@ mod tests {
         assert_eq!(tab("```\n- a\n```", 6, false), None);
         let r = super::reindent("- a\n- b\n- c", 4..11, false, &HashSet::new()).unwrap();
         assert_eq!(r.text, "  - b\n  - c");
+    }
+
+    #[test]
+    fn sent_text_keeps_the_lines_and_quotes_as_typed() {
+        use super::as_typed;
+        assert_eq!(as_typed("a\nb\n\nc"), "a  \nb\n\nc");
+        assert_eq!(as_typed("> a\n> b\nc"), "> a  \n> b\n\nc");
+        assert_eq!(as_typed("- a\n- b\nc\n  d"), "- a  \n- b\n\nc  \n  d");
+        assert_eq!(as_typed("x\n```\nl1\nl2\n```\ny\nz"), "x\n```\nl1\nl2\n```\ny  \nz");
     }
 
     #[test]
