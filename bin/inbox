@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""inbox: post to and read the a.box inbox from a shell, on any machine (the app shows every machine's items as
+one list; see `.inbox` in SETTINGS.md).
+
+  inbox post TITLE [--text T] [--chat ID] [--source S] [--key K] [--force]
+      add an item, or update the one with KEY (an update that changes the title or text makes it unread again;
+      --force always does). --chat links the chat it is about (its id, which survives moves). Goes to the
+      inbox host (option inbox_host, default the box), or this machine when that can't be reached.
+  inbox list                       unread items here and on the inbox host, as JSON
+  inbox read [UIDS...] [--chat ID] [--key K] [--all]   mark items read (a uid is host:id; a bare id is the
+      inbox host's)
+"""
+import argparse, json, shlex, subprocess, sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import abxcfg  # noqa: E402
+
+
+def boxd(hid):
+    return f"{abxcfg.remote_path(abxcfg.agent_box_dir(hid))}/rust/target/release/agent-boxd"
+
+
+def run_on(hid, args, stdin=None):
+    """agent-boxd inbox ARGS on a host: here directly, elsewhere over ssh. (ok, stdout)."""
+    if hid == abxcfg.host_id():
+        argv = [boxd(hid), "inbox", *args]
+    else:
+        target = abxcfg.ssh_of(hid)
+        if not target:
+            return False, ""
+        argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target,
+                f"{boxd(hid)} inbox {shlex.join(args)}"]
+    try:
+        r = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    return r.returncode == 0, r.stdout.strip()
+
+
+def hosts():
+    """The inbox host first, then this machine."""
+    here, owner = abxcfg.host_id(), abxcfg.option("inbox_host", "box")
+    return [owner] if owner == here else [owner, here]
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="inbox")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("post")
+    p.add_argument("title")
+    for x in ("--text", "--chat", "--source", "--key"):
+        p.add_argument(x)
+    p.add_argument("--force", action="store_true")
+    sub.add_parser("list")
+    r = sub.add_parser("read")
+    r.add_argument("ids", nargs="*")
+    r.add_argument("--chat")
+    r.add_argument("--key")
+    r.add_argument("--all", action="store_true")
+    a = ap.parse_args()
+    if a.cmd == "post":
+        item = {"title": a.title, "text": a.text or "", "chat": a.chat, "source": a.source, "key": a.key,
+                "force": a.force}
+        for hid in hosts():
+            ok, out = run_on(hid, ["post"], stdin=json.dumps(item))
+            if ok:
+                print(json.dumps({**json.loads(out or "{}"), "host": hid}))
+                return 0
+        sys.exit("inbox: couldn't post on " + " or ".join(hosts()))
+    if a.cmd == "list":
+        items = []
+        for hid in hosts():
+            ok, out = run_on(hid, ["list"])
+            items += [{**i, "host": hid} for i in (json.loads(out or "[]") if ok else [])]
+        print(json.dumps(sorted(items, key=lambda i: -i.get("updated_at", 0)), indent=2))
+        return 0
+    rest = [*(["--chat", a.chat] if a.chat else []), *(["--key", a.key] if a.key else []), *(["--all"] if a.all else [])]
+    read = 0
+    for hid in hosts():
+        # An id is `host:id` (an item's uid), or a bare id on the inbox host.
+        ids = [i.split(":", 1)[1] if ":" in i else i for i in a.ids
+               if (i.split(":", 1)[0] if ":" in i else hosts()[0]) == hid]
+        if not ids and not rest:
+            continue
+        ok, out = run_on(hid, ["read", *ids, *rest])
+        read += json.loads(out or "{}").get("read", 0) if ok else 0
+    print(json.dumps({"read": read}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

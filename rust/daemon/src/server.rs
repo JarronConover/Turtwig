@@ -205,13 +205,43 @@ fn model_loop(shared: &Arc<Shared>) {
         return;
     }
     let states = shared.states.lock().unwrap().clone();
-    let next = model::build(&shared.caches, &states, shared.last_seq.load(Ordering::SeqCst));
+    let mut next = model::build(&shared.caches, &states, shared.last_seq.load(Ordering::SeqCst));
+    if let Ok(db) = db::open() {
+        if config::get("inbox_post_waiting").and_then(|v| v.as_bool()).unwrap_or(true) {
+            let before = shared.model.lock().unwrap().as_ref().map(|m| m.chats.iter().map(|c| (c.id.clone(), c.state.clone())).collect::<HashMap<_, _>>());
+            post_waiting(&db, before.as_ref(), &next.chats);
+        }
+        next.inbox = db::inbox_unread(&db);
+    }
     let changed = shared.model.lock().unwrap().as_ref() != Some(&next);
     if changed {
         *shared.model.lock().unwrap() = Some(next.clone());
         for c in shared.conns.lock().unwrap().iter().filter(|c| c.subscribed.load(Ordering::SeqCst)) {
             c.event(Event::Model(next.clone()));
         }
+    }
+}
+
+/** A chat that started waiting on the user posts an inbox item (key `chat:<id>`, one per chat). With no earlier
+model (the daemon just started, or no app was watching), a waiting chat posts only when its question is new. */
+fn post_waiting(db: &rusqlite::Connection, before: Option<&HashMap<String, String>>, chats: &[agent_box_protocol::Chat]) {
+    for c in chats.iter().filter(|c| c.state == "waiting") {
+        let was = before.and_then(|b| b.get(&c.id));
+        if was.is_some_and(|s| s == "waiting") {
+            continue;
+        }
+        let w = c.waiting_on.as_ref();
+        let text = w
+            .and_then(|w| w.pointer("/tool_input/questions/0/question").or_else(|| w.get("message")))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| w.and_then(|w| w.get("tool_name")).and_then(|v| v.as_str()).map(|t| format!("Asks to use {t}")))
+            .unwrap_or_else(|| "It's waiting for an answer.".into());
+        let title = format!("{} needs you", c.name);
+        let key = format!("chat:{}", c.id);
+        let post = db::Post { title: &title, text: &text, chat: Some(&c.id), source: Some("chat"), key: Some(&key),
+                              force: was.is_some() };
+        let _ = db::inbox_post(db, &post, util::now());
     }
 }
 
@@ -815,6 +845,20 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let limit = limit.unwrap_or(config::count("hook_events_limit", 1000));
             let events = db::query(&db, session_id.as_deref(), from_seq, since, limit as i64);
             return Ok(json!({ "events": events, "last_seq": shared.last_seq.load(Ordering::SeqCst) }));
+        }
+        Call::InboxPost { title, text, chat, source, key, force } => {
+            let db = db::open().map_err(|e| e.to_string())?;
+            let post = db::Post { title: &title, text: &text, chat: chat.as_deref(), source: source.as_deref(),
+                                  key: key.as_deref(), force };
+            let (id, changed) = db::inbox_post(&db, &post, util::now()).map_err(|e| e.to_string())?;
+            shared.poke();
+            return Ok(json!({ "id": id, "changed": changed }));
+        }
+        Call::InboxRead { ids, chat, all } => {
+            let db = db::open().map_err(|e| e.to_string())?;
+            let read = db::inbox_read(&db, &ids, chat.as_deref(), None, all, util::now());
+            shared.poke();
+            return Ok(json!({ "read": read }));
         }
         Call::LogTail { name, lines } => {
             let path = hosts::log_path(&name).ok_or_else(|| format!("no log named {name} (option logs)"))?;

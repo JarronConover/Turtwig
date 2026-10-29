@@ -1,5 +1,5 @@
 /*! agent-boxd: the a.box app's daemon, one on each host (the box, the Mac, any other in `hosts`).
-`run` serves the app's protocol on a unix socket, `connect` relays stdio to it, `hook` logs Claude Code hooks. */
+`run` serves the app's protocol on a unix socket, `connect` relays stdio to it, `hook` logs Claude Code hooks, `inbox` posts to and reads this host's inbox. */
 
 mod agents;
 mod codex;
@@ -23,8 +23,9 @@ fn main() -> anyhow::Result<()> {
             db::hook();
             Ok(())
         }
+        Some("inbox") => std::process::exit(db::inbox_cli(&std::env::args().skip(2).collect::<Vec<_>>())),
         _ => {
-            eprintln!("usage: agent-boxd run | connect | hook");
+            eprintln!("usage: agent-boxd run | connect | hook | inbox");
             std::process::exit(2);
         }
     }

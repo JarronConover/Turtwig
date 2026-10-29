@@ -168,6 +168,30 @@ pub enum Call {
         lines: Option<usize>,
     },
     ChatRename { chat_id: String, name: String },
+    /** Add an inbox item, or update the one with the same `key`: an update that changes the title or text (or any
+    with `force`) makes it unread again. `{id, changed}`. */
+    InboxPost {
+        title: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        chat: Option<String>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        force: bool,
+    },
+    /** Mark inbox items read: these `ids`, every item linked to `chat`, or `all`. `{read}` (rows changed). */
+    InboxRead {
+        #[serde(default)]
+        ids: Vec<i64>,
+        #[serde(default)]
+        chat: Option<String>,
+        #[serde(default)]
+        all: bool,
+    },
     /** Terminal shells (tmux sessions `sh-*`), of one folder with `cwd`: `{terms: [{session, name, cwd, attached,
     created, command}]}`. */
     TermList {
@@ -255,6 +279,28 @@ pub struct Model {
     /** This host's transcript and WIP backup (bin/sync-worker). */
     #[serde(default)]
     pub sync: Option<SyncStatus>,
+    /** The unread items of this host's inbox, newest first. */
+    #[serde(default)]
+    pub inbox: Vec<InboxItem>,
+}
+
+/** Something waiting for the user: posted by an agent, a script, or a chat that needs them. `rev` grows on every
+update that made it unread again. */
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct InboxItem {
+    pub id: i64,
+    #[serde(default)]
+    pub key: Option<String>,
+    pub at: f64,
+    pub updated_at: f64,
+    pub rev: i64,
+    #[serde(default)]
+    pub source: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub chat: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

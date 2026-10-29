@@ -751,6 +751,7 @@ pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model 
         chats,
         last_seq,
         sync: sync_status(),
+        inbox: vec![],
     }
 }
 
