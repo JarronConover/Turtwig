@@ -14,7 +14,9 @@ use objc2_user_notifications::{
 };
 use std::sync::OnceLock;
 
-static CLICKS: OnceLock<flume::Sender<String>> = OnceLock::new();
+/** Clicked banners' ids. Made once per process: a window opened again (a new Workspace) gets the same receiver,
+so clicks keep working after the window is closed and reopened. */
+static CLICKS: OnceLock<(flume::Sender<String>, flume::Receiver<String>)> = OnceLock::new();
 /** Notification Center refuses ad-hoc-signed apps; then banners go through the older NSUserNotification API. */
 static MODERN: AtomicBool = AtomicBool::new(false);
 
@@ -40,7 +42,7 @@ define_class!(
         #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
         fn did_receive(&self, _: &UNUserNotificationCenter, response: &UNNotificationResponse, done: &block2::DynBlock<dyn Fn()>) {
             let id = response.notification().request().identifier().to_string();
-            if let Some(tx) = CLICKS.get() {
+            if let Some((tx, _)) = CLICKS.get() {
                 let _ = tx.send(id);
             }
             done.call(());
@@ -50,7 +52,7 @@ define_class!(
     unsafe impl NSUserNotificationCenterDelegate for Delegate {
         #[unsafe(method(userNotificationCenter:didActivateNotification:))]
         fn did_activate(&self, _: &NSUserNotificationCenter, n: &NSUserNotification) {
-            if let (Some(tx), Some(id)) = (CLICKS.get(), n.identifier()) {
+            if let (Some((tx, _)), Some(id)) = (CLICKS.get(), n.identifier()) {
                 let _ = tx.send(id.to_string());
             }
         }
@@ -68,8 +70,11 @@ pub fn init() -> Option<flume::Receiver<String>> {
     if !bundled() {
         return None;
     }
+    if let Some((_, rx)) = CLICKS.get() {
+        return Some(rx.clone());
+    }
     let (tx, rx) = flume::unbounded();
-    CLICKS.set(tx).ok()?;
+    CLICKS.set((tx, rx.clone())).ok()?;
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let delegate: Retained<Delegate> = unsafe { msg_send![Delegate::alloc(mtm), init] };
     center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
