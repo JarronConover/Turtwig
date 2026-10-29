@@ -406,6 +406,8 @@ pub struct Workspace {
     pub(crate) focused: bool,
     /** Events waiting for a window to run in: (name, extra context fields). */
     pending_events: Vec<(String, Map<String, Value>)>,
+    /** inbox.read calls for a host that was down, sent when it connects. */
+    pending_inbox_reads: HashMap<String, Vec<Call>>,
     /** Agents' requests (run.json, run.d, relayed): run in order, each with its result written. */
     pending_requests: Vec<(crate::behavior::Request, Option<String>)>,
     pub(crate) pending_script: Vec<Value>,
@@ -684,6 +686,7 @@ impl Workspace {
             orchestrator_memo: Default::default(),
             focused: true,
             pending_events: vec![("app.start".into(), Map::new())],
+            pending_inbox_reads: HashMap::new(),
             pending_requests: vec![],
             pending_script: vec![],
             script_generation: 0,
@@ -1556,7 +1559,69 @@ impl Workspace {
         for o in before.iter().filter(|o| !after.iter().any(|w| w.path == o.path)) {
             events.push(("worktree.removed", ext(vec![("worktree", serde_json::to_value(o).unwrap_or_default()), ("host", json!(host))])));
         }
+        // New inbox items, and ones an update made unread again.
+        for i in new.inbox.iter().filter(|i| !old.inbox.iter().any(|o| o.id == i.id && o.rev == i.rev)) {
+            events.push(("inbox.added", ext(vec![("item", inbox_item_json(i, host, &self.age_format()))])));
+        }
         self.pending_events.extend(events.into_iter().map(|(e, x)| (e.to_string(), x)));
+    }
+
+    /** `.inbox`: every host's unread items as one list, newest first (an item posted under the same key on two
+    machines shows once, the newer), and their count. */
+    fn inbox_json(&self) -> Value {
+        let mut items: Vec<(f64, Value, Option<String>)> = vec![];
+        let fmt = self.age_format();
+        for (host, m) in &self.models {
+            for i in &m.inbox {
+                items.push((i.updated_at, inbox_item_json(i, host, &fmt), i.key.clone()));
+            }
+        }
+        items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut seen = HashSet::new();
+        let items: Vec<Value> = items.into_iter().filter(|(_, _, k)| k.as_ref().map_or(true, |k| seen.insert(k.clone()))).map(|(_, v, _)| v).collect();
+        json!({"unread": items.len(), "items": items})
+    }
+
+    /** `inbox.read`: mark items read on every host that has them (each host keeps its own; a host that is down
+    gets it when it reconnects). */
+    pub(crate) fn inbox_read(&mut self, uids: Vec<String>, chat: Option<String>, all: bool, cx: &mut Context<Self>) {
+        let mut hosts: HashSet<String> = self.models.keys().cloned().collect();
+        hosts.extend(self.remotes.keys().cloned());
+        for host in hosts {
+            let ids: Vec<i64> = uids.iter().filter_map(|u| u.split_once(':')).filter(|(h, _)| *h == host).filter_map(|(_, id)| id.parse().ok()).collect();
+            if ids.is_empty() && chat.is_none() && !all {
+                continue;
+            }
+            // Shown read at once; the host's next model confirms it.
+            if let Some(m) = self.models.get_mut(&host) {
+                m.inbox.retain(|i| !(all || ids.contains(&i.id) || (chat.is_some() && i.chat == chat)));
+            }
+            let call = Call::InboxRead { ids, chat: chat.clone(), all };
+            if self.host_up.get(&host).copied().unwrap_or(false) {
+                let remote = self.remote_for_host(&host);
+                cx.spawn(async move |_, _| {
+                    let _ = remote.call(call).await;
+                })
+                .detach();
+            } else {
+                self.pending_inbox_reads.entry(host).or_default().push(call);
+            }
+        }
+        self.ctx_rev += 1;
+        let ctx = self.context();
+        self.update_badge(&ctx);
+        cx.notify();
+    }
+
+    /** `inbox.post`: to the inbox host (`daemon.inbox_host`, default the box), else this machine when it is down. */
+    pub(crate) fn inbox_post(&mut self, call: Call, cx: &mut Context<Self>) {
+        let owner = self.settings.raw.pointer("/daemon/inbox_host").and_then(|v| v.as_str()).unwrap_or("box").to_string();
+        let host = if self.host_up.get(&owner).copied().unwrap_or(false) { owner } else { self.local_host() };
+        let remote = self.remote_for_host(&host);
+        cx.spawn(async move |_, _| {
+            let _ = remote.call(call).await;
+        })
+        .detach();
     }
 
     /** A banner was clicked: its own `on_click` (notify.system), else the `notification.click` event with the
@@ -1711,8 +1776,12 @@ impl Workspace {
                 self.configure_host(host);
                 self.pending_events.push(("host.connected".into(), [("host".to_string(), json!(host))].into_iter().collect()));
                 let remote = self.remote_for_host(host);
+                let reads = self.pending_inbox_reads.remove(host).unwrap_or_default();
                 cx.spawn(async move |_, _| {
                     let _ = remote.call(Call::Hello { client: "agent-box-app".into() }).await;
+                    for r in reads {
+                        let _ = remote.call(r).await;
+                    }
                     let _ = remote.call(Call::Subscribe { from_seq: None }).await;
                 })
                 .detach();
@@ -2479,6 +2548,7 @@ impl Workspace {
             "sections": sections,
             "worktrees": worktrees,
             "chats": self.model.chats.iter().chain(self.sub_chats.iter().map(|(_, c)| c)).map(|c| self.chat_json(c)).collect::<Vec<_>>(),
+            "inbox": self.inbox_json(),
             "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here, "diff": selected_diff,
                          "terminals": terminals, "background": background, "move": self.move_plan(), "transcript": transcript},
             "composers": self.composer_texts,
@@ -5283,6 +5353,18 @@ fn split_emoji(title: &str) -> (Option<String>, String) {
         }
     }
     (None, title.to_string())
+}
+
+/** An inbox item as settings see it: its fields plus `host` (whose inbox holds it), `uid` (`host:id`, what
+`inbox.read` takes) and `age_text`. */
+fn inbox_item_json(i: &agent_box_protocol::InboxItem, host: &str, age_fmt: &Value) -> Value {
+    let mut v = serde_json::to_value(i).unwrap_or_default();
+    if let Some(o) = v.as_object_mut() {
+        o.insert("host".into(), json!(host));
+        o.insert("uid".into(), json!(format!("{host}:{}", i.id)));
+        o.insert("age_text".into(), json!(age_text(Some(i.updated_at), age_fmt)));
+    }
+    v
 }
 
 /** "now", "5m", "3h", "2d", "1w" (settings `format.age`: now, m, h, d, w, each with `{n}`). */

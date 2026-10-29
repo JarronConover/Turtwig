@@ -237,6 +237,7 @@ Examples:
 | `.projects[]` | `{name, repo, hue, letter, items: [worktree]}`: repos with their worktrees outside any section |
 | `.sections[]` | `{id, name, collapsed, items: [worktree]}` |
 | `.worktrees[]` | every worktree: `{id, path, branch, title, emoji, label, project, repo, hue, letter, is_primary, uncommitted, unpushed, behind, mr: {number, url, state, checks} \| null, age, age_text, status, section: {id, name} \| null, selected, chats: [chat]}`. `status` is one of working, waiting, merged, failing, pending, dirty, behind, idle. |
+| `.inbox` | `{unread, items: [item]}`: every machine's unread inbox items, newest first. An item: `{uid, id, host, key, title, text, chat, source, at, updated_at, rev, age_text}`; `chat` is the chat it is about (or null), `uid` is what `inbox.read` takes. Posted with `inbox.post`, `bin/inbox post`, or by a chat that starts waiting on you (daemon option `inbox_post_waiting`). |
 | `.chats[]` | every chat: `{id, name, kind, agent, host, status, dir, branch, rc_url, alive, state, waiting_on, last_activity, age_text, active, tmux}`. `state` is idle, working, waiting, or stopped; `host` is box or mac; `agent` is the CLI it runs (a key of `.agents`); `activity` is a short line on what a working agent is doing now ("Reading settings.jsonc", "Thinking", "Writing"), empty otherwise (filled for chats whose transcript is open); `status_line` is the agent's own working line read from its pane, `{verb, since, tokens, changed_at, notes}` or null (`changed_at`: when the token count last moved); `orchestrator` is whether it leads its section (`chat.orchestrator`); `model_used` is the model its newest reply came from (else the `model` it was started with, else null: the agent's default). |
 | `.agents` | settings `daemon.agents`: each agent CLI a chat can run (`{name, icon, color, ...}` by key, e.g. `.agents[.c.agent].icon`) |
 | `.designer` | `{working, activity, has_messages}` for the designer chat |
@@ -273,6 +274,7 @@ Examples:
 | `chat.waiting` / `chat.finished` / `chat.stopped` | by `events_options.transitions` | `.chat` (`.chat.asks`: its last reply ends in a question), `.from` |
 | `chat.background_finished` | a chat.finished for a turn the agent started on its own (a subagent or background task reporting back) that ended without a reply or with a quiet one (`chat.quiet_reply`); nothing handles it by default | `.chat`, `.from` |
 | `chat.message` | a new message arrived in an open chat | `.chat`, `.message {kind, text}` |
+| `inbox.added` | an inbox item arrived, or an update made it unread again | `.item` (as in `.inbox.items`) |
 | `worktree.added` / `worktree.removed` | a worktree appeared / went | `.worktree`, `.host` |
 | `worktree.mr` | a worktree's merge request or its checks changed | `.worktree`, `.from` (the old one) |
 | `select` | the selected worktree or chat changed | `.worktree` (path), `.chat` (id) |

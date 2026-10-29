@@ -845,7 +845,81 @@
         { "id": "status-pill", "type": "Pill", "props": { "text": "{{ if .app.connected then \"a.box\" else .app.status end }}", "mono": true, "tooltip": "{{ .app.status }}", "do": "palette.open" } },
         { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "square-terminal", "tooltip": "Open in Cursor", "do": { "do": "open", "url": "{{ if .selected.worktree.host == \"mac\" then \"cursor://file\" + .selected.worktree.path else \"cursor://vscode-remote/ssh-remote+\" + .app.ssh_host + .selected.worktree.path end }}" } } },
         { "if": ".selected.worktree", "type": "Pill", "props": { "icon": "code", "tooltip": "Open in VS Code", "do": { "do": "open", "url": "{{ if .selected.worktree.host == \"mac\" then \"vscode://file\" + .selected.worktree.path else \"vscode://vscode-remote/ssh-remote+\" + .app.ssh_host + .selected.worktree.path end }}" } } },
-        { "if": ".selected.worktree.mr", "type": "Pill", "props": { "text": "!{{ .selected.worktree.mr.number }}", "icon": "git-pull-request", "tooltip": "Open the merge request", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } } }
+        { "if": ".selected.worktree.mr", "type": "Pill", "props": { "text": "!{{ .selected.worktree.mr.number }}", "icon": "git-pull-request", "tooltip": "Open the merge request", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } } },
+        { "type": "InboxButton", "id": "inbox" }
+      ]
+    },
+
+    "InboxButton": {
+      "about": "The inbox: a bell with the unread count; click for the unread items (.inbox.items). Clicking an item opens its chat and marks it read.",
+      "type": "box",
+      "style": { "position": "relative" },
+      "children": [
+        { "type": "IconButton", "id": "inbox-button", "props": { "icon": "{{ if .inbox.unread > 0 then \"bell-dot\" else \"bell\" end }}", "size": 26, "icon_color": "{{ if .inbox.unread > 0 then \"@accent\" else \"@text_muted\" end }}", "tooltip": "Inbox: {{ .inbox.unread }} unread", "do": { "do": "state.toggle", "key": "inbox_open" } } },
+        {
+          "if": ".inbox.unread > 0",
+          "type": "box",
+          "style": { "position": "absolute", "top": -2, "right": -4, "min_width": 15, "height": 15, "padding": [0, 4], "radius": 8, "align": "center", "justify": "center", "background": "@accent", "font_size": 10, "font_weight": "semibold", "color": "#ffffff" },
+          "on": { "click": { "do": "state.toggle", "key": "inbox_open" } },
+          "children": [{ "type": "text", "props": { "text": "{{ .inbox.unread }}" } }]
+        },
+        {
+          "if": ".state.inbox_open and (.app.dragging | not)",
+          "type": "box",
+          "layer": "top",
+          "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
+          "on": { "click": { "do": "state.set", "key": "inbox_open", "value": false } }
+        },
+        {
+          "if": ".state.inbox_open",
+          "id": "inbox-panel",
+          "type": "column",
+          "layer": "top",
+          "style": {
+            "position": "absolute", "top": 32, "right": -6, "width": 420, "max_height": 560, "padding": 8, "gap": 6,
+            "radius": 12, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg"
+          },
+          "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
+          "children": [
+            {
+              "type": "row",
+              "style": { "gap": 8, "align": "center", "padding": [2, 6] },
+              "children": [
+                { "type": "text", "props": { "text": "Inbox" }, "style": { "font_size": 13, "font_weight": "semibold", "grow": 1 } },
+                { "if": ".inbox.unread > 0", "type": "text", "props": { "text": "Mark all read" }, "style": { "font_size": 12, "color": "@accent", "cursor": "pointer" }, "on": { "click": { "do": "inbox.read", "all": true } } }
+              ]
+            },
+            { "type": "divider" },
+            {
+              "type": "scroll",
+              "style": { "max_height": 480, "gap": 1 },
+              "children": [
+                { "if": ".inbox.unread == 0", "type": "text", "props": { "text": "Nothing new." }, "style": { "padding": 10, "font_size": 13, "color": "@text_faint" } },
+                {
+                  "for": ".inbox.items", "as": "i", "key": ".i.uid",
+                  "type": "row",
+                  "style": { "padding": [6, 8], "gap": 10, "align": "start", "radius": 8, "cursor": "pointer", "hover": { "background": "@hover" } },
+                  "on": { "click": [
+                    { "do": "inbox.read", "uid": "{{ .i.uid }}" },
+                    { "do": "if", "cond": "{{ .i.chat != null }}", "then": { "do": "chat.show", "chat": "{{ .i.chat }}" } },
+                    { "do": "state.set", "key": "inbox_open", "value": false }
+                  ] },
+                  "children": [
+                    {
+                      "type": "column",
+                      "style": { "grow": 1, "min_width": 0, "gap": 2 },
+                      "children": [
+                        { "type": "text", "props": { "text": "{{ .i.title }}" }, "style": { "font_size": 13, "font_weight": "medium", "truncate": true } },
+                        { "if": ".i.text != \"\"", "type": "text", "props": { "text": "{{ .i.text }}" }, "style": { "font_size": 12, "color": "@text_muted", "line_clamp": 2 } }
+                      ]
+                    },
+                    { "type": "text", "props": { "text": "{{ .i.age_text }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "shrink": 0 } }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
       ]
     },
 
@@ -2222,13 +2296,19 @@
     "notification.click": { "do": ["app.activate", { "do": "chat.show", "chat": "{{ .chat.id }}" }] },
     // Typing with nothing focused (chat.type_to_focus): into the selected chat's message box.
     "type_to_focus": { "do": [{ "do": "focus", "area": "composer" }, { "do": "composer.type", "text": "{{ .text }}" }] },
-    "chat.waiting": {
-      "if": ".app.focused | not",
-      "do": [
-        { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} needs you", "text": "{{ .chat.waiting_on.tool_input.questions[0].question // .chat.waiting_on.message // \"It's waiting for an answer.\" }}", "sound": false },
-        "dock.bounce"
-      ]
-    },
+    // A chat waiting on you posts an inbox item (daemon option inbox_post_waiting), whose banner comes from inbox.added.
+    "chat.waiting": { "if": ".app.focused | not", "do": "dock.bounce" },
+    // An inbox item: already read when its chat is on screen; otherwise a banner, even with the window in front.
+    "inbox.added": [
+      { "if": ".app.focused and .item.chat != null and .selected.chat.id == .item.chat", "do": { "do": "inbox.read", "uid": "{{ .item.uid }}" } },
+      { "if": "(.app.focused and .item.chat != null and .selected.chat.id == .item.chat) | not",
+        "do": { "do": "notify.system", "chat": "{{ .item.chat // \"inbox\" }}", "title": "{{ .item.title }}", "text": "{{ .item.text }}", "sound": false,
+                "on_click": { "do": "if", "cond": "{{ .item.chat != null }}", "then": ["app.activate", { "do": "chat.show", "chat": "{{ .item.chat }}" }],
+                              "else": ["app.activate", { "do": "state.set", "key": "inbox_open", "value": true }] } } }
+    ],
+    // Looking at a chat reads its inbox items, however you got there.
+    "select": { "if": ".app.focused and (.selected.chat.id // null) as $c | $c != null and (.inbox.items | any(.chat == $c))", "do": { "do": "inbox.read", "chat": "{{ .selected.chat.id }}" } },
+    "app.focus": { "if": "(.selected.chat.id // null) as $c | $c != null and (.inbox.items | any(.chat == $c))", "do": { "do": "inbox.read", "chat": "{{ .selected.chat.id }}" } },
     "chat.finished": {
       "if": ".app.focused | not",
       "do": { "do": "notify.system", "chat": "{{ .chat.id }}", "title": "{{ .chat.name }} finished", "text": "{{ .chat.last_message // \"Ready for your next message.\" }}", "sound": false }
@@ -2346,7 +2426,7 @@
 
   // The Dock icon's badge (how many chats are waiting on you), and the items of its right-click menu
   // ({label, do, if, checked} like menu_bar items).
-  "dock": { "badge": "{{ [.chats[] | select(.state == \"waiting\")] | length }}", "menu": [] },
+  "dock": { "badge": "{{ .inbox.unread }}", "menu": [] },
 
   "keys": [
     // `not_in`: leave the key to the focused "terminal", "composer", or other "input" (cmd-k clears a terminal).
@@ -2963,6 +3043,8 @@
     "drop_tool_images": true,            // drop image bytes from tool results
     "drop_tool_use_result": true,        // drop the toolUseResult copy from entries
     "events_poll_ms": 250, "events_batch": 500,
+    "inbox_post_waiting": true,          // a chat that starts waiting on you posts an inbox item
+    "inbox_host": "box",                 // where inbox.post and bin/inbox post (this machine while it's down); every machine's items show as one list
     "model_poll_ms": 2000, "model_debounce_ms": 250,
     "transcripts_poll_ms": 300,
     "warm_index_chats": 60,              // newest chats line-indexed at startup

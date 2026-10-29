@@ -29,6 +29,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("clipboard.read", "{then}: `then` runs with the clipboard's text as `.input`"),
     ("chat.fork", "{chat}: a new tab in the same worktree that starts from a copy of this chat's conversation"),
     ("completion.accept", "{index?}: take an entry from the composer's completion list (`.app.completion`)"),
+    ("inbox.post", "{title, text?, chat?, source?, key?, force?}: add an item to the inbox (on the `daemon.inbox_host` machine, default the box; this one while it's down). Same `key` = one item, made unread again when its title or text changes (or with force)"),
+    ("inbox.read", "{uid? | uids?: [..], chat?, all?}: mark inbox items read (an item's `uid`, every item of a chat, or all); read items leave `.inbox`"),
     ("history.load", "{hosts?: [..], limit?}: fetch past chats from every connected host (or those) into `.history` (`.app.history_loading` while it runs)"),
     ("if", "{cond, then, else?}: run `then` when cond is truthy (true, a non-empty string other than \"false\"), else `else`"),
     ("confirm", "{title, text?, confirm?, cancel?, then}: ask first; `then` runs if they confirm. Shown by the Confirm component (`.app.confirm`)"),
@@ -429,6 +431,19 @@ impl Workspace {
                         order.insert(w.path.clone(), serde_json::json!(ids));
                         self.set_state("tab_order".into(), Value::Object(order));
                     }
+                }
+            }
+            "inbox.read" => {
+                let mut uids: Vec<String> = a.get("uids").and_then(Value::as_array).map(|v| v.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+                uids.extend(s("uid"));
+                let all = a.get("all").and_then(Value::as_bool).unwrap_or(false);
+                self.inbox_read(uids, s("chat"), all, cx)
+            }
+            "inbox.post" => {
+                if let Some(title) = s("title") {
+                    let force = a.get("force").and_then(Value::as_bool).unwrap_or(false);
+                    let call = agent_box_protocol::Call::InboxPost { title, text: s("text").unwrap_or_default(), chat: s("chat"), source: s("source"), key: s("key"), force };
+                    self.inbox_post(call, cx)
                 }
             }
             "history.load" => {
