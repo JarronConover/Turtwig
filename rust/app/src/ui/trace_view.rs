@@ -426,8 +426,9 @@ impl Workspace {
                         .hover(move |s| s.bg(hover))
                         .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
                         .child(Icon::empty().path(icon.clone()).size(px(size)).text_color(muted))
+                        // A press here starts no text selection; the release must still reach the selection, or it never ends.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| gpui_kit::base::GlobalState::suppress_text_selection(cx))
                         .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
                             cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
                             if let Some(v) = view.as_ref().and_then(|v| v.upgrade()) {
                                 let copied = copied.clone();
