@@ -244,6 +244,8 @@ pub struct Workspace {
     pub(crate) quotes: HashMap<String, Vec<String>>,
     /** A waiting chat's picks so far on a card of several questions: which questions (`questions_view::stamp`), and an option per question. */
     pub(crate) picks: HashMap<String, (String, Vec<Option<usize>>)>,
+    /** The sent times of the transcript whose row is drawing (its own are lent here while it's out). */
+    pub(crate) row_times: HashMap<usize, f64>,
     pub(crate) select_tip: Option<crate::ui::quote_view::SelectTip>,
     /** Subagent conversations opened as tabs (read-only): (worktree path, a chat with id `sub:PARENT:AGENT`). */
     pub(crate) sub_chats: Vec<(String, Chat)>,
@@ -588,6 +590,7 @@ impl Workspace {
             sub_chats: vec![],
             quotes: HashMap::new(),
             picks: HashMap::new(),
+            row_times: HashMap::new(),
             select_tip: None,
             view_handle: None,
             placeholders: HashMap::new(),
@@ -4711,8 +4714,10 @@ impl Workspace {
 
     fn transcript_row(&mut self, chat_id: &str, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some((blocks, working)) = self.lists.get(chat_id).map(|l| (l.blocks.clone(), l.working)) else { return div().into_any_element() };
-        let Some(t) = self.transcripts.remove(chat_id) else { return div().into_any_element() };
+        let Some(mut t) = self.transcripts.remove(chat_id) else { return div().into_any_element() };
+        self.row_times = std::mem::take(&mut t.times);
         let row = self.render_block(chat_id, &t.items, &blocks, ix, working, window, cx);
+        t.times = std::mem::take(&mut self.row_times);
         self.transcripts.insert(chat_id.to_string(), t);
         // `chat.list` styles the column the rows sit in: its gap goes between rows, its padding around them.
         let mut ls = self.settings.chat.get("list").and_then(Value::as_object).cloned().unwrap_or_default();

@@ -559,7 +559,38 @@ impl Workspace {
                     }),
             );
         }
+        let sent = self.row_times.get(&index).copied();
+        bar = bar.children(sent.and_then(|at| self.sent_time(at, theme)));
         v_flex().w_full().group(group).child(body).child(bar).into_any_element()
+    }
+
+    /** When a message was sent, by the message's buttons (`chat.sent_time`: format, older (another day),
+    other_year, tooltip (chrono formats, local time), style; false: none). */
+    fn sent_time(&self, at: f64, theme: &Map<String, Value>) -> Option<AnyElement> {
+        use chrono::{Datelike, Local, TimeZone};
+        let cfg = self.settings.chat.get("sent_time").cloned().unwrap_or(Value::Bool(true));
+        if cfg == Value::Bool(false) {
+            return None;
+        }
+        let fmt = |k: &str, d: &str| cfg.get(k).and_then(Value::as_str).unwrap_or(d).to_string();
+        let when = Local.timestamp_millis_opt((at * 1000.) as i64).single()?;
+        let now = Local::now();
+        let pattern = if when.date_naive() == now.date_naive() {
+            fmt("format", "%-I:%M %p")
+        } else if when.year() == now.year() {
+            fmt("older", "%b %-d, %-I:%M %p")
+        } else {
+            fmt("other_year", "%b %-d %Y, %-I:%M %p")
+        };
+        let tip = SharedString::from(when.format(&fmt("tooltip", "%A, %B %-d, %Y at %-I:%M:%S %p")).to_string());
+        let st = cfg.get("style").and_then(Value::as_object).cloned().unwrap_or_default();
+        let id = SharedString::from(format!("sent:{at}"));
+        Some(
+            style::apply(div().id(id).flex().items_center(), &st, theme)
+                .child(when.format(&pattern).to_string())
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .into_any_element(),
+        )
     }
 
     /** `chat.tools.NAME` (or `"*"`): a tool's own entry, else the catch-all. */

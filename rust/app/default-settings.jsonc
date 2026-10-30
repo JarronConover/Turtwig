@@ -2681,6 +2681,12 @@
     // {icon, tooltip, do, id?} with templates over .text .chat .index), show (hover | always), designer (true:
     // also in the designer), icons, tooltips, icon_size, padding, radius, height, gap, color, hover.
     "message_actions": true,
+    // When a message was sent, after its buttons (shown with them): chrono formats in local time for today
+    // (format), another day this year (older), another year (other_year), and the tooltip; false: none.
+    "sent_time": {
+      "format": "%-I:%M %p", "older": "%b %-d, %-I:%M %p", "other_year": "%b %-d %Y, %-I:%M %p", "tooltip": "%A, %B %-d, %Y at %-I:%M:%S %p",
+      "style": { "color": "@text_faint", "font_size": 11.5, "padding": [0, 4] }
+    },
     // Select and copy message text with the mouse.
     "selectable": true,
     // Over text you select in the transcript: "Add to chat" and the key bound to chat.add_selection; it quotes

@@ -241,6 +241,8 @@ pub struct Transcript {
     /** The first file line loaded (long chats load only their newest lines at first). */
     pub start: usize,
     pub items: Vec<Item>,
+    /** When each message (yours, the agent's, an image) was sent, in Unix seconds, by item index. */
+    pub times: HashMap<usize, f64>,
     tool_index: HashMap<String, usize>,
     /** How the newest compaction started ("auto" or "manual"), from its boundary line. */
     compact_trigger: Option<String>,
@@ -299,9 +301,21 @@ impl Transcript {
         }
         for e in entries {
             self.lines += 1;
-            self.push_entry(e);
+            self.push_timed(e);
         }
         self.revision += 1;
+    }
+
+    /** Adds a line's items, each message stamped with the line's `timestamp`. */
+    fn push_timed(&mut self, e: &Value) {
+        let from = self.items.len();
+        self.push_entry(e);
+        let Some(at) = e.get("timestamp").and_then(Value::as_str).and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) else { return };
+        for i in from..self.items.len() {
+            if matches!(self.items[i], Item::User { .. } | Item::Assistant { .. } | Item::Image { .. }) {
+                self.times.insert(i, at.timestamp_millis() as f64 / 1000.);
+            }
+        }
     }
 
     /** An empty transcript for a chat id (`sub:...` ids are subagents). */
@@ -417,6 +431,7 @@ impl Transcript {
     /** Shows a message you just sent before Claude Code writes it to the file (which takes a moment). */
     pub fn echo(&mut self, text: &str) {
         self.echoes.push((text.trim().to_string(), self.items.len()));
+        self.times.insert(self.items.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64()));
         self.items.push(Item::User { text: text.trim().to_string() });
         self.revision += 1;
     }
@@ -444,6 +459,7 @@ impl Transcript {
             return;
         }
         self.items.remove(at);
+        self.times = std::mem::take(&mut self.times).into_iter().filter(|(i, _)| *i != at).map(|(i, t)| (if i > at { i - 1 } else { i }, t)).collect();
         for i in self.tool_index.values_mut().chain(self.echoes.iter_mut().map(|e| &mut e.1)) {
             if *i > at {
                 *i -= 1;
@@ -477,7 +493,7 @@ impl Transcript {
         let mut older = Transcript { lines: from, start: from, keep_sidechain: self.keep_sidechain, ..Default::default() };
         for e in entries {
             older.lines += 1;
-            older.push_entry(e);
+            older.push_timed(e);
         }
         for (id, (text, err)) in std::mem::take(&mut self.orphans) {
             match older.tool_index.get(&id).and_then(|&i| older.items.get_mut(i)) {
@@ -495,6 +511,7 @@ impl Transcript {
             *i += shift;
         }
         self.tool_index.extend(older.tool_index);
+        self.times = std::mem::take(&mut self.times).into_iter().map(|(i, t)| (i + shift, t)).chain(older.times).collect();
         older.items.append(&mut self.items);
         self.items = older.items;
         self.orphans = older.orphans;

@@ -135,6 +135,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "block2 0.6.2",
+ "chrono",
  "flume 0.11.1",
  "gpui-kit",
  "gpui-pre-platform",
