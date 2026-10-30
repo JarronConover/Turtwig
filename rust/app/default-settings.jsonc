@@ -2628,6 +2628,9 @@
     // ---- Waiting chats ----
     // Choices when a waiting chat gives none (a permission prompt); every question shows when there are several.
     "waiting_options": ["Yes", "Yes, don't ask again", "No"], "waiting_all_questions": true,
+    // A card of several questions sends its answers one key at a time, this far apart (keys sent at once
+    // reach the agent as a paste, which its question menu ignores).
+    "waiting_key_gap_ms": 300,
     // ---- Behavior ----
     // What makes a chat show as a tab (besides opening it yourself): alive, working, waiting, running_elsewhere.
     "open_when": ["alive", "working", "waiting", "running_elsewhere"],
@@ -2763,7 +2766,9 @@
     "waiting": { "padding": 12, "radius": 10, "border": 1, "border_color": "@warning", "background": "@waiting_bg", "font_size": 13 },
     "waiting_option": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "background": "@pill", "hover": { "background": "@pill_hover" }, "font_size": 12.5, "align": "center" },
     // The row of answer buttons in the waiting card.
-    "waiting_row": { "gap": 6, "wrap": true }
+    "waiting_row": { "gap": 6, "wrap": true },
+    // An option picked on a card of several questions, over waiting_option.
+    "waiting_option_picked": { "border_color": "@accent", "background": "@pill_hover" }
   },
 
   "diff": {

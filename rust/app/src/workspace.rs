@@ -242,6 +242,8 @@ pub struct Workspace {
     pub(crate) queued: HashMap<String, Vec<String>>,
     /** Text quoted from transcripts (`chat.add_selection`), going out at the top of each chat's next message. */
     pub(crate) quotes: HashMap<String, Vec<String>>,
+    /** A waiting chat's picks so far on a card of several questions: which questions (`questions_view::stamp`), and an option per question. */
+    pub(crate) picks: HashMap<String, (String, Vec<Option<usize>>)>,
     pub(crate) select_tip: Option<crate::ui::quote_view::SelectTip>,
     /** Subagent conversations opened as tabs (read-only): (worktree path, a chat with id `sub:PARENT:AGENT`). */
     pub(crate) sub_chats: Vec<(String, Chat)>,
@@ -585,6 +587,7 @@ impl Workspace {
             nav_jumping: false,
             sub_chats: vec![],
             quotes: HashMap::new(),
+            picks: HashMap::new(),
             select_tip: None,
             view_handle: None,
             placeholders: HashMap::new(),
@@ -4932,8 +4935,12 @@ impl Workspace {
         let message = waiting_message(&w).unwrap_or(fallback);
         let (options, mut questions) = waiting_options(&w, &self.settings);
         questions.retain(|q| *q != message);
-        let mut row = style::apply(h_flex().gap(px(6.)).flex_wrap(), &st("waiting_row"), theme);
         let cancel = self.tr("waiting_cancel", "Cancel", &[]);
+        let several = waiting_questions(&w);
+        if several.len() > 1 {
+            return self.questions_card(chat, &several, cancel, cx);
+        }
+        let mut row = style::apply(h_flex().gap(px(6.)).flex_wrap(), &st("waiting_row"), theme);
         for (i, label) in options.iter().enumerate().chain(std::iter::once((usize::MAX, &cancel))) {
             let id = chat.id.clone();
             let keys = if i == usize::MAX { self.agent_keys(&chat.agent, "cancel_keys") } else { vec![self.answer_key(&chat.agent, i + 1)] };
@@ -5630,6 +5637,17 @@ pub(crate) fn switch_rows(items: &mut Vec<Worktree>, to: &str, branches: &HashSe
 /** What a waiting chat asks: its (first) question's text, else the agent's message, else the tool's name. */
 pub(crate) fn waiting_message(w: &Value) -> Option<String> {
     w["tool_input"]["questions"][0]["question"].as_str().or(w["message"].as_str()).or(w["tool_name"].as_str()).map(str::to_string)
+}
+
+/** Each question a waiting chat asks, with its options' labels. */
+pub(crate) fn waiting_questions(w: &Value) -> Vec<(String, Vec<String>)> {
+    let qs = w["tool_input"]["questions"].as_array().cloned().unwrap_or_default();
+    qs.iter()
+        .map(|q| {
+            let options = q["options"].as_array().map(|o| o.iter().filter_map(|x| x["label"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+            (q["question"].as_str().unwrap_or_default().to_string(), options)
+        })
+        .collect()
 }
 
 /** A waiting chat's choices: the first question's options (or `chat.waiting_options`), and the text of

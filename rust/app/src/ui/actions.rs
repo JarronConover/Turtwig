@@ -71,7 +71,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("dialog.submit", "{values?: [..]}: fill the open dialog's fields in order (`.app.dialog`, values in inspect.json) and save it. With `views.dialog` in settings, text dialogs are drawn by it and each field is state `dialog_field:N`"),
     ("dialog.cancel", "close the open dialog without saving"),
     ("palette.run", "{label | index}: run a command palette entry (label exact, else the first containing it) without opening the palette"),
-    ("chat.answer", "{chat?, option: index | label | \"cancel\"}: answer a waiting chat's question card (its options are in `.chats[].waiting_on`), with its agent's `answer_key` / `cancel_keys`"),
+    ("chat.answer", "{chat?, option: index | label | \"cancel\", question?}: answer a waiting chat's question card (its options are in `.chats[].waiting_on`), with its agent's `answer_key` / `cancel_keys`; on a card of several questions, picks for `question` (0-based; default the first unpicked), then sends every answer and `submit_keys` once each has one"),
     ("chat.jump_to_latest", "{chat?}: scroll to the newest message and keep following"),
     ("transcript.scroll", "{chat?, row, offset?}: scroll a chat's transcript so row (see inspect.json `transcripts`) is at the top, offset px into it; stops following new messages"),
     ("completion.move / completion.close", "{by?}: move the composer's completion highlight, or close the list"),
@@ -1000,6 +1000,10 @@ impl Workspace {
                 // "cancel" (or -1) presses Esc.
                 if let Some(id) = chat() {
                     let w = self.chat(&id).and_then(|c| c.waiting_on.clone()).unwrap_or_default();
+                    let cancel = matches!(a.get("option"), Some(Value::String(l)) if l.eq_ignore_ascii_case("cancel")) || a.get("option").and_then(Value::as_i64) == Some(-1);
+                    if cancel {
+                        self.picks.remove(&id);
+                    }
                     let (options, _) = crate::workspace::waiting_options(&w, &self.settings);
                     let pick = match a.get("option") {
                         Some(Value::Number(n)) => n.as_i64(),
@@ -1008,7 +1012,14 @@ impl Workspace {
                         _ => None,
                     };
                     let agent = self.chat(&id).map(|c| c.agent.clone()).unwrap_or_default();
+                    let several = !cancel && crate::workspace::waiting_questions(&w).len() > 1;
                     match pick {
+                        _ if several => {
+                            let q = a.get("question").and_then(Value::as_u64).map(|q| q as usize);
+                            if let Err(e) = self.pick_answer(&id, q, a.get("option"), cx) {
+                                self.exprs.note(format!("chat.answer: {e}"));
+                            }
+                        }
                         Some(-1) => {
                             let keys = self.agent_keys(&agent, "cancel_keys");
                             self.call(Call::ChatKeys { chat_id: id, keys }, cx)

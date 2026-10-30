@@ -326,6 +326,7 @@ impl Workspace {
                     self.attachments_json(id).to_string().hash(&mut s);
                     self.queued.get(id).hash(&mut s);
                     self.quotes.get(id).hash(&mut s);
+                    self.picks.get(id).hash(&mut s);
                     self.select_tip.as_ref().filter(|t| &t.chat == id).map(|t| format!("{:?}", t.at)).hash(&mut s);
                 }
             }

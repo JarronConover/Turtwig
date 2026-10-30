@@ -204,6 +204,12 @@ pub fn background_keys(agents: &Value, agent: &str) -> Vec<String> {
     strings(agents.get(agent).and_then(|a| a.get("background_keys"))).unwrap_or_default()
 }
 
+/** The keys that submit a question card's answers once each question has one: `submit_keys` (default the
+first option's `answer_key`, Claude Code's "Submit answers"). */
+pub fn submit_keys(agents: &Value, agent: &str) -> Vec<String> {
+    strings(agents.get(agent).and_then(|a| a.get("submit_keys"))).unwrap_or_else(|| vec![answer_key(agents, agent, 1)])
+}
+
 /** The key that picks option `n` (1-based) of a waiting chat's question: `daemon.agents.<agent>.answer_key` ("{n}"). */
 pub fn answer_key(agents: &Value, agent: &str, n: usize) -> String {
     agents.get(agent).and_then(|a| a.get("answer_key")).and_then(Value::as_str).unwrap_or("{n}").replace("{n}", &n.to_string())

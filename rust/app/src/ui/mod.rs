@@ -7,6 +7,7 @@ pub mod expr;
 pub mod inspect;
 pub mod motion;
 pub mod patch;
+pub mod questions_view;
 pub mod quote_view;
 pub mod region;
 pub mod render;
