@@ -606,6 +606,8 @@ impl Workspace {
                         "edges" => if rel < edge { "before" } else { "after" },
                         "edges_x" => if rel_x < edge { "before" } else { "after" },
                         "edges+inside" => if rel < band { "before" } else if rel > 1. - band { "after" } else { "inside" },
+                        "before" => "before",
+                        "after" => "after",
                         _ => "inside",
                     };
                     if let Some(code) = valid {

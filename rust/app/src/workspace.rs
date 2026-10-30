@@ -5137,6 +5137,16 @@ impl Render for Workspace {
         if dragging != self.dragging {
             self.dragging = dragging;
             self.ctx_rev += 1;
+            if self.settings.get("inspect.log_input").and_then(Value::as_bool) == Some(true) {
+                // A drag that ends with a drop hint left was let go somewhere its drop didn't run.
+                let at = window.mouse_position();
+                let item = self.drag_item.borrow().clone().map(|(kind, value)| json!({"kind": kind, "value": value}));
+                let hint = self.drop_hint.as_ref().map(|h| json!({"key": h.key, "zone": h.zone}));
+                let mut what = if dragging { json!({"input": "drag", "item": item}) } else { json!({"input": "drag_end", "item": item, "hint": hint}) };
+                what["x"] = json!(f32::from(at.x).round());
+                what["y"] = json!(f32::from(at.y).round());
+                self.log_action(&what);
+            }
         }
         if self.dragging {
             self.drop_preview = false;

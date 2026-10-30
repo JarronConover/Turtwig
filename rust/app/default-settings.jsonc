@@ -1094,7 +1094,7 @@
     },
 
     "ChatTabs": {
-      "about": "Tabs for the selected worktree's open chats (a chat is open while its agent's process runs; closing a tab stops it), a placeholder while a new chat starts, + for a new chat, and the worktree's closed chats under the clock. Drag tabs to reorder them.",
+      "about": "Tabs for the selected worktree's open chats (a chat is open while its agent's process runs; closing a tab stops it), a placeholder while a new chat starts, + for a new chat, and the worktree's closed chats under the clock. Drag tabs to reorder them (past the last one: last).",
       "type": "row",
       "style": { "height": 32, "shrink": 0, "padding": [0, 0, 0, 6], "align": "stretch" },
       "children": [
@@ -1159,19 +1159,30 @@
           "children": [{ "type": "spinner", "props": { "size": "xsmall" } }, { "type": "text", "props": { "text": "Starting…" } }]
         },
         {
-          "if": ".selected.worktree",
-          "id": "chat-tab-new",
+          // The rest of the row past the last tab: a tab let go here goes last.
+          "id": "chat-tabs-end",
           "type": "row",
-          "style": { "padding": [0, 10], "gap": 4, "align": "center", "shrink": 0, "color": "@text_muted", "cursor": "pointer", "hover": { "color": "@text" } },
-          "tooltip": "New chat here  ⌘N (right-click: pick the agent)",
-          "on": { "click": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
-          "menu": [
-            { "label": "New Claude chat", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}", "agent": "claude" } },
-            { "label": "New Codex chat", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}", "agent": "codex" } }
-          ],
-          "children": [{ "type": "icon", "props": { "name": "plus", "size": 13 } }]
+          "style": { "position": "relative", "grow": 1, "align": "stretch" },
+          "on": { "drop_item": { "accept": "chat", "do": { "do": "tab.move" } } },
+          "drop_key": "tabs-end",
+          "drop_zones": "before",
+          "children": [
+            { "type": "DropLineX", "props": { "key": "tabs-end" } },
+            {
+              "if": ".selected.worktree",
+              "id": "chat-tab-new",
+              "type": "row",
+              "style": { "padding": [0, 10], "gap": 4, "align": "center", "shrink": 0, "color": "@text_muted", "cursor": "pointer", "hover": { "color": "@text" } },
+              "tooltip": "New chat here  ⌘N (right-click: pick the agent)",
+              "on": { "click": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
+              "menu": [
+                { "label": "New Claude chat", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}", "agent": "claude" } },
+                { "label": "New Codex chat", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}", "agent": "codex" } }
+              ],
+              "children": [{ "type": "icon", "props": { "name": "plus", "size": 13 } }]
+            }
+          ]
         },
-        { "type": "spacer" },
         { "if": ".selected.chats | any(.open | not)", "id": "chat-tab-divider", "type": "divider", "props": { "axis": "y" }, "style": { "height": 14, "self": "center", "margin": [0, 4] } },
         {
           "if": ".selected.chats | any(.open | not)",

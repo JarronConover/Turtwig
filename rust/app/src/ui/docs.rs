@@ -184,7 +184,8 @@ A node is an object (or a string, shorthand for a text node, or an array of node
   // and on a drop target: "on": { "drop_item": { "accept": "worktree", "do": {"do": "worktree.move", "before": "{{ .w.path }}"} } }
   // (the dragged value arrives as the action's `dragged`, the pointer's zone as `zone`; add "valid": a jq
   // test on .dragged/.zone so impossible or no-op drops show nothing and do nothing; "drop_zones": "edges"
-  // (before/after by height), "edges_x" (by width, for rows of tabs), "edges+inside", or per kind {kind: mode})
+  // (before/after by height), "edges_x" (by width, for rows of tabs), "edges+inside", "before" or "after"
+  // (always that zone), or per kind {kind: mode})
   "animate": { "from": {"opacity": 0, "y": 6}, "duration": 160 },   // plays when the node first appears
   "transition": { "width": 200 },     // these style keys (numbers or colors) ease to their new value (ms)
   "motion": false,                    // opt this node out of gliding, enter animation, and style easing

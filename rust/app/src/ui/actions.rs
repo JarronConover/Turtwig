@@ -21,7 +21,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("chat.rename", "{chat, name?}: rename a chat and its tab; its agent's own titles no longer replace the name (asks when name is missing)"),
     ("chat.take_over", "{chat}: ask, then close a chat in the program running it (super.engineering) and continue it here"),
     ("chat.open", "{chat, host?, force?}: open a chat as a tab, resuming its process if it isn't running (host: where a chat from `.history` lives)"),
-    ("tab.move", "{chat?, target: chat id, zone: before|after}: reorder a worktree's tabs (chat defaults to `dragged`)"),
+    ("tab.move", "{chat?, target?: chat id, zone: before|after}: reorder a worktree's tabs (chat defaults to `dragged`; no target: last)"),
     ("chat.interrupt", "{chat}: stop what the agent is doing (its `daemon.agents.<agent>.interrupt_keys`, default Escape), keeping the chat open"),
     ("chat.background", "{chat}: move the shell command the agent is waiting on to the background (`daemon.agents.<agent>.background_keys`; `.selected.chat.foreground_shell` says one is running), so the chat can go on"),
     ("queue.remove / queue.edit / queue.send_now", "{chat, index}: drop a queued message, put it back in the composer to change, or send it now"),
@@ -421,11 +421,13 @@ impl Workspace {
             }
             "tab.move" => {
                 let dragged = s("chat").or_else(|| a.get("dragged").and_then(Value::as_str).map(str::to_string));
-                if let (Some(id), Some(target)) = (dragged, s("target")) {
-                    if let Some(w) = self.all_worktrees().into_iter().find(|w| w.chat_ids.contains(&target)).cloned() {
+                if let Some(id) = dragged {
+                    let target = s("target");
+                    let near = target.clone().unwrap_or_else(|| id.clone());
+                    if let Some(w) = self.all_worktrees().into_iter().find(|w| w.chat_ids.contains(&near)).cloned() {
                         let mut ids: Vec<String> = self.chats_of_path(&w.path);
                         ids.retain(|x| x != &id);
-                        let at = ids.iter().position(|x| x == &target).map(|i| if s("zone").as_deref() == Some("after") { i + 1 } else { i }).unwrap_or(ids.len());
+                        let at = target.and_then(|t| ids.iter().position(|x| *x == t)).map(|i| if s("zone").as_deref() == Some("after") { i + 1 } else { i }).unwrap_or(ids.len());
                         ids.insert(at, id);
                         let mut order = self.state.get("tab_order").and_then(Value::as_object).cloned().unwrap_or_default();
                         order.insert(w.path.clone(), serde_json::json!(ids));
