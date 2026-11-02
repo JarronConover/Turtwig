@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""rename-fork: apply the fork's renames (a.box -> Turtwig, ~/dev/agent-box -> ~/dev/turtwig) to text.
+
+Reads stdin and writes stdout, or rewrites the files given. sync-upstream uses it to re-rename
+upstream's version of a file that only ever differed from upstream by these renames.
+"""
+import re
+import sys
+
+RULES = [
+    (r"git@gitlab\.com:tj15/a\.box\.git", "git@github.com:JarronConover/Turtwig.git"),
+    (r"https://gitlab\.com/tj15/a\.box\.git", "https://github.com/JarronConover/Turtwig.git"),
+    (r"an a\.box", "a Turtwig"),
+    (r"a\.box", "Turtwig"),
+    (r"dev/agent-box", "dev/turtwig"),
+    (r"Agent Box Local Signing", "Turtwig Local Signing"),
+    (r"Agent Box", "Turtwig"),
+    (r"AgentBox", "Turtwig"),
+    (r"com\.tj\.agent-box", "com.jarron.turtwig"),
+    (r"com\.tj\.agentbox", "com.jarron.turtwig"),
+]
+# Lines that stay as upstream wrote them (tests of URL parsing).
+KEEP = re.compile(r"web_url\(\"(ssh://git@gitlab\.com:22|https://gitlab\.com)/tj15/a\.box")
+
+
+def rename(text: str) -> str:
+    out = []
+    for line in text.split("\n"):
+        if not KEEP.search(line):
+            for pat, rep in RULES:
+                line = re.sub(pat, rep, line)
+        out.append(line)
+    return "\n".join(out)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        sys.stdout.write(rename(sys.stdin.read()))
+    else:
+        for path in sys.argv[1:]:
+            with open(path) as f:
+                before = f.read()
+            after = rename(before)
+            if after != before:
+                with open(path, "w") as f:
+                    f.write(after)

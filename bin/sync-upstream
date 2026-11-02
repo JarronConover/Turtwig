@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# sync-upstream: merge TJ's a.box (the `upstream` remote) into this fork's main and push, so the
+# app's auto-update picks it up. Conflicts in files that only differ from upstream by the fork's
+# renames are resolved by re-renaming upstream's version; anything else is left in the merge for
+# a person (or an agent) to finish. Exit 0: nothing to do or merged and pushed; 2: conflicts left.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+notify() { osascript -e "display notification \"$2\" with title \"Turtwig\" subtitle \"$1\"" > /dev/null 2>&1 || true; }
+
+[ "$(git branch --show-current)" = main ] || { log "not on main; skipping"; exit 0; }
+[ -z "$(git status --porcelain --untracked-files=no)" ] || { log "working tree dirty; skipping"; notify "Sync skipped" "Uncommitted changes in ~/dev/turtwig"; exit 0; }
+git fetch -q upstream main || { log "fetch upstream failed"; notify "Sync failed" "Could not fetch TJ's repo"; exit 1; }
+behind=$(git rev-list --count HEAD..upstream/main)
+if [ "$behind" = 0 ]; then log "up to date with upstream"; exit 0; fi
+log "upstream has $behind new commit(s):"
+git log --oneline HEAD..upstream/main | sed 's/^/  /'
+
+if git merge -q --no-edit upstream/main; then
+  log "merged cleanly"
+else
+  fixed=(); left=()
+  for f in $(git diff --name-only --diff-filter=U); do
+    ours=$(git show "HEAD:$f" 2>/dev/null)
+    base=$(git merge-base HEAD upstream/main)
+    # Rename-only file: upstream's old version, renamed, is exactly what we have. Then upstream's
+    # new version, renamed, is the right resolution.
+    if [ "$(git show "$base:$f" 2>/dev/null | bin/rename-fork)" = "$ours" ]; then
+      git show "upstream/main:$f" | bin/rename-fork > "$f" && git add "$f" && fixed+=("$f")
+    else
+      left+=("$f")
+    fi
+  done
+  [ ${#fixed[@]} -gt 0 ] && log "re-renamed: ${fixed[*]}"
+  if [ ${#left[@]} -gt 0 ]; then
+    log "conflicts need a hand: ${left[*]}"
+    notify "Merge needs you" "${#left[@]} conflicted file(s) in ~/dev/turtwig"
+    exit 2
+  fi
+  git commit -q --no-edit || { log "commit failed"; exit 2; }
+  log "merged with renames reapplied"
+fi
+git push -q origin main && log "pushed; the app will update itself" && notify "Synced with TJ" "$behind new commit(s); the app rebuilds on its own"
