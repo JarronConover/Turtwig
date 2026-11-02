@@ -218,8 +218,8 @@ pub fn tool_display_name(name: &str) -> String {
 #[derive(Debug, Clone)]
 pub enum Item {
     User { text: String },
-    /** An image the user attached (base64, as Claude Code stores it). */
-    Image { media_type: String, data: String },
+    /** An image the user attached (its bytes, decoded from the base64 Claude Code stores). */
+    Image { media_type: String, data: std::sync::Arc<[u8]> },
     Assistant { text: String },
     Thinking { text: String },
     Tool { id: String, name: String, summary: String, input: Value, result: Option<String>, is_error: bool },
@@ -597,9 +597,10 @@ impl Transcript {
                         match b.get("type").and_then(Value::as_str) {
                             Some("text") => self.user_text(b["text"].as_str().unwrap_or("")),
                             Some("image") => {
-                                if let Some(data) = b["source"]["data"].as_str() {
+                                use base64::Engine as _;
+                                if let Some(data) = b["source"]["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok()) {
                                     let media_type = b["source"]["media_type"].as_str().unwrap_or("image/png").to_string();
-                                    self.items.push(Item::Image { media_type, data: data.to_string() });
+                                    self.items.push(Item::Image { media_type, data: data.into() });
                                 }
                             }
                             Some("tool_result") => self.tool_result(b),

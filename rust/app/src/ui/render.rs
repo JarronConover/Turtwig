@@ -11,6 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jaq_json::Val;
 use serde_json::{Map, Value};
+use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 thread_local! {
@@ -108,7 +109,7 @@ impl Workspace {
     }
 
     pub(crate) fn spinner(&mut self, size: Option<&str>, color: Option<Hsla>, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.anim_phase(self.settings.num("motion.spinner.period_ms", 800.) as f32, cx);
+        let period = self.settings.num("motion.spinner.period_ms", 800.) as f32;
         let icon = match self.settings.get("motion.spinner.icon").and_then(Value::as_str) {
             Some(name) => Icon::empty().path(format!("icons/{name}.svg")),
             None => Icon::new(gpui_kit::component::IconName::Loader),
@@ -119,11 +120,21 @@ impl Workspace {
             Some("large") => icon.large(),
             _ => icon,
         };
+        self.turning(icon, color, period, true, cx)
+    }
+
+    /** A spinning `icon`: turned by the anim layer (see ui::anim), else by redrawing what it's in. */
+    pub(crate) fn turning(&mut self, icon: Icon, color: Option<Hsla>, period_ms: f32, ease: bool, cx: &mut Context<Self>) -> AnyElement {
+        if super::anim::enabled() {
+            return super::anim::slot(super::region::owner(), icon, color, period_ms, ease);
+        }
+        let t = self.anim_phase(period_ms, cx);
+        let t = if ease { ease_in_out(t) } else { t };
         let icon = match color {
             Some(c) => icon.text_color(c),
             None => icon,
         };
-        div().child(icon.rotate(percentage(ease_in_out(t)))).into_any_element()
+        div().child(icon.rotate(percentage(t))).into_any_element()
     }
 
     /** A settings replacement for a built-in part: `spec` is a component name or a node, drawn with `.props`
@@ -181,17 +192,57 @@ impl Workspace {
                 _ => outs,
             };
             let name = obj.get("as").and_then(Value::as_str).unwrap_or("item").to_string();
-            let mut node = obj.clone();
-            node.remove("for");
-            let node = Value::Object(node);
             let mut out = vec![];
             for (i, item) in items.into_iter().enumerate() {
                 let c = with(ctx, vec![(name.clone(), item), ("index".into(), to_val(&Value::from(i)))]);
                 let key = obj.get("key").and_then(Value::as_str).map(|k| value_text(&to_json(&self.exprs.first(k, &c)))).unwrap_or(i.to_string());
-                out.extend(self.render(&node, &c, &format!("{path}[{key}]"), window, cx));
+                out.extend(self.render_node(obj, &c, &format!("{path}[{key}]"), window, cx));
             }
             return out;
         }
+        self.render_node(obj, ctx, path, window, cx)
+    }
+
+    /** A component as one use of it sets it up: the use's `style` merged into its root's, and the use's own
+    `id`, `on`, `menu` and the rest in place of its root's. Built once per use until the settings change. */
+    fn component_use(&mut self, kind: &str, obj: &Map<String, Value>) -> Option<std::rc::Rc<Value>> {
+        const OWN: [&str; 14] = ["id", "animate", "motion", "transition", "tooltip", "on", "menu", "menu_on", "focusable", "drag", "drop_key", "drop_zones", "layer", "region"];
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for k in std::iter::once("style").chain(OWN) {
+            k.hash(&mut h);
+            hash_json(obj.get(k), &mut h);
+        }
+        let key = (kind.to_string(), h.finish());
+        if let Some((rev, comp)) = self.component_uses.get(&key) {
+            if *rev == self.settings_rev {
+                return Some(comp.clone());
+            }
+        }
+        let mut comp = self.settings.components.get(kind)?.clone();
+        if let Value::Object(base) = &mut comp {
+            if let Some(Value::Object(extra)) = obj.get("style") {
+                if let Value::Object(st) = base.entry("style").or_insert(Value::Object(Map::new())) {
+                    for (k, v) in extra {
+                        st.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            for k in OWN {
+                if let Some(v) = obj.get(k) {
+                    base.insert(k.into(), v.clone());
+                }
+            }
+        }
+        let comp = std::rc::Rc::new(comp);
+        if self.component_uses.values().next().is_some_and(|(rev, _)| *rev != self.settings_rev) {
+            self.component_uses.clear();
+        }
+        self.component_uses.insert(key, (self.settings_rev, comp.clone()));
+        Some(comp)
+    }
+
+    /** Draws one node (its `for` already applied). */
+    fn render_node(&mut self, obj: &Map<String, Value>, ctx: &Val, path: &str, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if let Some(code) = obj.get("if").and_then(Value::as_str) {
             if !self.exprs.truthy(code, ctx) {
                 return vec![];
@@ -202,24 +253,9 @@ impl Workspace {
             let node = self.select_node(obj, ctx, path);
             return self.render(&node, ctx, path, window, cx);
         }
-        if let Some(comp) = self.settings.components.get(&kind).cloned() {
+        if let Some(comp) = self.component_use(&kind, obj) {
             let props = self.exprs.resolve_val(obj.get("props").unwrap_or(&Value::Null), ctx);
             let c = with(ctx, vec![("props".into(), props)]);
-            let mut comp = comp;
-            if let Value::Object(base) = &mut comp {
-                if let Some(Value::Object(extra)) = obj.get("style") {
-                    if let Value::Object(st) = base.entry("style").or_insert(Value::Object(Map::new())) {
-                        for (k, v) in extra {
-                            st.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-                for k in ["id", "animate", "motion", "transition", "tooltip", "on", "menu", "menu_on", "focusable", "drag", "drop_key", "drop_zones", "layer", "region"] {
-                    if let Some(v) = obj.get(k) {
-                        base.insert(k.into(), v.clone());
-                    }
-                }
-            }
             return self.render(&comp, &c, &format!("{path}:{kind}"), window, cx);
         }
         let props = match self.exprs.resolve(obj.get("props").unwrap_or(&Value::Null), ctx) {
@@ -321,8 +357,8 @@ impl Workspace {
                     icon = icon.text_color(c);
                 }
                 if props.get("spin").and_then(Value::as_bool) == Some(true) {
-                    let t = self.anim_phase(self.settings.num("motion.spin_period_ms", 900.) as f32, cx);
-                    vec![icon.rotate(percentage(t)).into_any_element()]
+                    let period = self.settings.num("motion.spin_period_ms", 900.) as f32;
+                    vec![self.turning(icon, None, period, false, cx)]
                 } else {
                     vec![icon.into_any_element()]
                 }
@@ -795,9 +831,9 @@ impl Workspace {
         // "layer": "top" paints the node above everything else (popovers, dialogs) and keeps clicks off what's under it;
         // "above" goes over that too (the button that opened a popover stays a button while it's open).
         match (layer.as_str(), z) {
-            ("top", _) => return vec![deferred(el).with_priority(1).into_any_element()],
-            ("above", _) => return vec![deferred(el).with_priority(2).into_any_element()],
-            (_, Some(n)) => return vec![deferred(el).with_priority(n).into_any_element()],
+            ("top", _) => return vec![deferred(super::anim::in_layer(1, el)).with_priority(1).into_any_element()],
+            ("above", _) => return vec![deferred(super::anim::in_layer(2, el)).with_priority(2).into_any_element()],
+            (_, Some(n)) => return vec![deferred(super::anim::in_layer(n, el)).with_priority(n).into_any_element()],
             _ => {}
         }
         vec![el]
@@ -1162,7 +1198,7 @@ pub struct DragPreview {
     /** A second line set while dragging: where a drop would move it ("Move to Email on Ask Redo"). */
     note: std::rc::Rc<std::cell::RefCell<String>>,
     style: Map<String, Value>,
-    theme: Map<String, Value>,
+    theme: std::rc::Rc<Map<String, Value>>,
 }
 
 impl Render for DragPreview {
@@ -1360,6 +1396,27 @@ pub(crate) fn markdown_escape(text: &str) -> String {
         }
     }
     out
+}
+
+/** Hashes a JSON value (absent hashes like null), for keys built from settings nodes. */
+fn hash_json(v: Option<&Value>, h: &mut impl Hasher) {
+    match v {
+        None | Some(Value::Null) => 0u8.hash(h),
+        Some(Value::Bool(b)) => (1u8, b).hash(h),
+        Some(Value::Number(n)) => (2u8, n.to_string()).hash(h),
+        Some(Value::String(s)) => (3u8, s).hash(h),
+        Some(Value::Array(a)) => {
+            (4u8, a.len()).hash(h);
+            a.iter().for_each(|x| hash_json(Some(x), h));
+        }
+        Some(Value::Object(o)) => {
+            (5u8, o.len()).hash(h);
+            for (k, x) in o {
+                k.hash(h);
+                hash_json(Some(x), h);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

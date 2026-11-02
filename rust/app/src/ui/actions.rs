@@ -1047,10 +1047,17 @@ impl Workspace {
                 let path = s("path");
                 let index = a.get("index").and_then(Value::as_u64);
                 let shown = match (&path, chat(), index) {
-                    (Some(p), _, _) => Some((p.clone(), ImageSource::from(std::path::PathBuf::from(p)))),
+                    (Some(p), _, _) => {
+                        // From its bytes, so closing it can let go of the full-size copy (see image.close).
+                        let kind = if p.to_lowercase().ends_with(".jpg") || p.to_lowercase().ends_with(".jpeg") { "image/jpeg" } else if p.to_lowercase().ends_with(".gif") { "image/gif" } else if p.to_lowercase().ends_with(".webp") { "image/webp" } else { "image/png" };
+                        std::fs::read(p).ok().and_then(|b| crate::workspace::image_of(kind, &b)).map(|img| (p.clone(), ImageSource::from(img)))
+                    }
                     (None, Some(c), Some(i)) => {
                         let key = format!("{c}:{i}");
-                        self.images.get(&key).cloned().flatten().map(|img| (key, ImageSource::from(img)))
+                        match self.transcripts.get(&c).and_then(|t| t.items.get(i as usize)) {
+                            Some(crate::transcript::Item::Image { media_type, data }) => crate::workspace::image_of(media_type, data).map(|img| (key, ImageSource::from(img))),
+                            _ => None,
+                        }
                     }
                     _ => None,
                 };
@@ -1060,7 +1067,14 @@ impl Workspace {
                 }
             }
             "image.close" => {
-                if self.image_view.take().is_some() {
+                if let Some((_, src)) = self.image_view.take() {
+                    // The full-size image goes, from the GPU and the decoded-image cache.
+                    if let ImageSource::Image(img) = src {
+                        if let Some(r) = img.clone().get_render_image(window, cx) {
+                            cx.drop_image(r, Some(window));
+                        }
+                        img.remove_asset(cx);
+                    }
                     self.ctx_rev += 1;
                 }
             }

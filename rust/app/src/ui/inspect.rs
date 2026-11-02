@@ -18,6 +18,16 @@ pub struct Perf {
     /** Regions placed fresh (their fingerprint moved) and drawn, since the last summary. */
     pub regions_fresh: Vec<String>,
     pub regions_drawn: Vec<String>,
+    /** A chat being opened (selected, its transcript not drawn yet), and when that began. */
+    pub opening: Option<(String, std::time::Instant, bool)>,
+    /** Frames drawn since launch. */
+    pub frames_total: u64,
+    drawn: Option<(std::time::Duration, Option<String>)>,
+    /** Recent first loads of a transcript: chat, ms waiting on its machine, ms taking it in, entries. */
+    fetches: std::collections::VecDeque<(String, f32, f32, usize)>,
+    /** Recent opens: chat, ms from selecting it to the first frame painted with its transcript, and
+    whether its transcript was already loaded. */
+    pub opens: std::collections::VecDeque<(String, f32, bool, f32, f32, Value)>,
 }
 
 fn counts(ids: &[String]) -> Value {
@@ -35,7 +45,29 @@ impl Perf {
         self.regions_drawn.clear();
     }
 
-    pub fn record(&mut self, started: std::time::Instant, render: std::time::Duration) {
+    pub fn fetched(&mut self, chat: &str, wait: std::time::Duration, apply: std::time::Duration, entries: usize) {
+        self.fetches.push_back((chat.to_string(), wait.as_secs_f32() * 1000., apply.as_secs_f32() * 1000., entries));
+        while self.fetches.len() > 20 {
+            self.fetches.pop_front();
+        }
+    }
+
+    /** The workspace drew this frame: how long that took, and the chat it showed open. */
+    pub fn drew(&mut self, render: std::time::Duration, opened: Option<String>) {
+        self.drawn = Some((render, opened));
+    }
+
+    /** A frame was painted, `started` when the window's content began drawing. */
+    pub fn record(&mut self, started: std::time::Instant) {
+        let (render, opened) = self.drawn.take().unwrap_or_default();
+        if let Some((chat, at, cached)) = self.opening.take_if(|o| opened.as_ref() == Some(&o.0)) {
+            let frame = started.elapsed().as_secs_f32() * 1000.;
+            self.opens.push_back((chat, at.elapsed().as_secs_f32() * 1000., cached, frame, render.as_secs_f32() * 1000., json!(self.spans)));
+            while self.opens.len() > 20 {
+                self.opens.pop_front();
+            }
+        }
+        self.frames_total += 1;
         self.frames.push_back((started, render.as_secs_f32() * 1000., started.elapsed().as_secs_f32() * 1000.));
         while self.frames.len() > 240 {
             self.frames.pop_front();
@@ -49,6 +81,7 @@ impl Perf {
         let last = self.frames.back();
         json!({
             "frames_per_sec": recent.len() as f32 / window_secs,
+            "frames_total": self.frames_total,
             "avg_render_ms": avg(|f| f.1),
             "avg_frame_ms": avg(|f| f.2),
             "max_frame_ms": recent.iter().map(|f| f.2).fold(0., f32::max),
@@ -57,23 +90,48 @@ impl Perf {
             "spans_ms": self.spans,
             "regions_fresh": counts(&self.regions_fresh),
             "regions_drawn": counts(&self.regions_drawn),
+            "opens": self.opens.iter().map(|(c, ms, cached, frame, render, spans)| json!({"chat": c, "ms": ms, "cached": cached, "frame_ms": frame, "render_ms": render, "spans": spans})).collect::<Vec<_>>(),
+            "fetches": self.fetches.iter().map(|(c, wait, apply, n)| json!({"chat": c, "wait_ms": wait, "apply_ms": apply, "entries": n})).collect::<Vec<_>>(),
             "animation_frames": crate::ui::region::ASKED.with(|a| json!(std::mem::take(&mut *a.borrow_mut()))),
         })
     }
 }
 
-impl Workspace {
-    /** Rewrites inspect.json when what it describes changed (checked at most every `inspect.interval_ms`). */
-    pub(crate) fn write_inspect(&mut self, ctx: &jaq_json::Val, window: &Window, cx: &App) {
-        if self.inspect_at.is_some_and(|t| (t.elapsed().as_millis() as f64) < self.settings.num("inspect.interval_ms", 2000.)) {
-            return;
+/** What was last written and mirrored, shared by the writes made here and on the file thread. */
+#[derive(Default)]
+struct Written {
+    inspect: u64,
+    mirrored: std::collections::HashMap<String, u64>,
+}
+
+static WRITTEN: std::sync::LazyLock<std::sync::Mutex<Written>> = std::sync::LazyLock::new(Default::default);
+
+/** inspect.json and its copies to other machines go out from one thread, in order, off the main one. */
+static FILES: std::sync::LazyLock<flume::Sender<(Option<Value>, Vec<String>, Vec<Remote>)>> = std::sync::LazyLock::new(|| {
+    let (tx, rx) = flume::unbounded::<(Option<Value>, Vec<String>, Vec<Remote>)>();
+    std::thread::spawn(move || {
+        for (doc, names, hosts) in rx {
+            save_files(doc, &names, &hosts);
         }
-        self.inspect_at = Some(std::time::Instant::now());
-        let doc = self.inspect_doc_with(ctx, window, cx);
+    });
+    tx
+});
+
+/** A machine that starts using the app again gets every file, changed or not. */
+pub(crate) fn forget_mirrored() {
+    WRITTEN.lock().unwrap().mirrored.clear();
+}
+
+fn digest(bytes: &[u8]) -> u64 {
+    bytes.len() as u64 ^ bytes.iter().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(*b as u64))
+}
+
+/** Writes inspect.json when it changed, then sends `names` that changed to `hosts`. */
+fn save_files(doc: Option<Value>, names: &[String], hosts: &[Remote]) {
+    if let Some(doc) = doc {
         let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
-        let digest = text.len() as u64 ^ text.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64));
-        if digest != self.inspect_digest {
-            self.inspect_digest = digest;
+        let d = digest(text.as_bytes());
+        if std::mem::replace(&mut WRITTEN.lock().unwrap().inspect, d) != d {
             let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
             let text = text.replacen('{', &format!("{{\n  \"at\": {at},"), 1);
             let path = settings::dir().join("inspect.json");
@@ -82,7 +140,47 @@ impl Workspace {
                 let _ = std::fs::rename(tmp, path);
             }
         }
-        self.mirror_app_files(&["inspect.json", "activity.log", "problems.txt"]);
+    }
+    if hosts.is_empty() {
+        return;
+    }
+    use base64::Engine as _;
+    for name in names {
+        let Ok(bytes) = std::fs::read(settings::dir().join(name)) else { continue };
+        let d = digest(&bytes);
+        if WRITTEN.lock().unwrap().mirrored.insert(name.clone(), d) == Some(d) {
+            continue;
+        }
+        // Compact: inspect.json is a third smaller without its indentation.
+        let bytes = match name.ends_with(".json").then(|| serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| serde_json::to_vec(&v).ok())).flatten() {
+            Some(compact) => compact,
+            None => bytes,
+        };
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        for r in hosts {
+            r.send_latest(name, Call::AppFile { name: name.clone(), data: data.clone() });
+        }
+    }
+}
+
+impl Workspace {
+    /** Rewrites inspect.json when what it describes changed (checked at most every `inspect.interval_ms`),
+    on the file thread; with `inspect_at` cleared (an agent's request just ran), here and now, so the
+    answer it reads next is current. */
+    pub(crate) fn write_inspect(&mut self, ctx: &jaq_json::Val, window: &Window, cx: &App) {
+        let now = self.inspect_at.is_none();
+        if self.inspect_at.is_some_and(|t| (t.elapsed().as_millis() as f64) < self.settings.num("inspect.interval_ms", 2000.)) {
+            return;
+        }
+        self.inspect_at = Some(std::time::Instant::now());
+        let doc = self.inspect_doc_with(ctx, window, cx);
+        let names: Vec<String> = ["inspect.json", "activity.log", "problems.txt"].map(String::from).to_vec();
+        let hosts = self.mirror_hosts(false);
+        if now {
+            save_files(Some(doc), &names, &hosts);
+        } else {
+            let _ = FILES.send((Some(doc), names, hosts));
+        }
     }
 
     /** What inspect.json holds, as of now (`ab.inspect` for scripts). */
@@ -136,35 +234,25 @@ impl Workspace {
     they read them as they would here. Only those: inspect.json runs to megabytes, and it would hold up
     everything else on the connection (a chat's transcript as it opens). */
     pub(crate) fn mirror_app_files(&mut self, names: &[&str]) {
-        let every = self.settings.num("inspect.mirror_ms", 1500.);
-        if every <= 0. || self.mirror_at.is_some_and(|t| (t.elapsed().as_millis() as f64) < every) && names != ["snapshot.png"] {
-            return;
+        let hosts = self.mirror_hosts(names == ["snapshot.png"]);
+        if !hosts.is_empty() {
+            let _ = FILES.send((None, names.iter().map(|n| n.to_string()).collect(), hosts));
         }
-        self.mirror_at = Some(std::time::Instant::now());
+    }
+
+    /** The machines to mirror to now (none if it's too soon since the last time, unless `anyway`). */
+    fn mirror_hosts(&mut self, anyway: bool) -> Vec<Remote> {
+        let every = self.settings.num("inspect.mirror_ms", 1500.);
+        if every <= 0. || self.mirror_at.is_some_and(|t| (t.elapsed().as_millis() as f64) < every) && !anyway {
+            return vec![];
+        }
         let active = self.settings.num("inspect.mirror_active_secs", 300.);
         let using = |h: &str| self.relayed_at.get(h).is_some_and(|t| t.elapsed().as_secs_f64() < active);
         let hosts: Vec<Remote> = self.remotes.iter().filter(|(h, _)| !self.is_local_host(h) && self.host_up.get(*h) == Some(&true) && using(h)).map(|(_, r)| r.clone()).collect();
-        if hosts.is_empty() {
-            return;
+        if !hosts.is_empty() {
+            self.mirror_at = Some(std::time::Instant::now());
         }
-        use base64::Engine as _;
-        for name in names {
-            let Ok(bytes) = std::fs::read(settings::dir().join(name)) else { continue };
-            let digest = bytes.len() as u64 ^ bytes.iter().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(*b as u64));
-            if self.mirrored.get(*name) == Some(&digest) {
-                continue;
-            }
-            self.mirrored.insert(name.to_string(), digest);
-            // Compact: inspect.json is a third smaller without its indentation.
-            let bytes = match name.ends_with(".json").then(|| serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| serde_json::to_vec(&v).ok())).flatten() {
-                Some(compact) => compact,
-                None => bytes,
-            };
-            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            for r in &hosts {
-                r.send_latest(name, Call::AppFile { name: name.to_string(), data: data.clone() });
-            }
-        }
+        hosts
     }
 
     /** One line per action run, newest last, trimmed to the last few hundred. */

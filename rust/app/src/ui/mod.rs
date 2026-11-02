@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod anim;
 pub mod attach_view;
 pub mod diff_view;
 pub mod drive;
@@ -12,5 +13,6 @@ pub mod quote_view;
 pub mod region;
 pub mod render;
 pub mod style;
+pub mod thumbs;
 pub mod trace_view;
 pub mod widgets;

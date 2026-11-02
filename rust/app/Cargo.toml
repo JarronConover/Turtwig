@@ -11,15 +11,18 @@ path = "src/main.rs"
 agent-box-protocol = { path = "../protocol" }
 gpui-kit = "0.7.3"
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["runtime_shaders"] }
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 anyhow.workspace = true
 serde_json_lenient = "0.2"
 schemars = "0.8"
 alacritty_terminal = "0.26"
 base64 = "0.22"
+flate2 = "1"
 chrono = "0.4"
 imagesize = "0.13"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+smallvec = "1"
 resvg = "0.46"
 notify = "6"
 flume = "0.11"

@@ -14,7 +14,7 @@ pub struct Settings {
     from `raw` (see `behavior::host_specs`). */
     pub connection: Connection,
     /** Named colors, fonts, and sizes; nodes refer to them as `@name`. */
-    pub theme: Map<String, Value>,
+    pub theme: std::rc::Rc<Map<String, Value>>,
     /** UI state and its starting values; actions change it, expressions read it as `.state`. */
     pub state: Map<String, Value>,
     /** Root views by name; `main` is the window. */
@@ -24,7 +24,7 @@ pub struct Settings {
     pub keys: Vec<Value>,
     /** Extra command palette entries: `{"label", "do", "if"}`. */
     pub commands: Vec<Value>,
-    pub chat: Value,
+    pub chat: std::rc::Rc<Value>,
     /** Layout glides, enter animations, and style easing (see SETTINGS.md, Motion). */
     #[serde(default)]
     pub motion: Value,

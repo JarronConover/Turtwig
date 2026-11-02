@@ -236,6 +236,11 @@ pub struct Workspace {
     /** Chats whose older lines are being fetched. */
     /** Chats loading older lines; true: filling in after a quick first page, with no chip. */
     loading_earlier: HashMap<String, bool>,
+    /** When each chat was last the one shown, for letting go of transcripts not looked at lately. */
+    chat_seen: HashMap<String, std::time::Instant>,
+    worktree_seen: HashMap<String, std::time::Instant>,
+    /** What a dropped transcript still tells the sidebar: its newest reply and the model it came from. */
+    dropped: HashMap<String, (Option<String>, Option<String>)>,
     /** The open completion list under a composer: (chat, trigger, entries, selected). */
     pub(crate) completion: Option<(String, String, Vec<crate::completions::Entry>, usize)>,
     /** Messages typed while a chat was working, sent one per turn as it finishes (`chat.queue`). */
@@ -274,7 +279,7 @@ pub struct Workspace {
     placeholders: HashMap<String, String>,
     /** When a queued message last went out, so it isn't sent twice before the chat turns busy. */
     queue_sent: HashMap<String, std::time::Instant>,
-    pub(crate) settings: Settings,
+    pub(crate) settings: std::rc::Rc<Settings>,
     pub(crate) settings_error: Option<String>,
     pub(crate) remote: Remote,
     pub(crate) connected: bool,
@@ -329,7 +334,7 @@ pub struct Workspace {
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
     term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
     pub(crate) expanded_tools: HashSet<String>,
-    pub(crate) images: HashMap<String, Option<std::sync::Arc<Image>>>,
+    pub(crate) thumbs: crate::ui::thumbs::Thumbs,
     /** The image shown full size over the window (`image.view`): what it is (a path or chat:index) and its source. */
     pub(crate) image_view: Option<(String, ImageSource)>,
     pub(crate) diffs: HashMap<String, crate::ui::diff_view::DiffData>,
@@ -346,14 +351,12 @@ pub struct Workspace {
     drag_sig: String,
     pub(crate) drop_preview: bool,
     pub(crate) inspect_at: Option<std::time::Instant>,
-    pub(crate) inspect_digest: u64,
     /** When the app's files last went to the other machines, and what each held. */
     pub(crate) mirror_at: Option<std::time::Instant>,
     /** Worktree moves not yet in their machine's model (keep_pending_moves). */
     pub(crate) pending_moves: Vec<PendingMove>,
     /** When each other machine last relayed an action here: the app's files go only to those using it. */
     pub(crate) relayed_at: HashMap<String, std::time::Instant>,
-    pub(crate) mirrored: HashMap<String, u64>,
     /** A chat being moved and where to: selected there once it shows up. */
     pub(crate) pending_move: Option<(String, String)>,
     /** Moves this app started that haven't finished: their rows and tabs show a spinner. */
@@ -374,6 +377,9 @@ pub struct Workspace {
     pub(crate) refresh_regions: bool,
     pub(crate) refresh_now: bool,
     pub(crate) settings_rev: u64,
+    /** Components with what their uses set on top (style, id, on, ...), by component and use, as of
+    `settings_rev`. */
+    pub(crate) component_uses: HashMap<(String, u64), (u64, std::rc::Rc<Value>)>,
     pub(crate) ctx_generation: std::cell::Cell<u64>,
     pub(crate) hash_memo: std::cell::RefCell<crate::ui::region::HashMemo>,
     /** Which region (or "" for the window) drew each enter animation and transition. */
@@ -406,6 +412,12 @@ pub struct Workspace {
     /** context_data, and what it was built for: (ctx_rev, model seq, transcript revisions, frame). */
     ctx_data: std::cell::RefCell<Option<((u64, u64, u64, u64), std::time::Instant, Val)>>,
     chat_json_memo: std::cell::RefCell<Option<HashMap<String, Value>>>,
+    /** While the context is built: the selected chat, found once for every chat it shows. */
+    building_current: std::cell::RefCell<Option<Option<String>>>,
+    /** Where each chat sits in `model.chats`, and each worktree in the model (project or section, then
+    item), checked on every use and rebuilt when found out of date. */
+    chat_index: std::cell::RefCell<HashMap<String, usize>>,
+    worktree_index: std::cell::RefCell<HashMap<String, (bool, usize, usize)>>,
     orchestrator_memo: std::cell::RefCell<HashMap<String, (String, bool)>>,
     pub(crate) focused: bool,
     /** Events waiting for a window to run in: (name, extra context fields). */
@@ -572,6 +584,9 @@ impl Workspace {
             inputs: HashMap::new(),
             input_submits: HashMap::new(),
             loading_earlier: Default::default(),
+            chat_seen: HashMap::new(),
+            worktree_seen: HashMap::new(),
+            dropped: HashMap::new(),
             completion: None,
             queued: std::fs::read_to_string(settings::dir().join("queued.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             queue_saved: String::new(),
@@ -597,7 +612,7 @@ impl Workspace {
             queue_sent: HashMap::new(),
             settings_val: Val::Null,
             layout_val: Default::default(),
-            settings,
+            settings: std::rc::Rc::new(settings),
             settings_error,
             remote: Remote::detached(),
             connected: false,
@@ -635,7 +650,7 @@ impl Workspace {
             terminals: HashMap::new(),
             term_by_id: HashMap::new(),
             expanded_tools: HashSet::new(),
-            images: HashMap::new(),
+            thumbs: Default::default(),
             image_view: None,
             diffs: HashMap::new(),
             attachments: HashMap::new(),
@@ -648,11 +663,9 @@ impl Workspace {
             drag_sig: String::new(),
             drop_preview: false,
             inspect_at: None,
-            inspect_digest: 0,
             mirror_at: None,
             pending_moves: vec![],
             relayed_at: HashMap::new(),
-            mirrored: HashMap::new(),
             pending_move: None,
             moves: vec![],
             move_serial: Default::default(),
@@ -667,6 +680,7 @@ impl Workspace {
             refresh_regions: true,
             refresh_now: true,
             settings_rev: 0,
+            component_uses: HashMap::new(),
             ctx_generation: Default::default(),
             hash_memo: Default::default(),
             anim_owner: HashMap::new(),
@@ -689,6 +703,9 @@ impl Workspace {
             ctx_cache: None,
             ctx_data: Default::default(),
             chat_json_memo: Default::default(),
+            building_current: Default::default(),
+            chat_index: Default::default(),
+            worktree_index: Default::default(),
             orchestrator_memo: Default::default(),
             focused: true,
             pending_events: vec![("app.start".into(), Map::new())],
@@ -889,7 +906,8 @@ impl Workspace {
                 let mut w = base.1;
                 w.extend(warnings.drain(..).map(|x| format!("ab.patch: {x}")));
                 s.warnings = w;
-                self.settings = s;
+                self.settings = std::rc::Rc::new(s);
+                self.settings_rev += 1;
                 self.settings_val = self.settings_context();
                 self.ctx_rev += 1;
                 self.pending_motion = true;
@@ -912,10 +930,12 @@ impl Workspace {
         if idle(self) {
             return;
         }
+        let mut asked = false;
         for _ in 0..8 {
             if idle(self) {
                 break;
             }
+            asked |= self.pending_requests.iter().any(|(r, _)| r.action.get("do").and_then(Value::as_str) == Some("inspect.refresh"));
             for m in std::mem::take(&mut self.pending_script) {
                 self.script_deliver(m, window, cx);
             }
@@ -930,10 +950,13 @@ impl Workspace {
                 self.run_action(&a, window, cx);
             }
         }
-        let ctx = self.context();
-        self.refresh_shown(&ctx, cx);
-        self.inspect_at = None;
-        self.write_inspect(&ctx, window, cx);
+        // `abx state` reads inspect.json right after asking for it: written now, not on its schedule.
+        if asked {
+            let ctx = self.context();
+            self.refresh_shown(&ctx, cx);
+            self.inspect_at = None;
+            self.write_inspect(&ctx, window, cx);
+        }
     }
 
     /** The context as JSON for scripts, reused until something changes it (`ctx_rev`) or 250ms pass. */
@@ -954,6 +977,9 @@ impl Workspace {
     }
 
     pub(crate) fn script_deliver(&mut self, message: Value, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.scripts.as_ref().is_some_and(|s| s.any()) {
+            return;
+        }
         let ctx = self.script_context();
         let Some(scripts) = self.scripts.as_mut() else { return };
         let outs = scripts.deliver(message, ctx);
@@ -1480,7 +1506,7 @@ impl Workspace {
             Ok(s) => {
                 self.state = s.state.clone();
                 self.state.extend(self.user_state.clone());
-                self.settings = s;
+                self.settings = std::rc::Rc::new(s);
                 self.settings_base = None;
                 self.settings_val = self.settings_context();
                 crate::transcript::set_options(&self.settings.chat);
@@ -1898,7 +1924,7 @@ impl Workspace {
                         // A machine that starts using the app again gets every file, changed or not.
                         let active = self.settings.num("inspect.mirror_active_secs", 300.);
                         if self.relayed_at.insert(host.to_string(), std::time::Instant::now()).is_none_or(|t| t.elapsed().as_secs_f64() >= active) {
-                            self.mirrored.clear();
+                            crate::ui::inspect::forget_mirrored();
                         }
                         self.mirror_at = None;
                         self.pending_requests.push((req, Some(host.to_string())))
@@ -2055,6 +2081,8 @@ impl Workspace {
             }
         }
         self.model = merged;
+        self.chat_index.borrow_mut().clear();
+        self.worktree_index.borrow_mut().clear();
         self.apply_just_sent();
         self.project_hosts = project_hosts;
         self.section_hosts = section_hosts;
@@ -2255,11 +2283,38 @@ impl Workspace {
     }
 
     pub(crate) fn worktree(&self, path: &str) -> Option<&Worktree> {
-        self.all_worktrees().into_iter().find(|w| w.path == path)
+        let at = |(in_section, i, j): (bool, usize, usize)| {
+            let items = if in_section { self.model.sections.get(i).map(|s| &s.items) } else { self.model.projects.get(i).map(|p| &p.items) };
+            items.and_then(|items| items.get(j)).filter(|w| w.path == path)
+        };
+        if let Some(w) = self.worktree_index.borrow().get(path).copied().and_then(at) {
+            return Some(w);
+        }
+        let found = self.all_worktrees().into_iter().find(|w| w.path == path)?;
+        let mut index = self.worktree_index.borrow_mut();
+        index.clear();
+        for (i, p) in self.model.projects.iter().enumerate() {
+            index.extend(p.items.iter().enumerate().map(|(j, w)| (w.path.clone(), (false, i, j))));
+        }
+        for (i, s) in self.model.sections.iter().enumerate() {
+            index.extend(s.items.iter().enumerate().map(|(j, w)| (w.path.clone(), (true, i, j))));
+        }
+        Some(found)
     }
 
     pub(crate) fn chat(&self, id: &str) -> Option<&Chat> {
-        self.model.chats.iter().find(|c| c.id == id).or_else(|| self.sub_chats.iter().find(|(_, c)| c.id == id).map(|(_, c)| c))
+        let at = |i: usize| self.model.chats.get(i).filter(|c| c.id == id);
+        if let Some(c) = self.chat_index.borrow().get(id).copied().and_then(at) {
+            return Some(c);
+        }
+        let stale = self.chat_index.borrow().len() != self.model.chats.len() || self.chat_index.borrow().contains_key(id);
+        if stale {
+            *self.chat_index.borrow_mut() = self.model.chats.iter().enumerate().map(|(i, c)| (c.id.clone(), i)).collect();
+            if let Some(c) = self.chat_index.borrow().get(id).copied().and_then(at) {
+                return Some(c);
+            }
+        }
+        self.sub_chats.iter().find(|(_, c)| c.id == id).map(|(_, c)| c)
     }
 
     /** A worktree's terminal tabs (`state.terms:PATH`): [{id, label, command?}]; the first shell has id "1". */
@@ -2344,7 +2399,8 @@ impl Workspace {
         chats.extend(self.sub_chats.iter().filter(|(p, _)| *p == w.path).map(|(_, c)| c));
         // Tabs dragged or opened here keep their place in `state.tab_order`; the rest follow, oldest first.
         let order = self.state.get("tab_order").and_then(|o| o.get(&w.path)).and_then(Value::as_array);
-        let rank = |id: &str| order.and_then(|o| o.iter().position(|x| x.as_str() == Some(id))).unwrap_or(usize::MAX);
+        let ranks: HashMap<&str, usize> = order.map(|o| o.iter().enumerate().filter_map(|(i, x)| Some((x.as_str()?, i))).rev().collect()).unwrap_or_default();
+        let rank = |id: &str| ranks.get(id).copied().unwrap_or(usize::MAX);
         chats.sort_by(|a, b| rank(&a.id).cmp(&rank(&b.id)).then_with(|| a.created_at.cmp(&b.created_at)));
         chats
     }
@@ -2456,19 +2512,26 @@ impl Workspace {
 
     fn context_data(&self) -> Val {
         *self.chat_json_memo.borrow_mut() = Some(HashMap::new());
-        let worktrees: Vec<Value> = self
+        *self.building_current.borrow_mut() = Some(self.current_chat().map(|c| c.id.clone()));
+        // Each chat and worktree is built once and shared (by reference) by every list that shows it.
+        let chat_vals: HashMap<&str, Val> = self.model.chats.iter().chain(self.sub_chats.iter().map(|(_, c)| c)).map(|c| (c.id.as_str(), to_val(&self.chat_json(c)))).collect();
+        let worktrees: Vec<(*const Worktree, Val)> = self
             .model
             .projects
             .iter()
             .flat_map(|p| p.items.iter().map(move |w| (w, Value::Null)))
             .chain(self.model.sections.iter().flat_map(|s| s.items.iter().map(move |w| (w, json!({"id": s.id, "name": s.name})))))
-            .map(|(w, section)| self.worktree_json(w, section))
+            .map(|(w, section)| (w as *const Worktree, self.worktree_val(w, section, &chat_vals)))
             .collect();
+        let worktree_val: HashMap<*const Worktree, Val> = worktrees.iter().cloned().collect();
+        let rows = |shown: &[&Worktree], gaps: &[String]| -> Val {
+            Val::Arr(std::rc::Rc::new(shown.iter().filter_map(|w| Some(self.row_val(w, worktree_val.get(&(*w as *const Worktree))?, gaps))).collect()))
+        };
         let project_ids: Vec<String> = self.model.projects.iter().filter(|p| !self.project_removed(&p.repo)).map(|p| p.repo.clone()).collect();
         let project_gap = self.card_gap("project", "projcard", &project_ids);
         let section_ids: Vec<String> = self.model.sections.iter().map(|s| s.id.clone()).collect();
         let section_gap = self.card_gap("section", "seccard", &section_ids);
-        let projects: Vec<Value> = self
+        let projects: Vec<Val> = self
             .model
             .projects
             .iter()
@@ -2481,18 +2544,18 @@ impl Workspace {
                 let shown = self.visible_items(&p.items, |w| (show_external || !w.external) && (show_primary || !w.is_primary));
                 let gaps = self.drop_gaps(&shown);
                 let primary = p.items.iter().find(|w| w.is_primary).or(p.items.first());
-                json!({"name": name, "repo": p.repo, "hue": hue, "letter": letter,
+                let head = json!({"name": name, "repo": p.repo, "hue": hue, "letter": letter,
                        "hosts": self.project_hosts.get(i).cloned().unwrap_or_else(|| vec![self.default_host()]),
                        "host": self.project_hosts.get(i).and_then(|h| h.first().cloned()).unwrap_or_else(|| self.default_host()),
                        "show_external": show_external, "show_primary": show_primary,
                        "external_count": p.items.iter().filter(|w| w.external).count(),
                        "hidden_count": p.items.iter().chain(self.model.sections.iter().flat_map(|s| s.items.iter())).filter(|w| w.repo == p.repo && self.flag(&format!("hidden:{}", w.path))).count(),
                        "primary_path": primary.map(|w| w.path.clone()), "primary_host": primary.map(|w| w.host.clone()),
-                       "drop_gap": gap.as_deref() == Some(p.repo.as_str()), "drop_gap_end": gap_end.as_deref() == Some(p.repo.as_str()),
-                       "items": shown.into_iter().map(|w| self.row_json(w, Value::Null, &gaps)).collect::<Vec<_>>()})
+                       "drop_gap": gap.as_deref() == Some(p.repo.as_str()), "drop_gap_end": gap_end.as_deref() == Some(p.repo.as_str())});
+                crate::ui::expr::with(&to_val(&head), vec![("items".into(), rows(&shown, &gaps))])
             })
             .collect();
-        let sections: Vec<Value> = self
+        let sections: Vec<Val> = self
             .model
             .sections
             .iter()
@@ -2500,21 +2563,21 @@ impl Workspace {
                 // A section's orchestrator leads it; its workers follow.
                 let mut shown = self.visible_items(&s.items, |_| true);
                 if self.settings.get("sidebar.orchestrators_first").and_then(Value::as_bool) != Some(false) {
-                    shown.sort_by_key(|w| !self.chats_of(w).iter().any(|c| self.is_orchestrator(c)));
+                    shown.sort_by_cached_key(|w| !self.chats_of(w).iter().any(|c| self.is_orchestrator(c)));
                 }
                 let gaps = self.drop_gaps(&shown);
                 let (gap, gap_end) = &section_gap;
-                json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
+                let head = json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
                        "drop_gap": gap.as_deref() == Some(s.id.as_str()), "drop_gap_end": gap_end.as_deref() == Some(s.id.as_str()),
-                       "host": self.section_hosts.get(&s.id).cloned().unwrap_or_else(|| self.default_host()),
-                       "items": shown.into_iter().map(|w| self.row_json(w, json!({"id": s.id, "name": s.name}), &gaps)).collect::<Vec<_>>()})
+                       "host": self.section_hosts.get(&s.id).cloned().unwrap_or_else(|| self.default_host())});
+                crate::ui::expr::with(&to_val(&head), vec![("items".into(), rows(&shown, &gaps))])
             })
             .collect();
         let into = self.drop_into();
         let removed: Vec<Value> = self.model.projects.iter().filter(|p| self.project_removed(&p.repo)).map(|p| json!({"repo": p.repo, "name": self.project_look(&p.repo, &p.name, p.hue).0})).collect();
-        let selected_w = self.current_worktree().map(|w| self.worktree_json(w, Value::Null));
+        let selected_w = self.current_worktree().and_then(|w| worktree_val.get(&(w as *const Worktree))).map(|v| crate::ui::expr::with(v, vec![("section".into(), Val::Null)])).unwrap_or(Val::Null);
         let selected_diff = self.selected.as_deref().map(|p| self.diff_summary(p)).unwrap_or(Value::Null);
-        let selected_c = self.current_chat().map(|c| self.chat_json(c));
+        let selected_c = self.current_chat().and_then(|c| chat_vals.get(c.id.as_str()).cloned()).unwrap_or(Val::Null);
         let terminals: Vec<Value> = self.selected.as_deref().map(|p| {
             let active = self.term_active(p);
             self.term_tabs(p).into_iter().map(|mut t| {
@@ -2536,7 +2599,7 @@ impl Workspace {
                 })).collect()
             })
             .unwrap_or_default();
-        let chats_here: Vec<Value> = self.current_worktree().map(|w| self.chats_of(w).into_iter().map(|c| self.chat_json(c)).collect()).unwrap_or_default();
+        let chats_here: Vec<Val> = self.current_worktree().map(|w| self.chats_of(w).into_iter().filter_map(|c| chat_vals.get(c.id.as_str()).cloned()).collect()).unwrap_or_default();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
         // Usage is filed under the agent's own session id (Codex picks its own; Claude's is the chat id).
         let usage_id = |c: &Chat| c.session.clone().unwrap_or_else(|| c.id.clone());
@@ -2549,14 +2612,21 @@ impl Workspace {
             .map(|h| (h.clone(), json!({"last_seen": self.last_seen.get(h), "ago": age_text(self.last_seen.get(h).copied(), &self.age_format())})))
             .collect();
         let host_errors: Map<String, Value> = self.remotes.iter().map(|(h, r)| (h.clone(), json!(r.stderr()))).filter(|(_, v)| v.as_array().is_some_and(|a| !a.is_empty())).collect();
+        let arr = |v: Vec<Val>| Val::Arr(std::rc::Rc::new(v));
+        let all_chats: Vec<Val> = self.model.chats.iter().chain(self.sub_chats.iter().map(|(_, c)| c)).filter_map(|c| chat_vals.get(c.id.as_str()).cloned()).collect();
+        let selected = crate::ui::expr::with(
+            &to_val(&json!({"diff": selected_diff, "terminals": terminals, "background": background, "move": self.move_plan(), "transcript": transcript})),
+            vec![("worktree".into(), selected_w), ("chat".into(), selected_c), ("chats".into(), arr(chats_here))],
+        );
+        let shared = vec![
+            ("projects".to_string(), arr(projects)),
+            ("sections".to_string(), arr(sections)),
+            ("worktrees".to_string(), arr(worktrees.into_iter().map(|(_, v)| v).collect())),
+            ("chats".to_string(), arr(all_chats)),
+            ("selected".to_string(), selected),
+        ];
         let ctx = to_val(&json!({
-            "projects": projects,
-            "sections": sections,
-            "worktrees": worktrees,
-            "chats": self.model.chats.iter().chain(self.sub_chats.iter().map(|(_, c)| c)).map(|c| self.chat_json(c)).collect::<Vec<_>>(),
             "inbox": self.inbox_json(),
-            "selected": {"worktree": selected_w, "chat": selected_c, "chats": chats_here, "diff": selected_diff,
-                         "terminals": terminals, "background": background, "move": self.move_plan(), "transcript": transcript},
             "composers": self.composer_texts,
             "state": self.state,
             "theme": self.settings.theme,
@@ -2619,7 +2689,10 @@ impl Workspace {
             },
         }));
         *self.chat_json_memo.borrow_mut() = None;
-        crate::ui::expr::with(&ctx, vec![("settings".into(), self.settings_val.clone())])
+        *self.building_current.borrow_mut() = None;
+        let mut extra = shared;
+        extra.push(("settings".into(), self.settings_val.clone()));
+        crate::ui::expr::with(&ctx, extra)
     }
 
     /** `.settings`: the merged settings without the bulky parts the rest of the context already shows or
@@ -2753,18 +2826,31 @@ impl Workspace {
         (to.0 != from).then_some(to)
     }
 
-    fn row_json(&self, w: &Worktree, section: Value, gaps: &[String]) -> Value {
-        let mut v = self.worktree_json(w, section);
-        if let Value::Object(o) = &mut v {
-            // gaps[0] opens the room; a target whose room opens on the row below (gaps[1]) hides its drop line.
-            o.insert("drop_gap".into(), Value::Bool(gaps.first() == Some(&w.path)));
-            o.insert("drop_room".into(), Value::Bool(gaps.contains(&w.path)));
-            o.insert("drag_source".into(), Value::Bool(self.drag_item.borrow().as_ref().is_some_and(|(k, v)| k == "worktree" && v.as_str() == Some(&w.path))));
-        }
-        v
+    /** A worktree's context value with its chats (shared with the chat list). */
+    fn worktree_val(&self, w: &Worktree, section: Value, chat_vals: &HashMap<&str, Val>) -> Val {
+        let chats: Vec<Val> = self.chats_of(w).iter().filter_map(|c| chat_vals.get(c.id.as_str()).cloned()).collect();
+        crate::ui::expr::with(&to_val(&self.worktree_json_head(w, section)), vec![("chats".into(), Val::Arr(std::rc::Rc::new(chats)))])
+    }
+
+    /** A sidebar row: its worktree's value with where a dragged row would land. */
+    fn row_val(&self, w: &Worktree, base: &Val, gaps: &[String]) -> Val {
+        // gaps[0] opens the room; a target whose room opens on the row below (gaps[1]) hides its drop line.
+        let dragged = self.drag_item.borrow().as_ref().is_some_and(|(k, v)| k == "worktree" && v.as_str() == Some(&w.path));
+        crate::ui::expr::with(base, vec![
+            ("drop_gap".into(), Val::Bool(gaps.first() == Some(&w.path))),
+            ("drop_room".into(), Val::Bool(gaps.contains(&w.path))),
+            ("drag_source".into(), Val::Bool(dragged)),
+        ])
     }
 
     fn worktree_json(&self, w: &Worktree, section: Value) -> Value {
+        let mut v = self.worktree_json_head(w, section);
+        v["chats"] = Value::Array(self.chats_of(w).iter().map(|c| self.chat_json(c)).collect());
+        v
+    }
+
+    /** A worktree's context value without its chats. */
+    fn worktree_json_head(&self, w: &Worktree, section: Value) -> Value {
         let chats = self.chats_of(w);
         // Which status wins when several apply: `sidebar.status_order`.
         let offline = self.host_offline(&w.host);
@@ -2798,7 +2884,6 @@ impl Workspace {
             "age": w.age, "age_text": age_text(w.age, &self.age_format()), "status": status, "section": section,
             "selected": self.selected.as_deref() == Some(&w.path),
             "host": w.host, "offline": offline, "moving": moving,
-            "chats": chats.iter().map(|c| self.chat_json(c)).collect::<Vec<_>>(),
         })
     }
 
@@ -2818,13 +2903,20 @@ impl Workspace {
     fn chat_json_fresh(&self, c: &Chat) -> Value {
         let mut v = serde_json::to_value(c).unwrap_or(Value::Null);
         if let Value::Object(o) = &mut v {
-            o.insert("active".into(), Value::Bool(self.current_chat().map(|x| x.id == c.id).unwrap_or(false)));
+            let active = match self.building_current.borrow().as_ref() {
+                Some(cur) => cur.as_deref() == Some(c.id.as_str()),
+                None => self.current_chat().is_some_and(|x| x.id == c.id),
+            };
+            o.insert("active".into(), Value::Bool(active));
             o.insert("open".into(), Value::Bool(self.chat_open(c)));
             o.insert("moving".into(), json!(self.chat_moving_to(c)));
             o.insert("queued".into(), json!(self.queued.get(&c.id).cloned().unwrap_or_default()));
             o.insert("age_text".into(), Value::String(age_text(c.last_activity, &self.age_format())));
             o.insert("attachments".into(), self.attachments_json(&c.id));
-            let last = self.transcripts.get(&c.id).and_then(|t| t.items.iter().rev().find_map(|i| if let Item::Assistant { text } = i { Some(text.clone()) } else { None }));
+            let last = match self.transcripts.get(&c.id) {
+                Some(t) => Self::last_reply(t),
+                None => self.dropped.get(&c.id).and_then(|d| d.0.clone()),
+            };
             o.insert("asks".into(), Value::Bool(last.as_deref().is_some_and(|t| self.asks(t))));
             o.insert("last_message".into(), last.map(|t| Value::String(t.chars().take(self.settings.num("chat.last_message_chars", 280.) as usize).collect())).unwrap_or(Value::Null));
             let activity = self.transcripts.get(&c.id).filter(|_| c.state == "working").map(|t| t.activity()).unwrap_or_default();
@@ -2838,7 +2930,7 @@ impl Workspace {
                 o.insert("state".into(), json!("offline"));
             }
             // The model its newest reply came from, else the one it was started with (null: the agent's default).
-            let used = self.transcripts.get(&c.id).and_then(|t| t.model.clone()).or_else(|| c.model.clone());
+            let used = self.transcripts.get(&c.id).and_then(|t| t.model.clone()).or_else(|| self.dropped.get(&c.id).and_then(|d| d.1.clone())).or_else(|| c.model.clone());
             o.insert("model_used".into(), json!(used));
         }
         v
@@ -2887,14 +2979,35 @@ impl Workspace {
                 let (all, first) = (n("transcript_tail"), n("transcript_first"));
                 let tail = first.zip(all).map(|(f, a)| f.min(a)).or(all).filter(|_| from == 0);
                 let rest = all.zip(tail).map(|(a, t)| a - t).filter(|r| *r > 0);
+                let remote_host = !self.is_local_host(&chat.host);
                 cx.spawn(async move |this, cx| {
+                    let asked = std::time::Instant::now();
                     if let Ok(v) = remote.call(Call::TranscriptRead { chat_id: id.clone(), from, tail, before: None }).await {
+                        let fetched = asked.elapsed();
                         let entries = v["entries"].as_array().cloned().unwrap_or_default();
                         let start = v["from"].as_u64().unwrap_or(from as u64) as usize;
                         this.update(cx, |ws, cx| {
+                            let t = std::time::Instant::now();
                             ws.transcripts.entry(id.clone()).or_insert_with(|| crate::transcript::Transcript::for_chat(&id)).append(start, &entries);
+                            ws.perf.borrow_mut().fetched(&id, fetched, t.elapsed(), entries.len());
                             if let Some(page) = rest.filter(|_| start > 0) {
-                                ws.load_earlier(&id, Some(page), cx);
+                                // Over a slow link the rest waits a moment, and only if the chat's still shown,
+                                // so switching through chats doesn't queue big pages ahead of the next one's first.
+                                let wait = if remote_host { ws.settings.num("chat.transcript_rest_delay_ms", 1500.) } else { 0. };
+                                if wait <= 0. {
+                                    ws.load_earlier(&id, Some(page), cx);
+                                } else {
+                                    let id = id.clone();
+                                    cx.spawn(async move |this, cx| {
+                                        cx.background_executor().timer(Duration::from_millis(wait as u64)).await;
+                                        let _ = this.update(cx, |ws, cx| {
+                                            if ws.current_chat().is_some_and(|c| c.id == id) {
+                                                ws.load_earlier(&id, Some(page), cx);
+                                            }
+                                        });
+                                    })
+                                    .detach();
+                                }
                             }
                             cx.notify();
                         })
@@ -4228,6 +4341,38 @@ impl Workspace {
             "subagent_tabs": self.sub_chats.iter().map(|(w, c)| json!({"worktree": w, "chat": c.id, "name": c.name, "state": c.state})).collect::<Vec<_>>(),
             "hooks": self.hooks,
             "palette_open": self.palette_open,
+            "caches": self.cache_sizes(),
+        })
+    }
+
+    /** How much each long-lived cache holds, to spot one that only grows. */
+    fn cache_sizes(&self) -> Value {
+        let (motion, bounds, tracked, owners) = self.motion.borrow().sizes();
+        json!({
+            "exprs": self.exprs.cached(),
+            "transcripts": self.transcripts.len(),
+            "transcript_items": self.transcripts.values().map(|t| t.items.len()).sum::<usize>(),
+            "images": self.thumbs.len(),
+            "images_kb": self.thumbs.kb(),
+            "terminals": self.terminals.len(),
+            "regions": self.regions.len(),
+            "kept": self.kept.values().map(|k| k.clickables.len() + k.menus.len() + k.tooltips.len() + k.drops.len() + k.hovers.len() + k.keys.len()).sum::<usize>(),
+            "motion": {"entries": motion, "bounds": bounds, "tracked": tracked, "owners": owners},
+            "entered": self.entered.len(),
+            "transitions": self.transitions.len(),
+            "lists": self.lists.len(),
+            "virtual_lists": self.virtual_lists.len(),
+            "diffs": self.diffs.len(),
+            "live_md": self.live_md.len(),
+            "spelling": self.spelling.len(),
+            "composers": self.composers.len(),
+            "inputs": self.inputs.len(),
+            "hash_memo": self.hash_memo.borrow().len(),
+            "orchestrator_memo": self.orchestrator_memo.borrow().len(),
+            "scroll_handles": self.scroll_handles.len(),
+            "region_deps": self.region_deps.len(),
+            "anim_slots": crate::ui::anim::count(),
+            "traffic": crate::remote::traffic(),
         })
     }
 
@@ -5081,9 +5226,12 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = std::time::Instant::now();
+        crate::ui::anim::set_fps(if self.motion.borrow().enabled { self.settings.motion.get("animation_fps").and_then(Value::as_f64).unwrap_or(60.) } else { 0. });
+        crate::ui::anim::clear("");
+        self.thumbs.clear("");
         self.register_terminals(cx);
         let t = std::time::Instant::now();
-        self.note_selection();
+        self.note_selection(cx);
         self.flush(window, cx);
         self.track_nav();
         self.save_queue();
@@ -5196,15 +5344,18 @@ impl Render for Workspace {
         if let Some((_, src)) = self.image_view.clone() {
             overlays.push(self.image_viewer(src, cx));
         }
+        // Deferred, so the spinners turning over the window stay under them.
+        let overlays: Vec<AnyElement> = overlays.into_iter().map(|o| deferred(crate::ui::anim::in_layer(0, o)).with_priority(0).into_any_element()).collect();
         self.perf.borrow_mut().spans.insert("tree", t.elapsed().as_secs_f32() * 1000.);
         let t = std::time::Instant::now();
         self.write_inspect(&ctx, window, cx);
         self.perf.borrow_mut().spans.insert("inspect", t.elapsed().as_secs_f32() * 1000.);
         crate::ui::region::frame_if_wanted("", window);
         self.write_problems();
-        let rendered = started.elapsed();
-        let perf = self.perf.clone();
-        let frame_end = canvas(|_, _, _| {}, move |_, _, _, _| perf.borrow_mut().record(started, rendered)).absolute().size_0();
+        self.trim_thumbs(window, cx);
+        // The chat being opened counts as open on the first frame painted with its transcript loaded.
+        let opened = self.perf.borrow().opening.as_ref().map(|o| o.0.clone()).filter(|c| self.transcripts.contains_key(c));
+        self.perf.borrow_mut().drew(started.elapsed(), opened);
         let theme = self.settings.theme.clone();
         let bg = style::color(&Value::from("@window"), &theme).unwrap_or(parse_color("#212122"));
         let fg = style::color(&Value::from("@text"), &theme).unwrap_or(parse_color("#f5f5f7"));
@@ -5256,7 +5407,6 @@ impl Render for Workspace {
             .children(self.background_layer())
             .child(body)
             .children(overlays)
-            .child(frame_end)
     }
 }
 
@@ -5292,12 +5442,73 @@ impl Workspace {
 
 impl Workspace {
     /** Fires `select` when the selected worktree or its active chat changed (`.worktree`, `.chat`: path and id). */
-    fn note_selection(&mut self) {
+    /** Lets go of the transcripts of chats not shown lately: all but the `chat.keep_transcripts` most
+    recently shown and the selected worktree's open tabs. One shown again loads from its machine anew. */
+    fn drop_old_transcripts(&mut self, cx: &mut Context<Self>) {
+        let keep_n = self.settings.num("chat.keep_transcripts", 12.) as usize;
+        if self.transcripts.len() <= keep_n {
+            return;
+        }
+        let mut keep: HashSet<String> = self.current_worktree().map(|w| self.chats_of(w).into_iter().filter(|c| self.chat_open(c)).map(|c| c.id.clone()).collect()).unwrap_or_default();
+        keep.insert(crate::designer::CHAT_ID.to_string());
+        let mut recent: Vec<(&std::time::Instant, &String)> = self.chat_seen.iter().map(|(c, t)| (t, c)).collect();
+        recent.sort_by(|a, b| b.0.cmp(a.0));
+        keep.extend(recent.into_iter().take(keep_n).map(|(_, c)| c.clone()));
+        let gone: Vec<String> = self.transcripts.keys().filter(|id| !keep.contains(*id)).cloned().collect();
+        for id in gone {
+            if let Some(t) = self.transcripts.remove(&id) {
+                self.dropped.insert(id.clone(), (Self::last_reply(&t), t.model.clone()));
+            }
+            self.lists.remove(&id);
+            self.loading_earlier.remove(&id);
+            if self.watching.remove(&id) {
+                let call = Call::TranscriptUnwatch { chat_id: id.clone() };
+                let remote = self.route(&call);
+                cx.background_spawn(async move {
+                    let _ = remote.call(call).await;
+                })
+                .detach();
+            }
+        }
+    }
+
+    /** Lets go of the terminals of worktrees not selected lately (all but `terminal.keep_views` of them);
+    their shells keep running, and selecting one attaches to it again. */
+    fn drop_old_terminals(&mut self, cx: &mut Context<Self>) {
+        let keep_n = self.settings.num("terminal.keep_views", 8.) as usize;
+        let mut recent: Vec<(&std::time::Instant, &String)> = self.worktree_seen.iter().map(|(p, t)| (t, p)).collect();
+        recent.sort_by(|a, b| b.0.cmp(a.0));
+        let keep: HashSet<String> = recent.into_iter().take(keep_n).map(|(_, p)| p.clone()).collect();
+        let path_of = |k: &str| k.split_once('#').map_or(k, |(p, _)| p).to_string();
+        let gone: Vec<String> = self.terminals.keys().filter(|k| !k.starts_with("screen:") && !keep.contains(&path_of(k))).cloned().collect();
+        for k in gone {
+            if let Some(t) = self.terminals.remove(&k) {
+                t.read(cx).detach();
+                self.term_by_id.retain(|_, v| v.entity_id() != t.entity_id());
+            }
+        }
+    }
+
+    fn last_reply(t: &Transcript) -> Option<String> {
+        t.items.iter().rev().find_map(|i| if let Item::Assistant { text } = i { Some(text.clone()) } else { None })
+    }
+
+    fn note_selection(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.selected.clone() else { return };
         let now = (path, self.current_chat().map(|c| c.id.clone()));
         if self.seen_select.as_ref() != Some(&now) {
             let first = self.seen_select.is_none();
+            self.perf.borrow_mut().opening = now.1.clone().map(|c| {
+                let cached = self.transcripts.contains_key(&c);
+                (c, std::time::Instant::now(), cached)
+            });
             self.seen_select = Some(now.clone());
+            if let Some(c) = &now.1 {
+                self.chat_seen.insert(c.clone(), std::time::Instant::now());
+            }
+            self.worktree_seen.insert(now.0.clone(), std::time::Instant::now());
+            self.drop_old_transcripts(cx);
+            self.drop_old_terminals(cx);
             if !first {
                 self.pending_events.push(("select".into(), [("worktree".to_string(), json!(now.0)), ("chat".to_string(), json!(now.1))].into_iter().collect()));
             }
@@ -5595,16 +5806,15 @@ pub fn fit_size(d: imagesize::ImageSize, max_w: f32, max_h: f32) -> (f32, f32) {
     (w * k, h * k)
 }
 
-pub(crate) fn decode_image(media_type: &str, data: &str) -> Option<std::sync::Arc<Image>> {
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+/** An attached image's bytes as GPUI decodes them (for the full-size viewer). */
+pub(crate) fn image_of(media_type: &str, data: &[u8]) -> Option<std::sync::Arc<Image>> {
     let format = match media_type {
         "image/jpeg" => ImageFormat::Jpeg,
         "image/gif" => ImageFormat::Gif,
         "image/webp" => ImageFormat::Webp,
         _ => ImageFormat::Png,
     };
-    Some(std::sync::Arc::new(Image::from_bytes(format, bytes)))
+    Some(std::sync::Arc::new(Image::from_bytes(format, data.to_vec())))
 }
 
 /** Items from several machines (a merged project's worktrees, the sections) in `saved` order (kept by

@@ -333,13 +333,12 @@ impl Workspace {
     }
 
     fn sized_spinner(&mut self, size: f32, color: Option<Hsla>, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.anim_phase(self.settings.num("motion.spinner.period_ms", 800.) as f32, cx);
+        let period = self.settings.num("motion.spinner.period_ms", 800.) as f32;
         let icon = match self.settings.get("motion.spinner.icon").and_then(Value::as_str) {
             Some(name) => Icon::empty().path(format!("icons/{name}.svg")),
             None => Icon::new(gpui_kit::component::IconName::Loader),
         };
-        let icon = icon.size(px(size)).when_some(color, |i, c| i.text_color(c));
-        div().child(icon.rotate(percentage(ease_in_out(t)))).into_any_element()
+        self.turning(icon.size(px(size)), color, period, true, cx)
     }
 
     /** The node's bound state key and its value (state first, else `props[fallback]`). */

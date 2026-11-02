@@ -318,6 +318,11 @@ impl Scripts {
 
     /** Hands a message to the scripts it's for (an action to its owner, an event to all, a reply or timer
     or process line to the one that asked) with `context` visible to `ab::context()`; returns what they sent. */
+    /** Whether any script is running (none: nothing to deliver to, no context to build). */
+    pub fn any(&self) -> bool {
+        !self.instances.is_empty()
+    }
+
     pub fn deliver(&mut self, message: Value, context: Rc<str>) -> Vec<Value> {
         let targets: Vec<(usize, Value)> = match message["type"].as_str().unwrap_or("") {
             "action" => message["name"].as_str().and_then(|n| self.action_owner.get(n)).map(|i| vec![(*i, message.clone())]).unwrap_or_default(),

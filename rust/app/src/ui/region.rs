@@ -191,6 +191,10 @@ impl HashMemo {
         h
     }
 
+    pub fn len(&self) -> usize {
+        self.by_ptr.len()
+    }
+
     /** A new context: the old one's pointers may be reused. */
     pub fn reset(&mut self, generation: u64) {
         if generation != self.generation {
@@ -344,6 +348,8 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     fn draw_region(&mut self, id: &str, me: WeakEntity<Region>, node: &Value, ctx: &Val, path: &str, motion_off: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.kept.remove(id);
+        crate::ui::anim::clear(id);
+        self.thumbs.clear(id);
         self.region_views.insert(id.to_string(), me);
         self.perf.borrow_mut().regions_drawn.push(id.to_string());
         self.motion.borrow_mut().drew(id);
@@ -366,6 +372,7 @@ impl Workspace {
     pub(crate) fn place_region(&mut self, obj: &Map<String, Value>, ctx: &Val, path: &str, id: &str, st: &Map<String, Value>, cx: &mut Context<Self>) -> AnyElement {
         let mut node = obj.clone();
         node.remove("region");
+        node.remove("for");
         // Where the node sits and how big it is belong to the box; inside, the node fills it.
         if let Value::Object(style) = node.entry("style").or_insert_with(|| Value::Object(Map::new())) {
             for k in OUTER {
@@ -459,6 +466,8 @@ impl Workspace {
                 }
             }
         });
+        crate::ui::anim::keep(&placed);
+        self.thumbs.keep(&placed);
         self.motion.borrow_mut().live_owners = placed.clone();
         self.live_regions = placed;
         self.refresh_now = std::mem::take(&mut self.refresh_regions);

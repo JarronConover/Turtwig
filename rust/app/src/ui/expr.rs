@@ -32,17 +32,16 @@ impl Exprs {
         if let Some(hit) = self.cache.borrow().get(code) {
             return hit.clone();
         }
-        let defs = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs());
-        let funs = jaq_core::funs().chain(jaq_std::funs()).chain(jaq_json::funs());
-        let loader = Loader::new(defs);
-        let arena = Arena::default();
-        let result = loader
-            .load(&arena, File { code, path: () })
-            .map_err(|e| format!("can't parse `{code}`: {e:?}"))
-            .and_then(|m| Compiler::default().with_funs(funs).compile(m).map_err(|e| format!("can't compile `{code}`: {e:?}")))
-            .map(Rc::new);
+        // Each filter holds every definition it was compiled with, so it gets only the ones it can call
+        // (all of them, if that falls short).
+        let result = compile_with(code, Some(&prelude_needs(code))).or_else(|_| compile_with(code, None)).map(Rc::new);
         self.cache.borrow_mut().insert(code.to_string(), result.clone());
         result
+    }
+
+    /** How many expressions are compiled and kept. */
+    pub fn cached(&self) -> usize {
+        self.cache.borrow().len()
     }
 
     /** All outputs of `code` on `input`; errors are recorded (shown in the settings panel) and yield nothing. */
@@ -156,8 +155,61 @@ impl Exprs {
     }
 }
 
+fn prelude() -> impl Iterator<Item = jaq_core::load::parse::Def<&'static str>> {
+    jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs())
+}
+
+fn compile_with(code: &str, only: Option<&std::collections::HashSet<&'static str>>) -> Result<Filter, String> {
+    let defs = prelude().filter(|d| only.is_none_or(|o| o.contains(d.name)));
+    let funs = jaq_core::funs().chain(jaq_std::funs()).chain(jaq_json::funs());
+    let arena = Arena::default();
+    Loader::new(defs)
+        .load(&arena, File { code, path: () })
+        .map_err(|e| format!("can't parse `{code}`: {e:?}"))
+        .and_then(|m| Compiler::default().with_funs(funs).compile(m).map_err(|e| format!("can't compile `{code}`: {e:?}")))
+}
+
+fn words(s: &str) -> impl Iterator<Item = &str> {
+    s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).filter(|w| !w.is_empty())
+}
+
+/** The prelude definitions `code` can reach: those named in it, and the ones they call in turn. */
+fn prelude_needs(code: &str) -> std::collections::HashSet<&'static str> {
+    static CALLS: std::sync::OnceLock<HashMap<&'static str, Vec<String>>> = std::sync::OnceLock::new();
+    let calls = CALLS.get_or_init(|| {
+        let mut m: HashMap<&'static str, Vec<String>> = HashMap::new();
+        for d in prelude() {
+            let body = format!("{:?}", d.body);
+            m.entry(d.name).or_default().extend(words(&body).map(str::to_string));
+        }
+        m
+    });
+    let mut need = std::collections::HashSet::new();
+    let mut todo: Vec<String> = words(code).map(str::to_string).collect();
+    while let Some(w) = todo.pop() {
+        if let Some((name, called)) = calls.get_key_value(w.as_str()) {
+            if need.insert(*name) {
+                todo.extend(called.iter().cloned());
+            }
+        }
+    }
+    need
+}
+
 pub fn to_val(v: &Value) -> Val {
-    serde_json::from_value(v.clone()).unwrap_or(Val::Null)
+    use jaq_json::Num;
+    match v {
+        Value::Null => Val::Null,
+        Value::Bool(b) => Val::Bool(*b),
+        Value::Number(n) => Val::Num(match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => Num::from_integral(i),
+            (_, Some(u)) => Num::from_integral(u),
+            _ => Num::Float(n.as_f64().unwrap_or(0.)),
+        }),
+        Value::String(s) => Val::from(s.clone()),
+        Value::Array(a) => Val::Arr(Rc::new(a.iter().map(to_val).collect())),
+        Value::Object(o) => Val::obj(o.iter().map(|(k, x)| (Val::from(k.clone()), to_val(x))).collect()),
+    }
 }
 
 pub fn to_json(v: &Val) -> Value {

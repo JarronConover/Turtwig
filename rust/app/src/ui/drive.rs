@@ -21,6 +21,7 @@ pub(crate) const ACTIONS: &[(&str, &str)] = &[
     ("ui.key", "{key, id?}: press a key on a node (default: the focused one): its `on.key` entry, else Enter / Space click it"),
     ("ui.file_drag", "{phase: enter | move | exit | drop | sweep, x, y, paths?, to_x?, to_y?, ms?}: files dragged over the window, through the app's own drag handling (not a real drag: macOS never sees it); sweep moves from x,y to to_x,to_y over ms at 60 moves a second"),
     ("ui.text_drag", "{x, y, to_x, to_y, ms?, then_x?, then_y?}: press, drag and let go of the mouse's left button from x,y to to_x,to_y through the app's own mouse handling (not a real drag: macOS never sees it), selecting the text it crosses; then_x/then_y move the pointer on with the button up"),
+    ("ui.pointer", "{x, y, to_x, to_y, ms?, wheel?}: move the pointer (no button) from x,y to to_x,to_y over ms at 120 moves a second through the app's own mouse handling (not a real move: macOS never sees it), hovering what it crosses; with `wheel` (points a move, positive: down) it scrolls whatever is under it instead"),
     ("ui.scroll", "{id | handle, to?: top | bottom | <y> , row?, by?, x?}: scroll a `scroll` node (its `props.handle`, or its id) or a virtual list; `row` brings that row into view, `by` scrolls that many points (positive: down)"),
     ("ui.drop", "{key, value, kind?, zone?}: drop `value` on the target with that `drop_key` (inspect.json `ui.drops`) as a drag would: its matching `on.drop_item` runs if its `valid` check passes"),
 ];
@@ -327,6 +328,34 @@ pub(crate) fn dispatch(ws: &mut Workspace, name: &str, a: &Map<String, Value>, w
                     cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
                     let moved = gpui::MouseMoveEvent { position: then, pressed_button: None, modifiers };
                     let _ = cx.update(|window, cx| window.dispatch_event(gpui::PlatformInput::MouseMove(moved), cx));
+                }
+            })
+            .detach();
+        }
+        "ui.pointer" => {
+            let n = |k: &str| a.get(k).and_then(Value::as_f64).unwrap_or(0.) as f32;
+            let (from, to) = (point(px(n("x")), px(n("y"))), point(px(n("to_x")), px(n("to_y"))));
+            let ms = a.get("ms").and_then(Value::as_u64).unwrap_or(1000);
+            let steps = (ms * 120 / 1000).max(1);
+            let wheel = a.get("wheel").and_then(Value::as_f64).map(|d| d as f32);
+            let modifiers = gpui::Modifiers::default();
+            cx.spawn_in(window, async move |_, cx| {
+                for i in 0..=steps {
+                    if i > 0 {
+                        cx.background_executor().timer(std::time::Duration::from_micros(1_000_000 / 120)).await;
+                    }
+                    let t = i as f32 / steps as f32;
+                    let position = point(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+                    let input = match wheel {
+                        Some(dy) => gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                            position,
+                            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-dy))),
+                            modifiers,
+                            touch_phase: gpui::TouchPhase::Moved,
+                        }),
+                        None => gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, pressed_button: None, modifiers }),
+                    };
+                    let _ = cx.update(|window, cx| window.dispatch_event(input, cx));
                 }
             })
             .detach();

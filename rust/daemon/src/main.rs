@@ -18,7 +18,7 @@ mod util;
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("run") => server::run(),
-        Some("connect") => server::connect(),
+        Some("connect") => server::connect(std::env::args().any(|a| a == "--zlib")),
         Some("hook") => {
             db::hook();
             Ok(())

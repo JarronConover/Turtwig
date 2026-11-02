@@ -83,6 +83,13 @@ pub struct MotionStore {
     draws: HashMap<String, (u64, u64)>,
 }
 
+impl MotionStore {
+    /** How many nodes it remembers: (moving entries, bounds, tracked, owners). */
+    pub fn sizes(&self) -> (usize, usize, usize, usize) {
+        (self.entries.len(), self.bounds.len(), self.tracked.len(), self.owners.len())
+    }
+}
+
 impl Default for MotionStore {
     fn default() -> Self {
         Self {

@@ -320,7 +320,11 @@ impl Workspace {
                         if self.is_image_path(&p) {
                             let (w, h) = crate::workspace::fit(&p, mw, mh);
                             let action = serde_json::json!({"do": "image.view", "path": p.to_string_lossy()});
-                            let thumb = style::apply_plain(img(p).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme);
+                            let file = p.clone();
+                            let thumb = match self.thumb(&format!("file:{}", p.display()), || super::thumbs::Source::File(file), (w, h), window, cx) {
+                                Some(i) => style::apply_plain(img(i).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme).into_any_element(),
+                                None => style::apply_plain(div().w(px(w)).h(px(h)), &image_style, theme).into_any_element(),
+                            };
                             self.zoomable(format!("img:{key}:{n}"), thumb.into_any_element(), action, cx)
                         } else {
                             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -337,18 +341,19 @@ impl Workspace {
                 let row = h_flex().w_full().justify_end().child(bubble).into_any_element();
                 Some(self.with_message_actions(chat_id, i, &key, text, true, row, theme))
             }
-            Item::Image { media_type, data } => {
-                let image = self.images.entry(key.clone()).or_insert_with(|| crate::workspace::decode_image(media_type, data)).clone();
+            Item::Image { data, .. } => {
                 let action = serde_json::json!({"do": "image.view", "chat": chat_id, "index": i});
                 // Sized up front: the image decodes after the list measures its row, which would keep a zero height.
                 let image_style = st("image");
                 let max = |k: &str, d: f32| image_style.get(k).and_then(Value::as_f64).map(|x| x as f32).unwrap_or(d);
                 let (mw, mh) = (max("max_width", 360.), max("max_height", 240.));
-                let shown = image.map(|i| {
-                    let (w, h) = imagesize::blob_size(&i.bytes).map_or((mw, mh), |d| crate::workspace::fit_size(d, mw, mh));
-                    style::apply_plain(img(i).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme).into_any_element()
-                });
-                shown.map(|el| h_flex().w_full().justify_end().child(self.zoomable(format!("img:{key}"), el, action, cx)).into_any_element())
+                let (w, h) = imagesize::blob_size(data).map_or((mw, mh), |d| crate::workspace::fit_size(d, mw, mh));
+                let bytes = data.clone();
+                let el = match self.thumb(&key, || super::thumbs::Source::Bytes(bytes), (w, h), window, cx) {
+                    Some(i) => style::apply_plain(img(i).w(px(w)).h(px(h)).object_fit(ObjectFit::Contain), &image_style, theme).into_any_element(),
+                    None => style::apply_plain(div().w(px(w)).h(px(h)), &image_style, theme).into_any_element(),
+                };
+                Some(h_flex().w_full().justify_end().child(self.zoomable(format!("img:{key}"), el, action, cx)).into_any_element())
             }
             Item::Assistant { text } => {
                 for (n, code) in fenced_code(text).into_iter().enumerate() {
@@ -773,7 +778,9 @@ impl Workspace {
         let look = LineLook::of(&self.settings.chat);
         let icon_el = Icon::empty().path(format!("icons/{icon}.svg")).size(px(look.icon_size)).when_some(fg, |i, c| i.text_color(c));
         let title_el = div().min_w_0().truncate().child(title.to_string());
-        let title_el: AnyElement = if running && self.motion.borrow().enabled {
+        let title_el: AnyElement = if running && self.motion.borrow().enabled && super::anim::enabled() {
+            super::anim::fade(super::region::owner(), SharedString::from(title.to_string()), look.pulse_min, look.pulse_max, look.pulse_ms)
+        } else if running && self.motion.borrow().enabled {
             let t = self.pulse_phase(look.pulse_ms, cx);
             title_el.opacity(pulsating_between(look.pulse_min, look.pulse_max)(t)).into_any_element()
         } else {

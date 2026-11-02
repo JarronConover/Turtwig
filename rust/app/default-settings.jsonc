@@ -10,6 +10,8 @@
     // A host that stays out of reach this long shows its worktrees and chats greyed out as offline, as they
     // were when last heard from (kept on disk every cache_seconds, so they show after a restart too).
     "offline_after_ms": 8000, "cache_seconds": 30,
+    // The box sends what it reports compressed (zlib): a fifth of the bytes over a slow link.
+    "compress": true,
     // Extra ssh arguments for the box connection.
     "ssh_options": ["-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"],
     // How often skills, CLAUDE.md, memory and hooks are copied to the box (bin/env-push); 0 turns it off.
@@ -2676,7 +2678,12 @@
     "step_detail_lines": 40,
     // How many of a chat's newest transcript entries to load when it opens (long chats run to 40,000+);
     // the last transcript_first of them come first, to show sooner, and the rest right after.
-    "transcript_tail": 600, "transcript_first": 150,
+    "transcript_tail": 600, "transcript_first": 50,
+    // From another machine the rest waits this long, and comes only if the chat is still shown.
+    "transcript_rest_delay_ms": 1500,
+    // Transcripts kept in memory: the chats shown most recently (plus the selected worktree's open tabs);
+    // others load again when shown. Images in chats are kept decoded up to image_cache_mb.
+    "keep_transcripts": 12, "image_cache_mb": 48,
     // How many more older entries to load each time you scroll to the top of a long chat.
     "transcript_page": 600,
     // Typing one of these at the start of a word opens a list of matches under the composer.
@@ -2837,6 +2844,9 @@
     "cmd_passthrough": false,
     "size": { "cols": 100, "rows": 30 },
     "scrollback": 10000,
+    // Terminals kept attached: those of the worktrees selected most recently. Others let go (their shells
+    // keep running) and attach again when shown.
+    "keep_views": 8,
     // The wheel: "auto" (to the program when it asks for the mouse; in a tmux shell, tmux's own history,
     // without tmux's mouse mode so drags still select here; else this view's scrollback), "tmux", "local",
     // "app", or "off". Typing while scrolled back returns to the prompt.
