@@ -155,9 +155,14 @@ impl Workspace {
                 continue;
             }
             self.mirrored.insert(name.to_string(), digest);
+            // Compact: inspect.json is a third smaller without its indentation.
+            let bytes = match name.ends_with(".json").then(|| serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| serde_json::to_vec(&v).ok())).flatten() {
+                Some(compact) => compact,
+                None => bytes,
+            };
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
             for r in &hosts {
-                r.send(Call::AppFile { name: name.to_string(), data: data.clone() });
+                r.send_latest(name, Call::AppFile { name: name.to_string(), data: data.clone() });
             }
         }
     }

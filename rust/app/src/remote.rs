@@ -9,7 +9,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 pub enum Incoming {
     Connected,
@@ -33,12 +34,33 @@ type ErrLines = Arc<Mutex<std::collections::VecDeque<String>>>;
 
 const ERR_LINES: usize = 20;
 
+/** A mirrored file waits until no call does, and the next one waits this many times as long as the last
+took to write: over a slow link (the box through a relay) mirrors use at most about a quarter of it. */
+const MIRROR_PACE: u32 = 3;
+
+/** Mirrored files not yet written, by name: a newer copy replaces the waiting one, so they never pile up
+on the connection ahead of calls. `kick` wakes the writer. */
+#[derive(Clone)]
+struct Mirrors {
+    waiting: Arc<Mutex<BTreeMap<String, String>>>,
+    kick: flume::Sender<()>,
+    kicked: flume::Receiver<()>,
+}
+
 #[derive(Clone)]
 pub struct Remote {
     out: flume::Sender<String>,
     pending: Pending,
     next_id: Arc<AtomicU64>,
     errors: ErrLines,
+    mirrors: Mirrors,
+}
+
+impl Mirrors {
+    fn new() -> Mirrors {
+        let (kick, kicked) = flume::bounded(1);
+        Mirrors { waiting: Arc::default(), kick, kicked }
+    }
 }
 
 impl Remote {
@@ -49,13 +71,14 @@ impl Remote {
         let (in_tx, in_rx) = flume::unbounded::<Incoming>();
         let pending: Pending = Arc::default();
         let errors: ErrLines = Arc::default();
-        let remote = Remote { out: out_tx, pending: pending.clone(), next_id: Arc::new(AtomicU64::new(1)), errors: errors.clone() };
+        let mirrors = Mirrors::new();
+        let remote = Remote { out: out_tx, pending: pending.clone(), next_id: Arc::new(AtomicU64::new(1)), errors: errors.clone(), mirrors: mirrors.clone() };
         let flag = alive.clone();
         std::thread::spawn(move || loop {
             if !flag.load(Ordering::Relaxed) {
                 break;
             }
-            let err = session(&spec, &path, &out_rx, &in_tx, &pending, &flag, &errors);
+            let err = session(&spec, &path, &out_rx, &mirrors, &in_tx, &pending, &flag, &errors);
             for (_, waiter) in pending.lock().unwrap().drain() {
                 let _ = waiter.send(Err(anyhow!("disconnected")));
             }
@@ -74,7 +97,7 @@ impl Remote {
     /** A connection to nothing: every call fails (for a host with no daemon configured). */
     pub fn detached() -> Remote {
         let (out, _) = flume::unbounded();
-        Remote { out, pending: Arc::default(), next_id: Arc::new(AtomicU64::new(1)), errors: Arc::default() }
+        Remote { out, pending: Arc::default(), next_id: Arc::new(AtomicU64::new(1)), errors: Arc::default(), mirrors: Mirrors::new() }
     }
 
     /** What the connection's process last wrote to stderr, oldest first. */
@@ -95,12 +118,20 @@ impl Remote {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let _ = self.out.send(encode(&Request { id, call }));
     }
+
+    /** Like `send`, but only the newest waiting copy per `key` goes out, after any calls (a mirrored file). */
+    pub fn send_latest(&self, key: &str, call: Call) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.mirrors.waiting.lock().unwrap().insert(key.to_string(), encode(&Request { id, call }));
+        let _ = self.mirrors.kick.try_send(());
+    }
 }
 
 fn session(
     spec: &crate::behavior::HostSpec,
     path: &str,
     out_rx: &flume::Receiver<String>,
+    mirrors: &Mirrors,
     in_tx: &flume::Sender<Incoming>,
     pending: &Pending,
     alive: &Arc<AtomicBool>,
@@ -165,17 +196,45 @@ fn session(
     let mut answered = false;
 
     let writer_rx = out_rx.clone();
+    let mirrors = mirrors.clone();
     let (stop_tx, stop_rx) = flume::bounded::<()>(1);
-    std::thread::spawn(move || loop {
-        let keep_going = flume::Selector::new()
-            .recv(&writer_rx, |line| match line {
-                Ok(line) => stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).is_ok(),
-                Err(_) => false,
-            })
-            .recv(&stop_rx, |_| false)
-            .wait();
-        if !keep_going {
-            break;
+    std::thread::spawn(move || {
+        let mut write = |line: &str| stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).is_ok();
+        let mut mirror_at = Instant::now();
+        loop {
+            if let Ok(line) = writer_rx.try_recv() {
+                if !write(&line) {
+                    break;
+                }
+                continue;
+            }
+            let mirror_waits = !mirrors.waiting.lock().unwrap().is_empty();
+            if mirror_waits && Instant::now() >= mirror_at {
+                let next = mirrors.waiting.lock().unwrap().pop_first();
+                if let Some((_, line)) = next {
+                    let started = Instant::now();
+                    if !write(&line) {
+                        break;
+                    }
+                    mirror_at = Instant::now() + started.elapsed() * MIRROR_PACE;
+                }
+                continue;
+            }
+            // None: stop; Some(None): look again; Some(Some(line)): a call to write.
+            let selector = flume::Selector::new()
+                .recv(&writer_rx, |line| line.ok().map(Some))
+                .recv(&mirrors.kicked, |_| Some(None))
+                .recv(&stop_rx, |_| None);
+            let next = if mirror_waits {
+                selector.wait_timeout(mirror_at.saturating_duration_since(Instant::now())).unwrap_or(Some(None))
+            } else {
+                selector.wait()
+            };
+            match next {
+                None => break,
+                Some(Some(line)) if !write(&line) => break,
+                _ => {}
+            }
         }
     });
 
