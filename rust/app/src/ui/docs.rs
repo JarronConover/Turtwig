@@ -7,9 +7,9 @@ use super::style::STYLE_KEYS;
 use crate::settings;
 use serde_json::{json, Value};
 
-const GUIDE: &str = r##"# a.box settings reference
+const GUIDE: &str = r##"# Turtwig settings reference
 
-a.box is a container plus data: **everything you see and every button's behavior is defined in
+Turtwig is a container plus data: **everything you see and every button's behavior is defined in
 settings**. The built-in look (super.engineering's) is itself just the default settings, printed in
 full at the end of this file. Change anything by overriding it in your settings file.
 
@@ -60,9 +60,9 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `events_options` | `transitions`: which chat state changes are which events, `[{from: state \| [states] \| "*", to, event}]` (default: anything to waiting is `chat.waiting`, working to idle `chat.finished`, working/waiting/idle to stopped `chat.stopped`). |
 | `dock` | `badge`: a template for the Dock icon's badge (empty or 0 hides it; re-evaluated whenever the context changes); `menu`: items for the Dock icon's right-click menu, like `menu_bar` items. |
 | `hosts` | Where things run, by host (`box`, `mac`, or any name): `label`, `icon`, `color`, and `connection` `{ssh_host, daemon, ssh_options?, retry_seconds?, watch_ms?, enabled?}` (no ssh_host: run the daemon here). Without its own `connection`, `app.default_host` uses `connection` and `app.local_host` uses `local`. Read as `.hosts`; every chat has `.host` and every worktree `.host`. |
-| `app` | `local_host` ("mac": the machine the app runs on), `default_host` ("box": where things go when nothing says), `source_dir` (a.box's checkout, ~/dev/agent-box), `bin_dir` (its scripts; default `bin` there), `path` (PATH for everything the app runs), `auto_update`, `update_check_secs`, `update_off_check_secs`, `min_update_check_secs`, `update_command` / `restart_command` (null: the built-in ones). |
+| `app` | `local_host` ("mac": the machine the app runs on), `default_host` ("box": where things go when nothing says), `source_dir` (Turtwig's checkout, ~/dev/turtwig), `bin_dir` (its scripts; default `bin` there), `path` (PATH for everything the app runs), `auto_update`, `update_check_secs`, `update_off_check_secs`, `min_update_check_secs`, `update_command` / `restart_command` (null: the built-in ones). |
 | `window` | `title`, `width`, `height`, `traffic_lights`, `appearance` (dark, light, system: follows macOS live), `native_titlebar`, `remember_frame` (reopen where it was), `activate_on_start`, `on_close` (close: the window closes and the app keeps running; hide; quit; keep: the window stays). Title and appearance re-apply on save. |
-| `menu_bar` | `app_menu`: the a.box menu's items (default Settings, Command Palette, `{"splice": "app"}` for `app`'s items, Quit); `app`: items added to it; `menus`: menus of their own `{name, items}`. Items: `{label, do, if, checked, disabled, shortcut, items (a submenu), id}` or `{separator: true}`; label/if/checked are jq against the context and the menus rebuild when they change. |
+| `menu_bar` | `app_menu`: the Turtwig menu's items (default Settings, Command Palette, `{"splice": "app"}` for `app`'s items, Quit); `app`: items added to it; `menus`: menus of their own `{name, items}`. Items: `{label, do, if, checked, disabled, shortcut, items (a submenu), id}` or `{separator: true}`; label/if/checked are jq against the context and the menus rebuild when they change. |
 | `uploads` | `dir` (where pasted and dropped files are copied, ~/.agent-box/uploads) and `remote_dir` (the same on the other machine). |
 | `sounds` | A sound per event: `chat.finished`, `chat.question` (a finished turn ending in a question), `chat.waiting`, `chat.stopped`, `designer.finished`. Values are macOS sound names or audio file paths; null silences one. Also `volume` (0-1), `when` (`always` or `unfocused`), `enabled`. The `sound` action plays one anywhere. |
 | `logo` | The logo shown by `logo` nodes, the Dock while the app runs, and the app bundle's icon. See Logo. |
@@ -74,7 +74,7 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `connection` | The default host's connection: `ssh_host`, `daemon` path, `retry_seconds`, `ssh_options`, `watch_ms`, `env_push_seconds`, `env_push_command` (null: `bin_dir`'s env-push). `local` is this Mac's daemon (`enabled`, `daemon`). |
 | `input` | `press_dedupe_ms` (50): how long one press counts as the same press for every node under it. |
 | `scripts_options` | `context_cache_ms`, `min_timer_ms`, `keep_data` (true: `.data` survives a script reload). |
-| `setup` | The setup guide a fresh install opens with (components `Setup`, state `setup_step`): `command` (null: `bin/setup` in `app.source_dir`), `welcome`, `tools` (the CLIs it checks for), `tour` (its stops: `{id, title, text}`). "Set up a.box…" in the palette reopens it. |
+| `setup` | The setup guide a fresh install opens with (components `Setup`, state `setup_step`): `command` (null: `bin/setup` in `app.source_dir`), `welcome`, `tools` (the CLIs it checks for), `tour` (its stops: `{id, title, text}`). "Set up Turtwig…" in the palette reopens it. |
 | `settings_agent` | `command`: the `settings.agent` run (`{dir}`, `{claude}`, `$REQUEST`; null: the built-in one). |
 
 ## Logo
@@ -138,7 +138,7 @@ Then show it with a patch: `{ "insert": { "type": "text", "props": { "text": "{{
 | `patch(ops)` / `key(key, action, json!({if, not_in}))` / `command(label, action, json!({if}))` | change the UI at runtime, add a key or a palette entry; undone when scripts reload |
 | `notify(text)` / `log(text)` | a notice in the window / a line in scripts.log |
 
-The `ab` crate is `rust/script-sdk` in a.box's source (`app.source_dir`); builds live in `scripts_options.build_dir`
+The `ab` crate is `rust/script-sdk` in Turtwig's source (`app.source_dir`); builds live in `scripts_options.build_dir`
 (`~/.agent-box/script-build`) and need `cargo` with the `wasm32-unknown-unknown` target (added on first build).
 
 ## Patch
@@ -377,7 +377,7 @@ pub fn write_reference() {
     if !p.exists() {
         let _ = std::fs::write(
             &p,
-            "// a.box settings: everything here overrides the built-in defaults.\n// Reference: SETTINGS.md in this folder (for you and for agents).\n{\n  \"$schema\": \"./settings.schema.json\"\n}\n",
+            "// Turtwig settings: everything here overrides the built-in defaults.\n// Reference: SETTINGS.md in this folder (for you and for agents).\n{\n  \"$schema\": \"./settings.schema.json\"\n}\n",
         );
     }
 }
@@ -399,7 +399,7 @@ fn schema() -> Value {
         .collect();
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "a.box settings",
+        "title": "Turtwig settings",
         "description": "See SETTINGS.md in this folder.",
         "type": "object",
         "definitions": {

@@ -36,7 +36,7 @@ fn open_main(cx: &mut App) {
     let num = |k: &str, d: f32| window_setting(k).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(d);
     let lights = window_setting("traffic_lights");
     let light = |k: &str, d: f32| lights.as_ref().and_then(|l| l.get(k)).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(d);
-    let title = window_setting("title").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| "a.box".into());
+    let title = window_setting("title").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| "Turtwig".into());
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some(title.into()),

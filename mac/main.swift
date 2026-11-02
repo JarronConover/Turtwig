@@ -3,7 +3,7 @@ import Carbon.HIToolbox
 import UserNotifications
 import WebKit
 
-// Agent Box: a thin native shell drawn like super.engineering. The sidebar and
+// Turtwig: a thin native shell drawn like super.engineering. The sidebar and
 // the main chrome (toolbar, tab strip, branch bar, terminal tabs) are pages the
 // box's dashboard serves; the chat (claude.ai) and the terminal (the box's
 // ttyd) are native web views placed over holes the main page reports.
@@ -12,7 +12,7 @@ import WebKit
 let sshHost = UserDefaults.standard.string(forKey: "sshHost") ?? "coder.tj-agents"
 let dashPort = 18790
 let ttyPort = 18791
-let agentBoxDir = (NSHomeDirectory() as NSString).appendingPathComponent("dev/agent-box")
+let agentBoxDir = (NSHomeDirectory() as NSString).appendingPathComponent("dev/turtwig")
 let sidebarWidth: CGFloat = 339
 let chromeColor = NSColor(srgbRed: 0x21 / 255, green: 0x21 / 255, blue: 0x22 / 255, alpha: 1)
 let cardColor = NSColor(srgbRed: 0x1e / 255, green: 0x1e / 255, blue: 0x1f / 255, alpha: 1)
@@ -118,12 +118,12 @@ final class Shell: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMe
             backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.title = "Agent Box"
+        window.title = "Turtwig"
         window.backgroundColor = chromeColor
         window.minSize = NSSize(width: 900, height: 560)
         window.contentView = root
         window.delegate = self
-        window.setFrameAutosaveName("AgentBoxWindow")
+        window.setFrameAutosaveName("TurtwigWindow")
         if window.frame.width < 600 { window.center() }
         window.makeKeyAndOrderFront(nil)
         layout()
@@ -417,7 +417,7 @@ final class Shell: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMe
         NSApp.dockTile.badgeLabel = needs > 0 ? "\(needs)" : nil
         if needs > lastNeeds {
             let content = UNMutableNotificationContent()
-            content.title = "Agent Box"
+            content.title = "Turtwig"
             content.body = needs == 1 ? "1 thing needs you" : "\(needs) things need you"
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
@@ -460,7 +460,7 @@ final class Shell: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMe
         let menu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Quit Agent Box", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit Turtwig", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         menu.addItem(appItem)
 

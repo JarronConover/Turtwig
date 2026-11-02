@@ -74,7 +74,7 @@ wip_key() {
   printf '%s/%s' "$(basename "${origin%.git}")" "$(printf '%s' "$branch" | tr '/' '~')"
 }
 
-# Is this session id a registry chat that a.box runs on this machine? (Chats imported
+# Is this session id a registry chat that Turtwig runs on this machine? (Chats imported
 # from super.engineering and not started here are left alone.)
 own_chat() {
   local f="$AGENT_STATE_DIR/registry/chats/$1.json"

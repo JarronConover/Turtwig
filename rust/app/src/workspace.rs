@@ -33,7 +33,7 @@ thread_local! {
     static MENU_KEYS: std::cell::RefCell<HashSet<(String, String)>> = std::cell::RefCell::new(HashSet::new());
 }
 
-/** The a.box menu when settings give no `menu_bar.app_menu`: Settings, Command Palette, `menu_bar.app`, Quit. */
+/** The Turtwig menu when settings give no `menu_bar.app_menu`: Settings, Command Palette, `menu_bar.app`, Quit. */
 fn default_app_menu() -> Value {
     json!([
         {"id": "settings", "label": "{{ .settings.strings.menu_settings // \"Settings…\" }}", "do": "settings.open"},
@@ -45,9 +45,9 @@ fn default_app_menu() -> Value {
 }
 
 /** Settings `menu_bar` with each item's `if`, `label`, `checked`, `disabled` and `shortcut` worked out
-against the context: `[{name, items}]`, the a.box menu first. `do` stays as written (it runs at click time). */
+against the context: `[{name, items}]`, the Turtwig menu first. `do` stays as written (it runs at click time). */
 pub(crate) fn resolve_menus(settings: &Settings, exprs: &crate::ui::expr::Exprs, ctx: &Val) -> Value {
-    let app_name = settings.text("app_name", "a.box");
+    let app_name = settings.text("app_name", "Turtwig");
     fn items(list: &[Value], settings: &Settings, exprs: &crate::ui::expr::Exprs, ctx: &Val, app_name: &str, path: &str) -> Vec<Value> {
         let mut out = vec![];
         for (i, it) in list.iter().enumerate() {
@@ -324,7 +324,7 @@ pub struct Workspace {
     /** Each composer's misspelled words (`chat.spellcheck`), a count that lets only the latest check land, and
     the text the words' offsets are in. */
     spelling: HashMap<String, (Vec<std::ops::Range<usize>>, u64, String)>,
-    /** Words "Ignore spelling" took out of the marks until a.box quits. */
+    /** Words "Ignore spelling" took out of the marks until Turtwig quits. */
     spell_ignored: HashSet<String>,
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
     term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
@@ -478,7 +478,7 @@ impl Workspace {
             let Ok(every) = every else { break };
             cx.background_executor().timer(Duration::from_secs_f64(every)).await;
         });
-        // `app.auto_update`: pull a.box's main from its remote and rebuild what changed (the daemon, the app);
+        // `app.auto_update`: pull Turtwig's main from its remote and rebuild what changed (the daemon, the app);
         // a new app build restarts the app. So a change pushed from the box ships to the Mac on its own.
         let update_loop = cx.spawn(async move |this, cx| loop {
             let plan = this.update(cx, |ws, _| {
@@ -549,7 +549,7 @@ impl Workspace {
         let mut transcripts: HashMap<String, Transcript> = HashMap::new();
         transcripts.entry(crate::designer::CHAT_ID.into()).or_default().append(0, &crate::designer::past_entries());
         let mut user_state = load_state();
-        // A fresh install opens the setup guide (the Setup component); the palette's "Set up a.box" reopens it.
+        // A fresh install opens the setup guide (the Setup component); the palette's "Set up Turtwig" reopens it.
         if fresh && !user_state.contains_key("setup_step") {
             user_state.insert("setup_step".into(), json!("welcome"));
             let _ = std::fs::write(settings::dir().join("ui-state.json"), serde_json::to_string_pretty(&user_state).unwrap_or_default());
@@ -848,7 +848,7 @@ impl Workspace {
 
     /** Settings `window` again after a reload: the title and the component kit's appearance. */
     fn apply_window_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let title = self.settings.text_at("window.title", "a.box");
+        let title = self.settings.text_at("window.title", "Turtwig");
         window.set_window_title(&title);
         apply_appearance(&self.settings, window.appearance(), cx);
     }
@@ -2198,7 +2198,7 @@ impl Workspace {
         crate::behavior::path_env(&list, &home)
     }
 
-    /** The folder of a.box's scripts (`app.bin_dir`, else `bin` in `app.source_dir`). */
+    /** The folder of Turtwig's scripts (`app.bin_dir`, else `bin` in `app.source_dir`). */
     pub(crate) fn bin_dir(&self) -> std::path::PathBuf {
         match self.settings.get("app.bin_dir").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             Some(d) => crate::script::expand(d).into(),
@@ -3444,7 +3444,7 @@ impl Workspace {
         }
     }
 
-    /** The dialog (settings `chat.takeover`) before a.box takes a chat over from the program running it. */
+    /** The dialog (settings `chat.takeover`) before Turtwig takes a chat over from the program running it. */
     pub(crate) fn takeover_confirm(&self, name: &str, then: Value) -> Value {
         let t = self.settings.chat.get("takeover").cloned().unwrap_or(Value::Null);
         let s = |k: &str, d: &str| t.get(k).and_then(Value::as_str).unwrap_or(d).replace("{name}", name);
@@ -3454,7 +3454,7 @@ impl Workspace {
         json!({
             "do": "confirm",
             "title": s("title", "Take over “{name}”?"),
-            "text": s("text", "It's running in super.engineering. a.box will close it there and continue the same conversation here."),
+            "text": s("text", "It's running in super.engineering. Turtwig will close it there and continue the same conversation here."),
             "confirm": s("confirm_label", "Take it over"),
             "cancel": s("cancel_label", "Not now"),
             "then": then
@@ -5732,7 +5732,7 @@ const DEFAULT_PATH: &[&str] = &["~/.local/bin", "~/.cargo/bin", "~/.super.engine
 /** One auto-update check in the source checkout (`app.source_dir`, as $AGENT_BOX_SOURCE): fast-forward to origin/main when the checkout is clean, then
 rebuild and restart the daemon if its code changed and bundle the app if the app's did. Prints "updated"
 and what it rebuilt ("daemon", "app"), or nothing. */
-const UPDATE_SCRIPT: &str = r#"cd "${AGENT_BOX_SOURCE:-$HOME/dev/agent-box}" || exit 0
+const UPDATE_SCRIPT: &str = r#"cd "${AGENT_BOX_SOURCE:-$HOME/dev/turtwig}" || exit 0
 export PATH="$HOME/.cargo/bin:$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 git fetch -q origin main 2>/dev/null || exit 0
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && exit 0
@@ -5751,7 +5751,7 @@ fi
 echo "updated$what""#;
 
 /** After an update rebuilt the app: start the new build (`app.restart_command`). */
-const RESTART_COMMAND: &str = "sleep 1; open \"$HOME/Applications/a.box.app\"";
+const RESTART_COMMAND: &str = "sleep 1; open \"$HOME/Applications/Turtwig.app\"";
 
 /** Refreshes Claude Code's plan-usage cache from its OAuth endpoint (the token stays in the keychain). */
 const PLAN_COMMAND: &str = r#"token=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])' 2>/dev/null); [ -n "$token" ] && out=$(/usr/bin/curl -sS -m 10 https://api.anthropic.com/api/oauth/usage -H "Authorization: Bearer $token" -H "anthropic-beta: oauth-2025-04-20") && printf '%s' "$out" | grep -q '"limits"' && printf '%s' "$out" > "$HOME/.claude/oauth-usage-cache.json""#;

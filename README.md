@@ -1,4 +1,4 @@
-# a.box
+# Turtwig
 
 A Mac app for running Claude Code and Codex chats, on the Mac and on an
 always-on Coder workspace (the box), plus the tooling both machines share.
@@ -24,19 +24,19 @@ always-on Coder workspace (the box), plus the tooling both machines share.
    row. How tasks map to worktrees, and how they're shown, is up to your
    settings.
 5. **Ships as source.** The app builds from its own git checkout and updates
-   and rebuilds itself. Agents can change a.box's own code, not just its
+   and rebuilds itself. Agents can change Turtwig's own code, not just its
    settings.
 
 ## Install on a Mac
 
 ```bash
-git clone git@gitlab.com:tj15/a.box.git ~/dev/agent-box
-~/dev/agent-box/bin/install
+git clone git@github.com:JarronConover/Turtwig.git ~/dev/turtwig
+~/dev/turtwig/bin/install
 ```
 
 It needs Rust (`bin/install` says how to get it). The app opens on a setup
 guide: your agents, an optional Coder workspace to run chats on (it installs
-a.box there for you), and a private repo for backups. "Set up a.box…" in the
+Turtwig there for you), and a private repo for backups. "Set up Turtwig…" in the
 command palette (⌘K) brings the guide back; `bin/setup` is what it runs.
 
 ## Branches
@@ -109,6 +109,6 @@ all over the same state:
 The setup guide does this for you; by hand:
 
 ```bash
-git clone https://gitlab.com/tj15/a.box.git ~/agent-box
+git clone https://github.com/JarronConover/Turtwig.git ~/agent-box
 ~/agent-box/bin/boot --force
 ```

@@ -80,7 +80,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("composer.edit", "{chat?, op: cut | copy | paste | select_all}: what those keys do in a chat's message box (its right-click menu, `chat.composer_menu`)"),
     ("composer.menu", "{chat?, at?}: open the message box's right-click menu (`chat.composer_menu`), with the caret at byte offset `at` first"),
     ("spelling.correct", "{chat?, from, to, text}: replace the misspelled word at from..to (byte offsets, as `.spelling` gives them) with text"),
-    ("spelling.learn / spelling.ignore", "{word}: add a word to the Mac's dictionary, or stop marking it until a.box quits"),
+    ("spelling.learn / spelling.ignore", "{word}: add a word to the Mac's dictionary, or stop marking it until Turtwig quits"),
     ("composer.recall", "{chat?, by?: -1 | 1}: put an earlier message you sent back in the box (-1 older, 1 newer; past the newest empties it)"),
     ("focus", "{area: composer | terminal | none, chat?}: put typing in a chat's message box or the selected worktree's terminal"),
     ("chat.attach_clipboard", "{chat?}: attach the files or image on the clipboard to a chat"),
@@ -117,7 +117,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
 
 /** A one-shot local Claude Code run in the settings folder; it may only read and edit files there
 (`settings_agent.command`: `{dir}` is the settings folder, `{claude}` designer.claude, $REQUEST the request). */
-const SETTINGS_AGENT: &str = r#"cd {dir} && {claude} -p "You are customizing the a.box app for its user. Read SETTINGS.md in this folder first: it documents every setting and holds the full defaults. Then edit settings.jsonc (only that file) to do what the user asks, keeping their existing overrides. The app reloads on save; problems show up in its settings panel, so keep the file valid JSON with comments. When done, reply with one short sentence saying what you changed. The user's request: $REQUEST" --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep --settings '{"disableAllHooks": true}' 2>&1 | tail -n 1"#;
+const SETTINGS_AGENT: &str = r#"cd {dir} && {claude} -p "You are customizing the Turtwig app for its user. Read SETTINGS.md in this folder first: it documents every setting and holds the full defaults. Then edit settings.jsonc (only that file) to do what the user asks, keeping their existing overrides. The app reloads on save; problems show up in its settings panel, so keep the file valid JSON with comments. When done, reply with one short sentence saying what you changed. The user's request: $REQUEST" --permission-mode acceptEdits --allowedTools Read Edit Write Glob Grep --settings '{"disableAllHooks": true}' 2>&1 | tail -n 1"#;
 
 impl Workspace {
     /** The worktree listed after `target` in its list, skipping `moving`; None when `target` is last. */
@@ -1181,7 +1181,7 @@ impl Workspace {
             "notify.system" => {
                 self.notify_count += 1;
                 let id = format!("{}#{}", s("chat").unwrap_or_default(), self.notify_count);
-                let title = s("title").unwrap_or_else(|| self.tr("app_name", "a.box", &[]));
+                let title = s("title").unwrap_or_else(|| self.tr("app_name", "Turtwig", &[]));
                 let text = s("text").unwrap_or_default();
                 // sound: true/absent (the default sound), false (none), or a sound's name.
                 let sound = match a.get("sound") {

@@ -451,7 +451,7 @@ def wip_restore(directory, host, fresh=False, incoming=False):
     # A worktree this machine handed off keeps the work it had then; stash that (recoverable, never
     # dropped) so the other machine's newer work can land.
     if not fresh and run(["git", "-C", str(directory), "status", "--porcelain"], check=False, capture_output=True).stdout.strip():
-        run(["git", "-C", str(directory), "stash", "push", "-q", "-u", "-m", f"a.box: before restoring the {label(host)}'s work"], check=False)
+        run(["git", "-C", str(directory), "stash", "push", "-q", "-u", "-m", f"Turtwig: before restoring the {label(host)}'s work"], check=False)
         print(f"stashed {directory}'s local changes (git stash list) before restoring the {label(host)}'s work", file=sys.stderr)
     args = [str(Path(__file__).parent / "wip-restore")] + (["--fresh"] if fresh else []) + [str(directory), "--from", host]
     if incoming:
@@ -466,7 +466,7 @@ def wip_restore(directory, host, fresh=False, incoming=False):
 
 def agent_bin(name):
     # A host's `agent_bin_dirs` come first (on the Mac, super.engineering's `claude` wrapper is first on
-    # PATH; a.box runs the CLI itself).
+    # PATH; Turtwig runs the CLI itself).
     for d in abxcfg.host().get("agent_bin_dirs") or []:
         real = Path(abxcfg.expand(d)) / name
         if real.exists():
@@ -476,7 +476,7 @@ def agent_bin(name):
 
 def session_pids(chat):
     """Processes of the chat's agent (its `process_names`, and their wrappers) running its session outside
-    a.box: `process_session_pattern`'s group 1 is the session id."""
+    Turtwig: `process_session_pattern`'s group 1 is the session id."""
     agent = agent_def(chat)
     session = session_of(chat)
     names = agent.get("process_names") or []
@@ -537,11 +537,11 @@ def close_in_super_engineering(chat):
 
 
 def stop_elsewhere(chat):
-    """Stop whatever else runs this session (super.engineering, usually) before a.box resumes it, so
+    """Stop whatever else runs this session (super.engineering, usually) before Turtwig resumes it, so
     two processes never share one session. Exits if it won't stop."""
     if not agent_def(chat).get("stop_elsewhere"):
         return
-    # A process a.box just stopped takes a moment to exit.
+    # A process Turtwig just stopped takes a moment to exit.
     deadline = time.time() + option("stop_elsewhere_wait_secs", 5)
     while time.time() < deadline and session_pids(chat):
         time.sleep(0.5)
@@ -972,7 +972,7 @@ def release_all(chats, dirs=()):
         if tmux_alive(tmux_name(chat)):
             run(["tmux", "kill-session", "-t", tmux_name(chat)], check=False)
     for chat in chats:
-        # a.box's own process first, so only another program's copy (super.engineering) is left to stop.
+        # Turtwig's own process first, so only another program's copy (super.engineering) is left to stop.
         stop_elsewhere(chat)
         if chat.get("branch") and chat.get("dir"):
             queue_snapshot(chat["dir"])

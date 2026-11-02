@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import super.engineering's sidebar and chats into a.box's own Mac store, once
+"""Import super.engineering's sidebar and chats into Turtwig's own Mac store, once
 (re-runnable). Run on the Mac.
 
 Sections (names, order, collapsed), worktree titles and order, and section
@@ -7,7 +7,7 @@ membership go into sc-mac.json through the shim, keyed by the real worktree
 paths; nothing is copied. Every Claude conversation super.engineering knows
 becomes a registry chat on host mac with its real session id and its worktree
 as dir: "stopped" when super.engineering has it open, "archived" (History only)
-otherwise. Transcripts stay where they are. A chat a.box has started since is
+otherwise. Transcripts stay where they are. A chat Turtwig has started since is
 left alone.
 """
 
@@ -175,7 +175,7 @@ def import_chats(chat, items, dry_run):
         if cur and not (cur.get("imported_from") == "super.engineering" and cur.get("host") == "mac"
                         and cur.get("status") in ("stopped", "archived")) and not (
                 cur.get("host") == "box" and cur.get("status") == "archived"):
-            kept.append((e["name"], f"already a.box's ({cur.get('host')}, {cur.get('status')})"))
+            kept.append((e["name"], f"already Turtwig's ({cur.get('host')}, {cur.get('status')})"))
             continue
         if cur and {k: cur.get(k) for k in ("name", "dir", "status")} == {k: e[k] for k in ("name", "dir", "status")}:
             continue

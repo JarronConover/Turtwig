@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""a.box's configuration, for every script on this machine: the app's `daemon` settings as the daemon last
+"""Turtwig's configuration, for every script on this machine: the app's `daemon` settings as the daemon last
 saved them (~/.agent-box/config.json; AGENT_BOX_OPTIONS, a JSON object, overrides them for one run), over
 built-in defaults that reproduce the original setup (a Coder workspace "box" and a "mac").
 
@@ -84,7 +84,7 @@ HOSTS = {
         "agent_bin_dirs": [], "boot": BOX_BOOT,
     },
     "mac": {
-        "label": "Mac", "detect": {"os": "darwin"}, "ssh": None, "agent_box_dir": "~/dev/agent-box",
+        "label": "Mac", "detect": {"os": "darwin"}, "ssh": None, "agent_box_dir": "~/dev/turtwig",
         "sc_store": "sc-mac.json", "supervise": False, "relay_app_actions": False, "sync_transcripts": "registry",
         "stacks": True, "foreign_sessions": True, "build_unwatched": False, "env": {}, "agent_env": {},
         "claude_settings": {}, "agent_bin_dirs": ["~/.local/bin"], "boot": {},

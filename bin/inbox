@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""inbox: post to and read the a.box inbox from a shell, on any machine (the app shows every machine's items as
+"""inbox: post to and read the Turtwig inbox from a shell, on any machine (the app shows every machine's items as
 one list; see `.inbox` in SETTINGS.md).
 
   inbox post TITLE [--text T] [--chat ID] [--source S] [--key K] [--force]

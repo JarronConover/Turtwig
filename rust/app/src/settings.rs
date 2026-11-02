@@ -128,7 +128,7 @@ pub fn path() -> PathBuf {
     dir().join("settings.jsonc")
 }
 
-/** a.box's source checkout: `AGENT_BOX_SOURCE`, else `app.source_dir` from the user's file or the
+/** Turtwig's source checkout: `AGENT_BOX_SOURCE`, else `app.source_dir` from the user's file or the
 built-in defaults (read before the merged settings exist, since the live defaults live there). */
 pub fn source_dir() -> PathBuf {
     if let Ok(p) = std::env::var("AGENT_BOX_SOURCE") {
@@ -138,7 +138,7 @@ pub fn source_dir() -> PathBuf {
     }
     let from = |text: &str| serde_json_lenient::from_str::<Value>(text).ok().and_then(|v| v.pointer("/app/source_dir").and_then(Value::as_str).map(str::to_string));
     let user = std::fs::read_to_string(path()).ok().and_then(|t| from(&t));
-    let dir = user.or_else(|| from(DEFAULTS)).unwrap_or_else(|| "~/dev/agent-box".into());
+    let dir = user.or_else(|| from(DEFAULTS)).unwrap_or_else(|| "~/dev/turtwig".into());
     PathBuf::from(crate::script::expand(&dir))
 }
 

@@ -1,4 +1,4 @@
-/*! Wire protocol between `agent-boxd` and the a.box app: newline-delimited JSON over ssh.
+/*! Wire protocol between `agent-boxd` and the Turtwig app: newline-delimited JSON over ssh.
 Requests get a `Response` with the same `id`; the daemon pushes `Event`s at any time. */
 
 use serde::{Deserialize, Serialize};
@@ -352,7 +352,7 @@ pub struct Worktree {
     /** The machine it's on: a host id (the daemon's `hosts`; originally "box" or "mac"). */
     #[serde(default = "default_host")]
     pub host: String,
-    /** Made outside a.box and super.engineering (by hand with `git worktree add`, or another tool). */
+    /** Made outside Turtwig and super.engineering (by hand with `git worktree add`, or another tool). */
     #[serde(default)]
     pub external: bool,
     /** The branch it targets (`WorktreeSetTarget`), when one was set. */

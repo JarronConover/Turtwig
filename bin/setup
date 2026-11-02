@@ -2,8 +2,8 @@
 """What the app's setup guide checks and does, each printing one JSON object.
 
   setup check                 the agents, tools and machines it can see
-  setup box HOST              can it reach HOST over ssh, and is a.box there
-  setup box-install HOST      clone (or update) a.box on HOST and boot it
+  setup box HOST              can it reach HOST over ssh, and is Turtwig there
+  setup box-install HOST      clone (or update) Turtwig on HOST and boot it
   setup backup-create [NAME]  a private GitLab project for the backups (glab), or the one already made
   setup backup-check URL      can it read URL
   setup finish                boot this machine (hooks, state clones)
@@ -106,7 +106,7 @@ def backup_create(name="agent-box-state"):
             p = glab_api(f"projects/{user}%2F{name}")
         except RuntimeError:
             p = glab_api("-X", "POST", "projects", "-f", f"name={name}", "-f", f"path={name}", "-f", "visibility=private",
-                         "-f", "description=a.box backups: chats, settings and uncommitted work (keep private)")
+                         "-f", "description=Turtwig backups: chats, settings and uncommitted work (keep private)")
             # GitLab protects the first branch pushed (a machine's sessions branch, which every backup
             # force-pushes) unless a rule already covers it.
             glab_api("-X", "POST", f"projects/{p['id']}/protected_branches", "-f", "name=sessions/*",

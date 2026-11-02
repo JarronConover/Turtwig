@@ -28,7 +28,7 @@ fn bundled() -> bool {
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "AgentBoxNotificationDelegate"]
+    #[name = "TurtwigNotificationDelegate"]
     struct Delegate;
 
     unsafe impl NSObjectProtocol for Delegate {}

@@ -27,7 +27,7 @@ STORE = STATE_DIR / abxcfg.host()["sc_store"]
 CHAT = Path(__file__).resolve().parent.parent / "bin" / "chat"
 REPOS = {k: p for k in abxcfg.repos() if (p := abxcfg.primary(k))}
 WORKSPACE = "box"
-# Worktrees a.box (its worktree folders) or a foreign tool (super.engineering) made; any other is "external".
+# Worktrees Turtwig (its worktree folders) or a foreign tool (super.engineering) made; any other is "external".
 _FOREIGN = [Path(abxcfg.expand(b)) for b in (abxcfg.foreign_tools() or {}).get("managed_bases") or []]
 MANAGED_BASES = {repo: [abxcfg.worktrees_base(repo)] + _FOREIGN for repo in REPOS}
 BUILT_IN = [
@@ -167,7 +167,7 @@ def workspace_list(args):
         for sec in s.data["sections"]:
             secs.append({"id": sec["section_id"], "kind": "worktrees", "name": sec["name"],
                          "items": [i for i in its if i["section"] == sec["section_id"]]})
-    out("workspaces", {"workspaces": [{"id": WORKSPACE, "title": "a.box", "selected": True, "sections": secs}]})
+    out("workspaces", {"workspaces": [{"id": WORKSPACE, "title": "Turtwig", "selected": True, "sections": secs}]})
 
 
 def section_cmd(args):

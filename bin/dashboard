@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dashboard server for the Agent Box app: the sidebar (worktrees grouped into
+"""Dashboard server for the Turtwig app: the sidebar (worktrees grouped into
 projects and feature sections, with their chats and MR/CI status) as JSON, the
 app's pages, and a small HTTP API over the same `chat` and `sc` commands the
 agents use. Listens on localhost only; the Mac app reaches it through an ssh

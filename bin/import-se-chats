@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Copy recent super.engineering Claude chats to the box, so a.box lists them
+"""Copy recent super.engineering Claude chats to the box, so Turtwig lists them
 and `claude --resume` there keeps their full context. Run on the Mac.
 
-This makes copies on the box, which then diverge from the Mac's chats. a.box
+This makes copies on the box, which then diverge from the Mac's chats. Turtwig
 shows and drives the Mac's own super.engineering chats in place (agent-boxd
 in Mac mode), so use this only to hand chats over to the box for good.
 
 Each chat lands in the box's checkout of the same repo; a chat that was on a
 branch that exists on the remote gets that branch's worktree on the box (made
 by bin/chat's ensure_worktree, so wt for redo). Imported chats are registered
-stopped: nothing starts until TJ starts one from a.box. Safe to re-run: chats
+stopped: nothing starts until TJ starts one from Turtwig. Safe to re-run: chats
 already in the registry keep their entry, and a transcript the box has since
 continued is never overwritten.
 """
@@ -35,7 +35,7 @@ PROJECTS = HOME / ".claude" / "projects"
 BOX_HOME = "/home/coder"
 REPO_NAMES = {"redo": "redo", "redotech-internal-tools": "internal-tools", "redo-data": "redo-data"}
 DEFAULT_BRANCHES = {"", "HEAD", "main", "master"}
-# The a.box chats themselves; this script's own session is skipped too.
+# The Turtwig chats themselves; this script's own session is skipped too.
 SKIP_TITLE = re.compile(r"agent.?box|a\.box", re.I)
 
 
@@ -192,7 +192,7 @@ def main():
         chat_id, title = path.stem, title or path.stem[:8]
         ids = sessions | {conv_id, conv_id.removeprefix("conv:claude:")}
         if any(i.startswith(s) for i in ids for s in args.skip) or SKIP_TITLE.search(title):
-            skipped.append((title, "a.box session"))
+            skipped.append((title, "Turtwig session"))
             continue
         if prompts < args.min_prompts:
             skipped.append((title, f"{prompts} prompt(s)"))

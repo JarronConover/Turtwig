@@ -1,4 +1,4 @@
-/*! agent-boxd: the a.box app's daemon, one on each host (the box, the Mac, any other in `hosts`).
+/*! agent-boxd: the Turtwig app's daemon, one on each host (the box, the Mac, any other in `hosts`).
 `run` serves the app's protocol on a unix socket, `connect` relays stdio to it, `hook` logs Claude Code hooks, `inbox` posts to and reads this host's inbox. */
 
 mod agents;

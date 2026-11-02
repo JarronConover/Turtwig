@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""abx: look at and drive the running a.box app from a shell (for agents and for debugging).
+"""abx: look at and drive the running Turtwig app from a shell (for agents and for debugging).
 
   abx state [PATH]        the app's live state (inspect.json); PATH like context.selected.chat.name
   abx layout [ID]         where nodes with ids are drawn (x, y, w, h); filter by id substring
@@ -158,7 +158,7 @@ def main(argv):
     elif cmd == "settings":
         print(DIR / "settings.jsonc")
     elif cmd == "defaults":
-        print(os.environ.get("AGENT_BOX_DEFAULTS", Path.home() / "dev/agent-box/rust/app/default-settings.jsonc"))
+        print(os.environ.get("AGENT_BOX_DEFAULTS", Path.home() / "dev/turtwig/rust/app/default-settings.jsonc"))
     else:
         print(__doc__, file=sys.stderr)
         return 2

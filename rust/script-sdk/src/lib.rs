@@ -1,4 +1,4 @@
-/*! What an a.box script (`scripts/NAME.rs` with a `fn init()`, compiled to WebAssembly) uses to reach the
+/*! What a Turtwig script (`scripts/NAME.rs` with a `fn init()`, compiled to WebAssembly) uses to reach the
 app: every call becomes a JSON message to the app, or a reply coming back. See SETTINGS.md, Scripts. */
 
 pub use serde_json::{self, json, Value};

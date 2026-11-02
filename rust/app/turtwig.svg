@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eaf7ec"/>
+      <stop offset="1" stop-color="#bfe3cc"/>
+    </linearGradient>
+    <radialGradient id="shell" cx="0.4" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#c9955f"/>
+      <stop offset="0.6" stop-color="#9a6a3c"/>
+      <stop offset="1" stop-color="#6f4a28"/>
+    </radialGradient>
+    <radialGradient id="head" cx="0.38" cy="0.3" r="0.85">
+      <stop offset="0" stop-color="#c6f0a3"/>
+      <stop offset="0.55" stop-color="#8fd56a"/>
+      <stop offset="1" stop-color="#5fae45"/>
+    </radialGradient>
+    <radialGradient id="jaw" cx="0.5" cy="0.2" r="0.9">
+      <stop offset="0" stop-color="#fff0a8"/>
+      <stop offset="1" stop-color="#f0c94a"/>
+    </radialGradient>
+    <linearGradient id="leaf" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a6e083"/>
+      <stop offset="1" stop-color="#4f9e3a"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.15"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+    <filter id="blur8" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <clipPath id="headClip"><circle cx="512" cy="500" r="262"/></clipPath>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- shadow under the figure -->
+  <ellipse cx="512" cy="850" rx="320" ry="55" fill="#2a4a2e" opacity="0.28" filter="url(#soft)"/>
+
+  <!-- shell -->
+  <ellipse cx="512" cy="600" rx="340" ry="250" fill="url(#shell)"/>
+  <ellipse cx="512" cy="600" rx="340" ry="250" fill="none" stroke="url(#rim)" stroke-width="6"/>
+  <ellipse cx="512" cy="600" rx="290" ry="205" fill="none" stroke="#5a3a1e" stroke-opacity="0.35" stroke-width="12"/>
+  <ellipse cx="330" cy="470" rx="90" ry="40" fill="url(#sheen)" opacity="0.7" transform="rotate(-55 330 470)"/>
+
+  <!-- sprout -->
+  <path d="M512 250 C520 200 508 160 522 110" fill="none" stroke="#7a5230" stroke-width="22" stroke-linecap="round"/>
+  <path d="M522 112 C560 60 640 70 650 118 C600 150 548 150 522 112 Z" fill="url(#leaf)"/>
+  <path d="M522 112 C480 62 405 78 398 126 C448 154 498 148 522 112 Z" fill="url(#leaf)"/>
+  <path d="M522 112 C560 60 640 70 650 118 C600 150 548 150 522 112 Z" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="4"/>
+  <path d="M522 112 C480 62 405 78 398 126 C448 154 498 148 522 112 Z" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="4"/>
+
+  <!-- head -->
+  <circle cx="512" cy="500" r="262" fill="url(#head)"/>
+  <g clip-path="url(#headClip)">
+    <ellipse cx="512" cy="660" rx="230" ry="130" fill="url(#jaw)"/>
+    <path d="M300 612 Q512 560 724 612" fill="none" stroke="#3f7a2f" stroke-opacity="0.35" stroke-width="8" stroke-linecap="round"/>
+  </g>
+  <circle cx="512" cy="500" r="262" fill="none" stroke="url(#rim)" stroke-width="7"/>
+
+  <!-- glass highlights -->
+  <g clip-path="url(#headClip)"><ellipse cx="400" cy="340" rx="150" ry="95" fill="url(#sheen)" transform="rotate(-25 400 340)"/></g>
+  <ellipse cx="640" cy="690" rx="70" ry="28" fill="#ffffff" opacity="0.35" filter="url(#blur8)"/>
+
+  <!-- eyes -->
+  <ellipse cx="420" cy="480" rx="44" ry="62" fill="#1d2b1c"/>
+  <ellipse cx="604" cy="480" rx="44" ry="62" fill="#1d2b1c"/>
+  <circle cx="436" cy="458" r="16" fill="#ffffff" opacity="0.95"/>
+  <circle cx="620" cy="458" r="16" fill="#ffffff" opacity="0.95"/>
+  <circle cx="410" cy="505" r="7" fill="#ffffff" opacity="0.5"/>
+  <circle cx="594" cy="505" r="7" fill="#ffffff" opacity="0.5"/>
+
+  <!-- mouth -->
+  <path d="M470 585 Q512 612 554 585" fill="none" stroke="#1d2b1c" stroke-opacity="0.7" stroke-width="9" stroke-linecap="round"/>
+</svg>
