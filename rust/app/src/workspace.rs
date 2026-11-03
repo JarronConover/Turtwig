@@ -471,6 +471,10 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The window keeps the workspace as drawn until it changes (see main.rs `Shell`): every update
+        // of it draws it again, notified or not.
+        let me = cx.entity_id();
+        cx.redraw_on_update(me);
         let fresh = !settings::path().exists();
         let (settings, settings_error) = match settings::load() {
             Ok(s) => (s, None),
@@ -790,6 +794,15 @@ impl Workspace {
             let name = host.clone();
             let listen = cx.spawn_in(window, async move |this, cx| {
                 while let Ok(msg) = incoming.recv_async().await {
+                    // Terminal output goes straight to its terminal: the workspace only reads which one
+                    // (an update of it would draw it again).
+                    if let Incoming::Event(Event::TermOutput { term_id, data }) = &msg {
+                        let Ok(t) = this.read_with(cx, |ws, _| ws.term_by_id.get(&(name.clone(), *term_id)).cloned()) else { break };
+                        if let Some(t) = t {
+                            let _ = cx.update(|_, cx| t.update(cx, |t, cx| t.output(data, cx)));
+                        }
+                        continue;
+                    }
                     if this.update_in(cx, |ws, window, cx| ws.on_incoming(&name, msg, window, cx)).is_err() {
                         break;
                     }

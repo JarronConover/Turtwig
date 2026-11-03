@@ -18,3 +18,4 @@ codegen-units = 4
 # gpui-base with two textarea changes (vendor/gpui-base/PATCHES.md).
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
+gpui-pre = { path = "vendor/gpui-pre" }
