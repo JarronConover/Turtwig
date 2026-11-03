@@ -136,9 +136,11 @@ dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
+ "flate2",
  "flume 0.11.1",
  "gpui-kit",
  "gpui-pre-platform",
+ "image",
  "imagesize 0.13.0",
  "jaq-core",
  "jaq-json",
@@ -157,6 +159,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_lenient",
+ "smallvec",
  "wasmtime",
 ]
 
@@ -175,6 +178,7 @@ dependencies = [
  "agent-box-protocol",
  "anyhow",
  "base64 0.22.1",
+ "flate2",
  "libc",
  "portable-pty",
  "regex",
@@ -2558,8 +2562,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34f61c1cfd36fc9c436af09308c963822ae27a45a84feb21a77ba5c9e051f1c0"
 dependencies = [
  "accesskit",
  "anyhow",

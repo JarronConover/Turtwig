@@ -996,8 +996,9 @@ fn find_item_id(v: &Value, path: &str) -> Option<String> {
     }
 }
 
-/** `agent-boxd connect`: relay stdio to the daemon, starting it first if needed. */
-pub fn connect() -> anyhow::Result<()> {
+/** `agent-boxd connect`: relay stdio to the daemon, starting it first if needed. With `--zlib` what goes
+out is one zlib stream, flushed after each read (over a slow link a model push shrinks about tenfold). */
+pub fn connect(zlib: bool) -> anyhow::Result<()> {
     config::load();
     let sock = util::socket_path();
     let stream = match UnixStream::connect(&sock) {
@@ -1023,15 +1024,16 @@ pub fn connect() -> anyhow::Result<()> {
         let _ = to_daemon.shutdown(std::net::Shutdown::Write);
     });
     let mut from_daemon = stream;
-    let mut stdout = std::io::stdout().lock();
+    let stdout = std::io::stdout().lock();
+    let mut out: Box<dyn Write> = if zlib { Box::new(flate2::write::ZlibEncoder::new(stdout, flate2::Compression::fast())) } else { Box::new(stdout) };
     let mut buf = [0u8; 65536];
     loop {
         let n = from_daemon.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        stdout.write_all(&buf[..n])?;
-        stdout.flush()?;
+        out.write_all(&buf[..n])?;
+        out.flush()?;
     }
     Ok(())
 }

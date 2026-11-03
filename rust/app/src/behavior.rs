@@ -12,6 +12,8 @@ pub struct HostSpec {
     pub ssh_options: Vec<String>,
     pub retry_secs: u64,
     pub watch_ms: u64,
+    /** Ask the daemon to compress what it sends (`connection.compress`; over ssh only). */
+    pub compress: bool,
 }
 
 fn strings(v: Option<&Value>) -> Option<Vec<String>> {
@@ -32,6 +34,7 @@ pub fn host_specs(raw: &Value) -> Vec<HostSpec> {
     let base_options = strings(base.get("ssh_options")).unwrap_or_else(|| ["-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"].map(String::from).to_vec());
     let base_retry = base.get("retry_seconds").and_then(Value::as_u64).unwrap_or(3);
     let base_watch = base.get("watch_ms").and_then(Value::as_u64).unwrap_or(500);
+    let base_compress = base.get("compress").and_then(Value::as_bool).unwrap_or(true);
     let spec = |name: &str, c: &Value| -> Option<HostSpec> {
         if c.get("enabled").and_then(Value::as_bool) == Some(false) {
             return None;
@@ -44,6 +47,7 @@ pub fn host_specs(raw: &Value) -> Vec<HostSpec> {
             ssh_options: strings(c.get("ssh_options")).unwrap_or_else(|| base_options.clone()),
             retry_secs: c.get("retry_seconds").and_then(Value::as_u64).unwrap_or(base_retry),
             watch_ms: c.get("watch_ms").and_then(Value::as_u64).unwrap_or(base_watch),
+            compress: c.get("compress").and_then(Value::as_bool).unwrap_or(base_compress),
         })
     };
     let mut out: Vec<HostSpec> = vec![];

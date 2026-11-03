@@ -50,10 +50,33 @@ fn open_main(cx: &mut App) {
         app_owns_titlebar_drag: window_setting("native_titlebar").and_then(|v| v.as_bool()) != Some(true),
         ..Default::default()
     };
-    gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| workspace::Workspace::new(window, cx)))
-        .expect("open the main window");
+    gpui_kit::open_window(options, cx, |window, cx| {
+        let ws = cx.new(|cx| workspace::Workspace::new(window, cx));
+        let anim = cx.new(|_| ui::anim::AnimLayer::default());
+        cx.new(|_| Shell { ws, anim })
+    })
+    .expect("open the main window");
     if window_setting("activate_on_start").and_then(|v| v.as_bool()) != Some(false) {
         cx.activate(true);
+    }
+}
+
+/** The window's content: the workspace, drawn again only when it (or something in it) changed, and the
+spinners turning over it. */
+struct Shell {
+    ws: Entity<workspace::Workspace>,
+    anim: Entity<ui::anim::AnimLayer>,
+}
+
+impl Render for Shell {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = std::time::Instant::now();
+        let perf = self.ws.read(cx).perf.clone();
+        let frame_end = canvas(|_, _, _| {}, move |_, _, _, _| perf.borrow_mut().record(started)).absolute().size_0();
+        let mut full = StyleRefinement::default();
+        full.size.width = Some(relative(1.).into());
+        full.size.height = Some(relative(1.).into());
+        div().relative().size_full().child(AnyView::from(self.ws.clone()).cached(full)).child(self.anim.clone()).child(frame_end)
     }
 }
 

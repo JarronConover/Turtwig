@@ -127,6 +127,22 @@ impl Remote {
     }
 }
 
+/** What came in from each machine since launch, by kind (`response` or the event's name): messages and bytes. */
+static TRAFFIC: std::sync::LazyLock<Mutex<std::collections::BTreeMap<String, (u64, u64)>>> = std::sync::LazyLock::new(Default::default);
+
+fn count_traffic(host: &str, line: &str, bytes: usize) {
+    let kind = line.split_once("\"event\":\"").and_then(|(_, r)| r.split_once('"')).map(|(k, _)| k).unwrap_or("response");
+    let host = if host.is_empty() { "local" } else { host };
+    let mut t = TRAFFIC.lock().unwrap();
+    let e = t.entry(format!("{host} {kind}")).or_default();
+    e.0 += 1;
+    e.1 += bytes as u64;
+}
+
+pub fn traffic() -> Value {
+    TRAFFIC.lock().unwrap().iter().map(|(k, (n, b))| (k.clone(), serde_json::json!({"messages": n, "kb": b / 1024}))).collect::<serde_json::Map<_, _>>().into()
+}
+
 fn session(
     spec: &crate::behavior::HostSpec,
     path: &str,
@@ -143,7 +159,8 @@ fn session(
         c
     } else {
         let mut c = Command::new("/usr/bin/ssh");
-        c.arg("-T").args(&spec.ssh_options).args([&spec.ssh_host, &format!("{} connect", spec.daemon)]);
+        let zlib = if spec.compress { " --zlib" } else { "" };
+        c.arg("-T").args(&spec.ssh_options).args([&spec.ssh_host, &format!("{} connect{zlib}", spec.daemon)]);
         c
     };
     let child = cmd
@@ -238,39 +255,45 @@ fn session(
         }
     });
 
-    let mut reader = BufReader::new(stdout);
+    // A daemon too old for --zlib answers in plain JSON lines, which start with `{`; zlib starts otherwise.
+    let mut raw = BufReader::new(stdout);
+    let plain = raw.fill_buf().map(|b| b.first() == Some(&b'{')).unwrap_or(true);
+    let mut reader: Box<dyn BufRead> = if plain { Box::new(raw) } else { Box::new(BufReader::new(flate2::bufread::ZlibDecoder::new(raw))) };
     let mut line = String::new();
     let err = loop {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => break anyhow!("connection closed"),
-            Ok(_) => match serde_json::from_str::<ServerMessage>(&line) {
-                Ok(m) if !answered => {
-                    answered = true;
-                    let _ = in_tx.send(Incoming::Connected);
-                    if let ServerMessage::Event(e) = m {
+            Ok(n) => {
+                count_traffic(&spec.ssh_host, &line, n);
+                match serde_json::from_str::<ServerMessage>(&line) {
+                    Ok(m) if !answered => {
+                        answered = true;
+                        let _ = in_tx.send(Incoming::Connected);
+                        if let ServerMessage::Event(e) = m {
+                            let _ = in_tx.send(Incoming::Event(e));
+                        }
+                    }
+                    Ok(ServerMessage::Response(r)) => {
+                        if let Some(waiter) = pending.lock().unwrap().remove(&r.id) {
+                            let _ = waiter.send(match r.error {
+                                Some(e) => Err(anyhow!(e)),
+                                None => Ok(r.result.unwrap_or(Value::Null)),
+                            });
+                        }
+                    }
+                    Ok(ServerMessage::Event(e)) => {
                         let _ = in_tx.send(Incoming::Event(e));
                     }
-                }
-                Ok(ServerMessage::Response(r)) => {
-                    if let Some(waiter) = pending.lock().unwrap().remove(&r.id) {
-                        let _ = waiter.send(match r.error {
-                            Some(e) => Err(anyhow!(e)),
-                            None => Ok(r.result.unwrap_or(Value::Null)),
-                        });
+                    Err(e) => {
+                        use std::io::Write as _;
+                        let log = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agent-box/remote.log");
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+                            let _ = writeln!(f, "unreadable message from the box ({e}): {}", line.chars().take(300).collect::<String>());
+                        }
                     }
                 }
-                Ok(ServerMessage::Event(e)) => {
-                    let _ = in_tx.send(Incoming::Event(e));
-                }
-                Err(e) => {
-                    use std::io::Write as _;
-                    let log = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agent-box/remote.log");
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
-                        let _ = writeln!(f, "unreadable message from the box ({e}): {}", line.chars().take(300).collect::<String>());
-                    }
-                }
-            },
+            }
             Err(e) => break e.into(),
         }
     };

@@ -42,7 +42,7 @@ struct Look {
     key: String,
     worktree: String,
     base: String,
-    theme: Map<String, Value>,
+    theme: std::rc::Rc<Map<String, Value>>,
     colors: Map<String, Value>,
     add_bg: Hsla,
     del_bg: Hsla,

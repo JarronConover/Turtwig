@@ -524,6 +524,13 @@ impl TerminalView {
         self.focus.is_focused(window)
     }
 
+    /** Lets go of the terminal but leaves its shell running (its tmux session), to attach to again later. */
+    pub fn detach(&self) {
+        if let Some(id) = self.term_id.filter(|id| *id != 0) {
+            self.remote.send(Call::TermClose { term_id: id });
+        }
+    }
+
     /** Closes the terminal and ends its shell (a closed terminal tab). */
     pub fn kill(&self) {
         if let Some(id) = self.term_id.filter(|id| *id != 0) {
