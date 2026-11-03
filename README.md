@@ -104,6 +104,18 @@ all over the same state:
   the Mac's 127.0.0.1:18790): `GET /api` lists the endpoints: sidebar,
   chats, sections (create/rename/delete/assign), worktree delete, terminals.
 
+## Phone
+
+`agent-boxd web` (the box's `agent-box-phone` service) serves `web/phone`, a
+home-screen web app: the sidebar, the inbox, chats (read, send, answer
+question cards, stop) and new chats. It listens on the box's 127.0.0.1:8792
+only, so the way in is Coder's owner-only port forwarding:
+`https://8792--main--<workspace>--<user>.<coder host>` (with Tailscale on,
+where Coder is tailnet-only). Open it in Safari, sign in to Coder, then Share
+› Add to Home Screen. "Turn on notifications" in its inbox subscribes the
+phone to web pushes for new inbox items (`~/.agent-box/phone.json` holds the
+key and subscriptions).
+
 ## Setup on a new box
 
 The setup guide does this for you; by hand:

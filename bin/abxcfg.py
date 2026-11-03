@@ -69,6 +69,7 @@ BOX_BOOT = {
                                          "-t 'theme={\"background\":\"#1e1e1f\",\"foreground\":\"#d6d6d8\",\"cursor\":\"#d6d6d8\",\"selectionBackground\":\"#3a4252\"}' "
                                          "-t disableLeaveAlert=true tmux attach -t 2>&1 | tee -a {agent_home}/log/ttyd.log"},
         {"name": "agent-boxd", "cmd": "{boxd} run 2>&1 | tee -a {agent_home}/log/boxd.log", "build": True},
+        {"name": "agent-box-phone", "cmd": "{boxd} web 2>&1 | tee -a {agent_home}/log/phone.log", "build": True},
     ],
 }
 
@@ -125,6 +126,7 @@ LOGS = {
     "boxd": "~/.agent-box/boxd.log", "agent-box": "~/.agent-box/log/agent-box.log",
     "supervisor": "~/.agent-box/log/supervisor.log", "boxd-build": "~/.agent-box/log/boxd-build.log",
     "dashboard": "~/.agent-box/log/dashboard.log", "ttyd": "~/.agent-box/log/ttyd.log",
+    "phone": "~/.agent-box/log/phone.log",
 }
 
 ENV_PUSH = {

@@ -3077,6 +3077,10 @@
     "events_poll_ms": 250, "events_batch": 500,
     "inbox_post_waiting": true,          // a chat that starts waiting on you posts an inbox item
     "inbox_host": "box",                 // where inbox.post and bin/inbox post (this machine while it's down); every machine's items show as one list
+    // The phone app (`agent-boxd web`, web/phone): its loopback port, reached through Coder's port forwarding; how
+    // often it sends the model, how much tool text it sends, how long an inbox item stays unread before it pushes, and
+    // the push `sub` (null: mailto: the git email).
+    "phone_port": 8792, "phone_model_ms": 1000, "phone_text_max": 1500, "phone_push_delay_secs": 15, "phone_push_subject": null,
     "model_poll_ms": 2000, "model_debounce_ms": 250,
     "transcripts_poll_ms": 300,
     "warm_index_chats": 60,              // newest chats line-indexed at startup
@@ -3203,7 +3207,8 @@
     },
     // Logs log_tail may read.
     "logs": { "boxd": "~/.agent-box/boxd.log", "agent-box": "~/.agent-box/log/agent-box.log", "supervisor": "~/.agent-box/log/supervisor.log",
-              "boxd-build": "~/.agent-box/log/boxd-build.log", "dashboard": "~/.agent-box/log/dashboard.log", "ttyd": "~/.agent-box/log/ttyd.log" },
+              "boxd-build": "~/.agent-box/log/boxd-build.log", "dashboard": "~/.agent-box/log/dashboard.log", "ttyd": "~/.agent-box/log/ttyd.log",
+              "phone": "~/.agent-box/log/phone.log" },
     "log_tail_lines": 200, "hook_events_limit": 1000, "subscribe_replay_max": 1000,
     "app_files": ["inspect.json", "activity.log", "problems.txt", "snapshot.png"],
     "exec_allowed": true,                // the exec call (any shell command on this host)
