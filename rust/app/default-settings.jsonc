@@ -2641,6 +2641,8 @@
     // ---- Waiting chats ----
     // Choices when a waiting chat gives none (a permission prompt); every question shows when there are several.
     "waiting_options": ["Yes", "Yes, don't ask again", "No"], "waiting_all_questions": true,
+    // An SDK chat's permission card: allow once, always allow (when Claude Code offers a rule or mode to keep), deny.
+    "permission_options": ["Allow", "Always allow", "Deny"],
     // A card of several questions sends its answers one key at a time, this far apart (keys sent at once
     // reach the agent as a paste, which its question menu ignores).
     "waiting_key_gap_ms": 300,
@@ -3232,6 +3234,10 @@
       "claude": {
         // --settings showThinkingSummaries: without it Claude Code logs thinking as empty blocks.
         "name": "Claude", "icon": "asterisk", "color": "@claude", "tab_icon": false,
+        // transport "sdk": chats run Claude Code's stream-json mode under the daemon (as VS Code does): messages,
+        // permissions, questions, model and mode are data, and replies stream in. "tui": the CLI in tmux, driven
+        // by keys. permission_mode: what a new SDK chat starts in (default, acceptEdits, plan, auto).
+        "transport": "sdk", "permission_mode": "default",
         "bin": "claude", "session": "assigned", "transcripts": "claude", "trust": "claude", "remote_control": true, "stop_elsewhere": true, "background_keys": ["C-b"],
         "new": ["{bin}", "--session-id", "{id}", "--remote-control", "{name}", "--settings", "{\"showThinkingSummaries\":true}", ["--model", "{model}"], ["{prompt}"]],
         "resume": ["{bin}", "--resume", "{session}", "--remote-control", "{name}", "--settings", "{\"showThinkingSummaries\":true}", ["--model", "{model}"]],

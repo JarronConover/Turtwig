@@ -261,6 +261,8 @@ pub struct Transcript {
     /** The newest prompt: its uuid, its parent's, and where it shows. A next prompt with the same parent
     replaced it (Claude Code took it back unanswered), so it stops showing. */
     last_prompt: Option<(String, Option<String>, Option<usize>)>,
+    /** An SDK chat's reply as it's written: where its items start, and the message so far. */
+    live: Option<(usize, Value)>,
 }
 
 /** Something a chat started that's still running: a background shell or a subagent. */
@@ -301,9 +303,41 @@ impl Transcript {
         }
         for e in entries {
             self.lines += 1;
+            // The file's copy of a reply replaces the live one; a live reply still being written stays last.
+            let live = self.live.take();
+            if let Some((start, _)) = &live {
+                self.truncate_live(*start);
+            }
             self.push_timed(e);
+            let same = live.as_ref().is_some_and(|(_, m)| m.pointer("/message/id").is_some() && m.pointer("/message/id") == e.pointer("/message/id"));
+            if let (Some((_, m)), false) = (live, same) {
+                self.set_live(Some(&m));
+            }
         }
         self.revision += 1;
+    }
+
+    /** Shows (or replaces) the reply an SDK chat is writing, as a transcript entry with `live: true`; None
+    ends it. The file's finished copy takes its place when `append` brings it. */
+    pub fn set_live(&mut self, message: Option<&Value>) {
+        if let Some((start, _)) = self.live.take() {
+            self.truncate_live(start);
+        }
+        if let Some(m) = message {
+            let start = self.items.len();
+            self.push_entry(m);
+            if self.items.len() > start {
+                self.live = Some((start, m.clone()));
+            }
+        }
+        self.revision += 1;
+    }
+
+    fn truncate_live(&mut self, start: usize) {
+        self.items.truncate(start);
+        self.times.retain(|i, _| *i < start);
+        self.tool_index.retain(|_, i| *i < start);
+        self.echoes.retain(|(_, i)| *i < start);
     }
 
     /** Adds a line's items, each message stamped with the line's `timestamp`. */
@@ -875,7 +909,31 @@ mod compaction_tests {
 
 #[cfg(test)]
 mod paging_tests {
-    use super::Transcript;
+    use super::{Item, Transcript};
+
+    #[test]
+    fn a_live_reply_grows_then_gives_way_to_the_files_copy() {
+        let mut t = Transcript::default();
+        t.append(0, &[serde_json::json!({"type": "user", "message": {"role": "user", "content": "hi"}})]);
+        let live = |text: &str| serde_json::json!({"type": "assistant", "live": true, "message": {"id": "m1", "role": "assistant", "model": "claude-x",
+            "content": [{"type": "text", "text": text}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}});
+        t.set_live(Some(&live("Hel")));
+        t.set_live(Some(&live("Hello")));
+        assert_eq!(t.items.len(), 3, "user, live text, live tool");
+        assert!(matches!(&t.items[1], Item::Assistant { text } if text == "Hello"));
+        assert_eq!(t.model.as_deref(), Some("claude-x"));
+        let mut done = live("Hello");
+        done["live"] = serde_json::Value::Null;
+        t.append(1, &[done]);
+        assert_eq!(t.items.len(), 3, "the file's copy replaced the live one");
+        assert!(matches!(&t.items[2], Item::Tool { id, result: None, .. } if id == "t1"));
+        t.append(2, &[serde_json::json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "a b"}]}})]);
+        assert!(matches!(&t.items[2], Item::Tool { result: Some(r), .. } if r == "a b"));
+        t.set_live(Some(&serde_json::json!({"type": "assistant", "live": true, "message": {"id": "m2", "role": "assistant", "content": [{"type": "text", "text": "Done"}]}})));
+        assert_eq!(t.items.len(), 4);
+        t.set_live(None);
+        assert_eq!(t.items.len(), 3);
+    }
     use serde_json::json;
 
     #[test]

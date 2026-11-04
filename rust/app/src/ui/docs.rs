@@ -69,7 +69,7 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `keys` | `[{"key": "cmd-k", "do": <action>, "if": <jq>}]`. Key names: `cmd`, `ctrl`, `alt`, `shift` + `-` + key (`cmd-shift-p`, `ctrl-\``, `cmd-\\`). |
 | `commands` | Command palette entries: `[{"label", "do", "if"}]`. Worktrees are added automatically. |
 | `motion` | How things move: `move` (glide to new positions), `enter` (how new nodes come in), `style` (colors and sizes ease), `enabled`. See Motion. |
-| `chat` | Look of the built-in transcript, composer, and waiting card: style objects per part. |
+| `chat` | Look of the built-in transcript, composer, and waiting card: style objects per part. `permission_options`: an SDK chat's permission card (allow, always allow, deny). |
 | `terminal` | Terminal font, size, padding, colors. |
 | `connection` | The default host's connection: `ssh_host`, `daemon` path, `retry_seconds`, `ssh_options`, `watch_ms`, `env_push_seconds`, `env_push_command` (null: `bin_dir`'s env-push). `local` is this Mac's daemon (`enabled`, `daemon`). |
 | `input` | `press_dedupe_ms` (50): how long one press counts as the same press for every node under it. |
@@ -240,7 +240,7 @@ Examples:
 | `.worktrees[]` | every worktree: `{id, path, branch, title, emoji, label, project, repo, hue, letter, is_primary, uncommitted, unpushed, behind, mr: {number, url, state, checks} \| null, age, age_text, status, section: {id, name} \| null, selected, chats: [chat]}`. `status` is one of working, waiting, merged, failing, pending, dirty, behind, idle. |
 | `.inbox` | `{unread, items: [item]}`: every machine's unread inbox items, newest first. An item: `{uid, id, host, key, title, text, chat, source, at, updated_at, rev, age_text}`; `chat` is the chat it is about (or null), `uid` is what `inbox.read` takes. Posted with `inbox.post`, `bin/inbox post`, or by a chat that starts waiting on you (daemon option `inbox_post_waiting`). |
 | `.chats[]` | every chat: `{id, name, kind, agent, host, status, dir, branch, rc_url, alive, state, waiting_on, last_activity, age_text, active, tmux}`. `state` is idle, working, waiting, or stopped; `host` is box or mac; `agent` is the CLI it runs (a key of `.agents`); `activity` is a short line on what a working agent is doing now ("Reading settings.jsonc", "Thinking", "Writing"), empty otherwise (filled for chats whose transcript is open); `status_line` is the agent's own working line read from its pane, `{verb, since, tokens, changed_at, notes}` or null (`changed_at`: when the token count last moved); `orchestrator` is whether it leads its section (`chat.orchestrator`); `model_used` is the model its newest reply came from (else the `model` it was started with, else null: the agent's default). |
-| `.agents` | settings `daemon.agents`: each agent CLI a chat can run (`{name, icon, color, ...}` by key, e.g. `.agents[.c.agent].icon`) |
+| `.agents` | settings `daemon.agents`: each agent CLI a chat can run (`{name, icon, color, ...}` by key, e.g. `.agents[.c.agent].icon`). `transport` "sdk" (Claude's default) runs chats in Claude Code's stream-json mode under the daemon: `chat.mode {mode}`, `chat.model {model}`, `chat.effort {level}` and `chat.interrupt` are control requests, the waiting card answers from the request itself, and `.c.mode` / `.c.transport` say which mode the chat is in. |
 | `.designer` | `{working, activity, has_messages}` for the designer chat |
 | `.selected.worktree` | the selected worktree (or null) |
 | `.selected.chat` | its active chat (or null) |

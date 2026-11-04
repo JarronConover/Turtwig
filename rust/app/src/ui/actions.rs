@@ -499,7 +499,10 @@ impl Workspace {
             // super.engineering is running can only be stopped there.
             "chat.interrupt" => {
                 if let Some(id) = chat() {
-                    if self.chat(&id).is_some_and(|c| c.status == "running_elsewhere") {
+                    if self.chat(&id).is_some_and(|c| c.transport == "sdk") {
+                        // An SDK chat: a control request, not a key; nothing comes back into the composer.
+                        self.call(Call::ChatControl { chat_id: id, request: json!({ "subtype": "interrupt" }) }, cx);
+                    } else if self.chat(&id).is_some_and(|c| c.status == "running_elsewhere") {
                         let t = self.tr("stop_elsewhere", "This chat is running in super.engineering: stop it there, or take it over first", &[]);
                         self.toast(t, window, cx);
                     } else {
@@ -523,6 +526,33 @@ impl Workspace {
                         .detach();
                     }
                 }
+            }
+            // An SDK chat's model, permission mode and effort are set by control request (a TUI chat's go to
+            // a script action of the same name, if one is set up).
+            "chat.mode" | "chat.model" | "chat.effort" if chat().is_some_and(|id| self.chat(&id).is_some_and(|c| c.transport == "sdk")) => {
+                let Some(id) = chat() else { return };
+                let request = match name {
+                    "chat.mode" => {
+                        let Some(mode) = s("mode").map(|m| crate::workspace::permission_mode(&m)) else { return };
+                        // The mode menu's own data (`.data.chat_mode`) shows the pick at once.
+                        if let Some(Value::Object(m)) = self.script_data.get_mut("chat_mode") {
+                            m.insert(id.clone(), json!(crate::workspace::mode_name(&mode)));
+                        } else {
+                            self.script_data.insert("chat_mode".into(), json!({ id.clone(): crate::workspace::mode_name(&mode) }));
+                        }
+                        self.ctx_rev += 1;
+                        json!({ "subtype": "set_permission_mode", "mode": mode })
+                    }
+                    "chat.model" => {
+                        let Some(model) = s("model") else { return };
+                        json!({ "subtype": "set_model", "model": model })
+                    }
+                    _ => {
+                        let Some(level) = s("level") else { return };
+                        json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": level } })
+                    }
+                };
+                self.call(Call::ChatControl { chat_id: id, request }, cx);
             }
             "chat.background" => {
                 if let Some(id) = chat() {
@@ -1015,6 +1045,7 @@ impl Workspace {
                     };
                     let agent = self.chat(&id).map(|c| c.agent.clone()).unwrap_or_default();
                     let several = !cancel && crate::workspace::waiting_questions(&w).len() > 1;
+                    let sdk = self.chat(&id).is_some_and(|c| c.transport == "sdk");
                     match pick {
                         _ if several => {
                             let q = a.get("question").and_then(Value::as_u64).map(|q| q as usize);
@@ -1022,6 +1053,7 @@ impl Workspace {
                                 self.exprs.note(format!("chat.answer: {e}"));
                             }
                         }
+                        Some(i) if sdk && (i == -1 || (i >= 0 && (i as usize) < options.len())) => self.sdk_answer(&id, &w, i, window, cx),
                         Some(-1) => {
                             let keys = self.agent_keys(&agent, "cancel_keys");
                             self.call(Call::ChatKeys { chat_id: id, keys }, cx)

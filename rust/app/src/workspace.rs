@@ -1923,6 +1923,12 @@ impl Workspace {
                     self.pending_events.push(("chat.message".into(), [("chat".to_string(), chat.clone()), ("message".to_string(), message)].into_iter().collect()));
                 }
             }
+            Incoming::Event(Event::ChatLive { chat_id, message }) => {
+                let t = self.transcripts.entry(chat_id.clone()).or_insert_with(|| crate::transcript::Transcript::for_chat(&chat_id));
+                t.set_live(message.as_ref());
+                self.ctx_rev += 1;
+                cx.notify();
+            }
             Incoming::Event(Event::TermOutput { term_id, data }) => {
                 if let Some(t) = self.term_by_id.get(&(host.to_string(), term_id)).cloned() {
                     t.update(cx, |t, cx| t.output(&data, cx));
@@ -2277,6 +2283,8 @@ impl Workspace {
             | Call::ChatArchive { chat_id }
             | Call::ChatRename { chat_id, .. }
             | Call::ChatSend { chat_id, .. }
+            | Call::ChatControl { chat_id, .. }
+            | Call::ChatAnswer { chat_id, .. }
             | Call::ChatKeys { chat_id, .. } => self.host_of_chat(chat_id),
             Call::ChatNew { dir: Some(d), .. } => self.host_of_path(d),
             Call::SectionRename { id, .. } | Call::SectionDelete { id } | Call::SectionMove { id, .. } => {
@@ -5105,14 +5113,13 @@ impl Workspace {
         }
         let mut row = style::apply(h_flex().gap(px(6.)).flex_wrap(), &st("waiting_row"), theme);
         for (i, label) in options.iter().enumerate().chain(std::iter::once((usize::MAX, &cancel))) {
-            let id = chat.id.clone();
-            let keys = if i == usize::MAX { self.agent_keys(&chat.agent, "cancel_keys") } else { vec![self.answer_key(&chat.agent, i + 1)] };
             let option = if i == usize::MAX { json!("cancel") } else { json!(i) };
-            self.clickables.push((format!("opt:{}:{i}", chat.id), label.clone(), json!({"do": "chat.answer", "chat": chat.id, "option": option})));
+            let action = json!({"do": "chat.answer", "chat": chat.id, "option": option});
+            self.clickables.push((format!("opt:{}:{i}", chat.id), label.clone(), action.clone()));
             row = row.child(
                 style::apply(div().id(SharedString::from(format!("opt:{}:{i}", chat.id))).cursor_pointer(), &st("waiting_option"), theme)
                     .child(label.clone())
-                    .on_click(cx.listener(move |ws, _, _, cx| ws.call(Call::ChatKeys { chat_id: id.clone(), keys: keys.clone() }, cx))),
+                    .on_click(cx.listener(move |ws, _, window, cx| ws.run_action(&action, window, cx))),
             );
         }
         style::apply(v_flex().gap(px(10.)), &st("waiting"), theme)
@@ -5120,6 +5127,41 @@ impl Workspace {
             .children(questions.into_iter().map(|q| div().child(q)))
             .child(row)
             .into_any_element()
+    }
+
+    /** Answers what an SDK chat waits on: option `pick` of its question (-1: cancel), or of a permission
+    (`sdk_permission_options`: allow, always allow, deny). */
+    pub(crate) fn sdk_answer(&mut self, id: &str, w: &Value, pick: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let questions = waiting_questions(w);
+        let response = if let Some((q, labels)) = questions.first() {
+            match usize::try_from(pick).ok().and_then(|i| labels.get(i)) {
+                Some(label) => {
+                    let mut input = w["tool_input"].clone();
+                    input["answers"] = json!({ q: label });
+                    json!({ "behavior": "allow", "updatedInput": input })
+                }
+                None => json!({ "behavior": "deny", "message": self.tr("sdk_declined_question", "The user declined to answer", &[]) }),
+            }
+        } else {
+            let (options, _) = waiting_options(w, &self.settings);
+            let always = options.len() == 3;
+            match pick {
+                0 => json!({ "behavior": "allow", "updatedInput": w["tool_input"] }),
+                1 if always => json!({ "behavior": "allow", "updatedInput": w["tool_input"], "updatedPermissions": w["suggestions"] }),
+                _ => json!({ "behavior": "deny", "message": self.tr("sdk_denied", "The user declined this tool use", &[]) }),
+            }
+        };
+        let call = Call::ChatAnswer { chat_id: id.to_string(), request_id: w["request_id"].as_str().map(str::to_string), response };
+        let remote = self.route(&call);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(e) = remote.call(call).await {
+                let _ = this.update_in(cx, |ws, window, cx| {
+                    let msg = ws.tr("answer_failed", "Couldn't answer: {why}", &[("why", &e.to_string())]);
+                    ws.toast(msg, window, cx);
+                });
+            }
+        })
+        .detach();
     }
 
     /** Puts `text` back in a chat's composer, ahead of anything typed there, to change and send again. */
@@ -5892,6 +5934,9 @@ pub(crate) fn waiting_questions(w: &Value) -> Vec<(String, Vec<String>)> {
 every question when there are several (`chat.waiting_all_questions`). */
 pub(crate) fn waiting_options(w: &Value, settings: &Settings) -> (Vec<String>, Vec<String>) {
     let qs = w["tool_input"]["questions"].as_array().cloned().unwrap_or_default();
+    if w["sdk"].as_bool() == Some(true) && qs.is_empty() {
+        return (sdk_permission_options(w, settings), vec![]);
+    }
     let options = qs
         .first()
         .and_then(|q| q["options"].as_array())
@@ -5906,6 +5951,39 @@ pub(crate) fn waiting_options(w: &Value, settings: &Settings) -> (Vec<String>, V
     let all = settings.get("chat.waiting_all_questions").and_then(Value::as_bool).unwrap_or(true);
     let questions = if all && qs.len() > 1 { qs.iter().filter_map(|q| q["question"].as_str().map(str::to_string)).collect() } else { vec![] };
     (options, questions)
+}
+
+/** An SDK chat's permission choices (`chat.permission_options`: allow, always allow, deny); "always allow"
+only when Claude Code suggests a rule or mode to remember. */
+pub(crate) fn sdk_permission_options(w: &Value, settings: &Settings) -> Vec<String> {
+    let mut options: Vec<String> = settings
+        .get("chat.permission_options")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_else(|| vec!["Allow".into(), "Always allow".into(), "Deny".into()]);
+    if options.len() == 3 && w["suggestions"].as_array().is_none_or(|a| a.is_empty()) {
+        options.remove(1);
+    }
+    options
+}
+
+/** Claude Code's permission mode for a mode menu's short name (manual, edits, plan, auto), and back. */
+pub(crate) fn permission_mode(name: &str) -> String {
+    match name {
+        "manual" => "default".into(),
+        "edits" => "acceptEdits".into(),
+        "bypass" => "bypassPermissions".into(),
+        other => other.into(),
+    }
+}
+
+pub(crate) fn mode_name(mode: &str) -> String {
+    match mode {
+        "default" => "manual".into(),
+        "acceptEdits" => "edits".into(),
+        "bypassPermissions" => "bypass".into(),
+        other => other.into(),
+    }
 }
 
 /** A picture from a file (absolute, ~/, or relative to the settings folder) or a URL, fit "cover" |
