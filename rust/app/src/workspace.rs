@@ -1010,6 +1010,7 @@ impl Workspace {
                 self.ctx_rev += 1;
                 if let Some(n) = m["name"].as_str() {
                     self.script_data.insert(n.to_string(), m["value"].clone());
+                    self.bridge_sdk_script_data();
                 }
             }
             "timer" => {
@@ -1856,6 +1857,7 @@ impl Workspace {
                     self.toast(format!("{host}: {e}"), window, cx);
                 }
                 self.merge_models();
+                self.bridge_sdk_script_data();
                 self.drop_screens(window, cx);
                 if let Some(old) = old {
                     // A chat that left this host (moved to another machine) is read from where it went now.
@@ -5127,6 +5129,36 @@ impl Workspace {
             .children(questions.into_iter().map(|q| div().child(q)))
             .child(row)
             .into_any_element()
+    }
+
+    /** Scripts that read a chat's pane publish `.data.chat_mode`, `.data.chat_screen` and `.data.chat_menu`;
+    an SDK chat has no pane, so its own mode and state stand in (a waiting chat is at a "prompt"). */
+    pub(crate) fn bridge_sdk_script_data(&mut self) {
+        let sdk: Vec<(String, String, Option<String>)> = self.model.chats.iter().filter(|c| c.transport == "sdk").map(|c| (c.id.clone(), c.state.clone(), c.mode.clone())).collect();
+        if sdk.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for (key, value_of) in [
+            ("chat_mode", Box::new(|_: &str, mode: &Option<String>| json!(mode_name(mode.as_deref().unwrap_or("default")))) as Box<dyn Fn(&str, &Option<String>) -> Value>),
+            ("chat_screen", Box::new(|state: &str, _: &Option<String>| json!(if state == "waiting" { "prompt" } else { state }))),
+            ("chat_menu", Box::new(|_: &str, _: &Option<String>| Value::Null)),
+        ] {
+            let slot = self.script_data.entry(key.to_string()).or_insert_with(|| json!({}));
+            if !slot.is_object() {
+                *slot = json!({});
+            }
+            for (id, state, mode) in &sdk {
+                let want = value_of(state, mode);
+                if slot.get(id) != Some(&want) {
+                    slot[id] = want;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.ctx_rev += 1;
+        }
     }
 
     /** Answers what an SDK chat waits on: option `pick` of its question (-1: cancel), or of a permission
