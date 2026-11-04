@@ -171,6 +171,12 @@ pub fn transport(chat: &Value) -> String {
         .unwrap_or_else(|| "tui".into())
 }
 
+/** How the chat was last launched: the registry's `transport`, else "tui". A chat nobody started in SDK
+mode (one another program runs, or an old TUI one) is never taken for an SDK chat on its own. */
+pub fn launched_transport(chat: &Value) -> String {
+    chat.get("transport").and_then(Value::as_str).filter(|t| !t.is_empty()).unwrap_or("tui").to_string()
+}
+
 /** The id the agent's hooks report for the chat: its `session_id` (Codex's own), else the chat id. */
 pub fn session_key(chat: &Value) -> Option<String> {
     let s = |k: &str| chat.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_string);

@@ -570,7 +570,7 @@ fn chats(states: &ChatStates, sdk: &HashMap<String, crate::sdk::Snapshot>) -> Ve
         let tmux = util::chat_session(&id);
         // An SDK chat runs as the daemon's own process; one with a tmux session left is still driven there.
         let snap = sdk.get(&id);
-        let is_sdk = crate::agents::transport(&v) == "sdk" && !alive.contains(&tmux);
+        let is_sdk = crate::agents::launched_transport(&v) == "sdk" && !alive.contains(&tmux);
         let is_alive = if is_sdk { snap.is_some_and(|s| s.alive) } else { alive.contains(&tmux) };
         // A stopped chat another tool here still runs (super.engineering, on the Mac): starting it takes it over.
         let status = if !is_alive && foreign && elsewhere

@@ -429,7 +429,7 @@ fn sdk_relaunch(shared: &Arc<Shared>) {
     let here = hosts::here();
     for c in registry_chats() {
         let s = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("");
-        if s("status") != "running" || agents::transport(&c) != "sdk" || !(s("host") == here || s("host").is_empty()) {
+        if s("status") != "running" || agents::launched_transport(&c) != "sdk" || !(s("host") == here || s("host").is_empty()) {
             continue;
         }
         if util::tmux_sessions().contains(&util::chat_session(s("id"))) {
@@ -454,10 +454,17 @@ fn registry_chats() -> Vec<Value> {
     out
 }
 
-/** Whether the chat runs (or would run) in SDK mode: its transport is sdk and no tmux session drives it. */
+/** Whether the chat runs in SDK mode: it was launched so, and no tmux session drives it. */
 fn is_sdk(chat: &Value) -> bool {
     let id = chat.get("id").and_then(Value::as_str).unwrap_or("");
-    agents::transport(chat) == "sdk" && !util::tmux_sessions().contains(&util::chat_session(id))
+    agents::launched_transport(chat) == "sdk" && !util::tmux_sessions().contains(&util::chat_session(id))
+}
+
+/** Whether starting the chat now means SDK mode: it runs so already, or it's stopped and its agent's
+transport is sdk (a TUI chat resumes in SDK mode by its session id). */
+fn starts_sdk(chat: &Value) -> bool {
+    let id = chat.get("id").and_then(Value::as_str).unwrap_or("");
+    is_sdk(chat) || (agents::transport(chat) == "sdk" && !util::tmux_sessions().contains(&util::chat_session(id)))
 }
 
 /** Starts (or finds running) the chat's SDK process: bin/chat `_sdk_launch` readies the folder and says the
@@ -743,7 +750,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             Ok(out)
         }
         Call::ChatStart { chat_id } => {
-            if registry_chat(&chat_id).as_ref().is_some_and(is_sdk) {
+            if registry_chat(&chat_id).as_ref().is_some_and(starts_sdk) {
                 if shared.sdk.running(&chat_id).is_none() {
                     chat_tool(&["start", &chat_id], "chat_start_timeout_secs", 300)?;
                     sdk_start(shared, &chat_id)?;
@@ -831,10 +838,14 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let ok = |args: &[&str]| util::run("tmux", args, &[], None, util::tmux_wait() * 2).ok;
             let chat = registry_chat(&chat_id);
             let kind = chat.as_ref().map(agents::of).unwrap_or_else(|| "claude".into());
-            if chat.as_ref().is_some_and(is_sdk) {
+            if chat.as_ref().is_some_and(is_sdk) || (chat.as_ref().is_some_and(starts_sdk) && config::flag("send_resumes", true)) {
                 // A slash command that picks a model (what a /model line meant in the TUI) is a control request.
                 if let Some(model) = text.trim().strip_prefix("/model ").map(str::trim).filter(|m| !m.is_empty() && !m.contains(' ')) {
                     return handle(shared, conn, Call::ChatControl { chat_id, request: json!({ "subtype": "set_model", "model": model }) });
+                }
+                // A stopped chat resumes first (as `bin/chat send` does for a TUI one), in SDK mode.
+                if shared.sdk.running(&chat_id).is_none() {
+                    handle(shared, conn, Call::ChatStart { chat_id: chat_id.clone() })?;
                 }
                 let c = sdk_start(shared, &chat_id)?;
                 c.send(text.trim(), vec![])?;
