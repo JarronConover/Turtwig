@@ -398,6 +398,7 @@ impl SdkChat {
             let input = r.get("input").cloned().unwrap_or(json!({}));
             let question = input.pointer("/questions/0/question").and_then(Value::as_str).map(str::to_string);
             let message = question.unwrap_or_else(|| match r.get("description").and_then(Value::as_str) {
+                _ if tool == "ExitPlanMode" => "Approve the plan?".to_string(),
                 Some(d) if !d.is_empty() => format!("{display}: {d}"),
                 _ => format!("Allow {display}?"),
             });
