@@ -108,13 +108,26 @@ all over the same state:
 
 `agent-boxd web` (the box's `agent-box-phone` service) serves `web/phone`, a
 home-screen web app: the sidebar, the inbox, chats (read, send, answer
-question cards, stop) and new chats. It listens on the box's 127.0.0.1:8792
-only, so the way in is Coder's owner-only port forwarding:
-`https://8792--main--<workspace>--<user>.<coder host>` (with Tailscale on,
-where Coder is tailnet-only). Open it in Safari, sign in to Coder, then Share
-› Add to Home Screen. "Turn on notifications" in its inbox subscribes the
-phone to web pushes for new inbox items (`~/.agent-box/phone.json` holds the
-key and subscriptions).
+question cards, stop) and new chats. It listens on the box's loopback only:
+8792 for ssh tunnels, and 8793 for the tailnet, where only the box owner's
+tailnet login gets in. The workspace's own tailscaled keeps no state, so it
+can't get HTTPS certs; the `agent-box-ts` service runs a second, userspace
+tailscaled (state in `~/.agent-box/ts`) as its own node, which serves 8793 at
+`https://<node>.<tailnet>.ts.net`. First run on a box:
+
+    s=~/.agent-box/ts/tailscaled.sock
+    tailscale --socket=$s up --hostname=<user>-abox   # open the login link
+    tailscale --socket=$s serve --bg --https=443 http://127.0.0.1:8793
+
+Coder's port forwarding (`https://8792--main--<workspace>--<user>.<coder
+host>`) fails in browsers that share one HTTP/2 connection between
+Coder's dashboard and app hosts (Chrome does): Coder's proxy answers the
+cross-host request with an empty 404.
+
+On the phone (Tailscale on), open the ts.net URL in Safari, then Share › Add
+to Home Screen. "Turn on notifications" in its inbox subscribes the phone to
+web pushes for new inbox items (`~/.agent-box/phone.json` holds the key and
+subscriptions).
 
 ## Setup on a new box
 

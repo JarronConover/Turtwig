@@ -3080,7 +3080,7 @@
     // The phone app (`agent-boxd web`, web/phone): its loopback port, reached through Coder's port forwarding; how
     // often it sends the model, how much tool text it sends, how long an inbox item stays unread before it pushes, and
     // the push `sub` (null: mailto: the git email).
-    "phone_port": 8792, "phone_model_ms": 1000, "phone_text_max": 1500, "phone_push_delay_secs": 15, "phone_push_subject": null,
+    "phone_port": 8792, "phone_tailnet_port": 8793, "phone_tailnet_user": null, "phone_model_ms": 1000, "phone_text_max": 1500, "phone_push_delay_secs": 15, "phone_push_subject": null,
     "model_poll_ms": 2000, "model_debounce_ms": 250,
     "transcripts_poll_ms": 300,
     "warm_index_chats": 60,              // newest chats line-indexed at startup

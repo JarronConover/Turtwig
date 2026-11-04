@@ -1,5 +1,5 @@
-/*! `agent-boxd web`: the phone app. Loopback only, so it's reached through Coder's owner-only port forwarding;
-bridges /ws to the daemon and web-pushes new inbox items. */
+/*! `agent-boxd web`: the phone app. Loopback only: the box's own tailscaled serves the tailnet port over HTTPS, where only
+the box owner's tailnet login gets in; bridges /ws to the daemon and web-pushes new inbox items. */
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -29,19 +29,46 @@ const CHAT_DROP: &[&str] = &["tmux", "session", "transcript", "created_at", "lau
 pub fn run() -> anyhow::Result<()> {
     config::load();
     let port = config::count("phone_port", 8792) as u16;
+    let tailnet_port = config::count("phone_tailnet_port", 8793) as u16;
     let listener = TcpListener::bind(("127.0.0.1", port))?;
-    eprintln!("phone: http://127.0.0.1:{port}");
+    let tailnet = TcpListener::bind(("127.0.0.1", tailnet_port))?;
+    eprintln!("phone: http://127.0.0.1:{port}, tailnet http://127.0.0.1:{tailnet_port}");
     let push = Arc::new(Push::load());
     let watcher = push.clone();
     std::thread::spawn(move || loop {
         watch_inbox(&watcher);
         std::thread::sleep(Duration::from_secs(5));
     });
+    let owner = Arc::new(Mutex::new(None::<String>));
+    {
+        let push = push.clone();
+        std::thread::spawn(move || {
+            for stream in tailnet.incoming().flatten() {
+                let (push, owner) = (push.clone(), owner.clone());
+                std::thread::spawn(move || handle(stream, &push, Some(&owner)));
+            }
+        });
+    }
     for stream in listener.incoming().flatten() {
         let push = push.clone();
-        std::thread::spawn(move || handle(stream, &push));
+        std::thread::spawn(move || handle(stream, &push, None));
     }
     Ok(())
+}
+
+/** The tailnet login allowed in: `phone_tailnet_user`, else the login the box's phone tailscaled is signed in as. */
+fn tailnet_owner(cache: &Mutex<Option<String>>) -> Option<String> {
+    let mut cached = cache.lock().unwrap();
+    if cached.is_none() {
+        *cached = config::get("phone_tailnet_user").and_then(|v| v.as_str().map(str::to_string)).or_else(|| {
+            let sock = util::agent_home().join("ts").join("tailscaled.sock");
+            let out = std::process::Command::new("tailscale").arg(format!("--socket={}", sock.display())).args(["status", "--json"]).output().ok()?;
+            let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+            let uid = v.pointer("/Self/UserID")?.to_string();
+            v.pointer(&format!("/User/{uid}/LoginName"))?.as_str().map(str::to_string)
+        });
+    }
+    cached.clone()
 }
 
 struct Req {
@@ -87,6 +114,7 @@ fn read_request(s: &mut TcpStream) -> Option<Req> {
 fn respond(s: &mut TcpStream, status: u16, kind: &str, body: &[u8]) {
     let reason = match status {
         200 => "OK",
+        403 => "Forbidden",
         404 => "Not Found",
         _ => "Bad Request",
     };
@@ -101,8 +129,15 @@ fn respond_json(s: &mut TcpStream, v: &Value) {
     respond(s, 200, "application/json", v.to_string().as_bytes());
 }
 
-fn handle(mut s: TcpStream, push: &Push) {
+fn handle(mut s: TcpStream, push: &Push, owner: Option<&Mutex<Option<String>>>) {
     let Some(req) = read_request(&mut s) else { return };
+    // Tailscale serve sets this header for every user-owned device and drops any the client sent; tagged devices get none.
+    if let Some(owner) = owner {
+        let login = req.headers.get("tailscale-user-login");
+        if login.is_none() || login.cloned() != tailnet_owner(owner) {
+            return respond(&mut s, 403, "text/plain", b"forbidden\n");
+        }
+    }
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/ws") => bridge(s, &req),
         ("GET", "/api/push/key") => respond_json(&mut s, &json!({ "key": push.public_key() })),

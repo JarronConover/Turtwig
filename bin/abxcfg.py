@@ -70,6 +70,9 @@ BOX_BOOT = {
                                          "-t disableLeaveAlert=true tmux attach -t 2>&1 | tee -a {agent_home}/log/ttyd.log"},
         {"name": "agent-boxd", "cmd": "{boxd} run 2>&1 | tee -a {agent_home}/log/boxd.log", "build": True},
         {"name": "agent-box-phone", "cmd": "{boxd} web 2>&1 | tee -a {agent_home}/log/phone.log", "build": True},
+        # The phone app's own tailnet node (the workspace's tailscaled keeps no state, so it can't get certs).
+        {"name": "agent-box-ts", "cmd": "mkdir -p {agent_home}/ts && tailscaled --tun=userspace-networking --statedir={agent_home}/ts "
+                                        "--socket={agent_home}/ts/tailscaled.sock --port=0 2>&1 | tee -a {agent_home}/log/ts.log"},
     ],
 }
 
@@ -126,7 +129,7 @@ LOGS = {
     "boxd": "~/.agent-box/boxd.log", "agent-box": "~/.agent-box/log/agent-box.log",
     "supervisor": "~/.agent-box/log/supervisor.log", "boxd-build": "~/.agent-box/log/boxd-build.log",
     "dashboard": "~/.agent-box/log/dashboard.log", "ttyd": "~/.agent-box/log/ttyd.log",
-    "phone": "~/.agent-box/log/phone.log",
+    "phone": "~/.agent-box/log/phone.log", "ts": "~/.agent-box/log/ts.log",
 }
 
 ENV_PUSH = {
