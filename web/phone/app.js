@@ -203,7 +203,7 @@
   }
 
   function worktreeHtml(w, byId) {
-    const chats = w.chat_ids.map((id) => byId[id]).filter(Boolean).sort((a, b) => (b.last_activity || 0) - (a.last_activity || 0));
+    const chats = w.chat_ids.map((id) => byId[id]).filter(Boolean);
     const counts = [w.uncommitted ? `<span class="count">±${w.uncommitted}</span>` : "", w.unpushed ? `<span class="count">↑${w.unpushed}</span>` : ""].join("");
     const sub = [w.branch, w.host !== "box" ? w.host : "", ago(w.age)].filter(Boolean).join(" · ");
     return `<div class="wt">
@@ -250,8 +250,8 @@
       .filter((c) => !seen.has(c.id) && (c.alive || now() - (c.last_activity || 0) < 2 * 86400))
       .sort((a, b) => (b.last_activity || 0) - (a.last_activity || 0));
     const groups = [
-      ...m.sections.map((s) => groupHtml(`s:${s.id}`, s.name, s.items, byId)),
       ...m.projects.map((p) => groupHtml(`p:${p.repo}`, p.name, p.items, byId)),
+      ...m.sections.map((s) => groupHtml(`s:${s.id}`, s.name, s.items, byId)),
     ].join("");
     return `${homeHeader()}
       <main class="scroll">

@@ -197,6 +197,9 @@ fn shape(line: &str) -> Shaped {
                     }
                 }
             }
+            if let Some(data) = v.get_mut("data") {
+                sidebar_order(data);
+            }
             return Shaped::Model(v.to_string());
         }
         Some("transcript") => cut_entries(v.pointer_mut("/data/entries"), max),
@@ -204,6 +207,34 @@ fn shape(line: &str) -> Shaped {
         None => cut_entries(v.pointer_mut("/result/entries"), max),
     }
     Shaped::Line(v.to_string())
+}
+
+/** Projects, sections, their worktrees and each worktree's chats in the Mac sidebar's order, from the
+~/.agent-box/sidebar-order.json the app writes (env_push copies it here). What it doesn't list keeps its place
+after what it does. */
+fn sidebar_order(data: &mut Value) {
+    let Some(saved) = std::fs::read(util::agent_home().join("sidebar-order.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return };
+    let groups: Vec<&Value> = saved["groups"].as_array().map(|g| g.iter().collect()).unwrap_or_default();
+    let group_rank: HashMap<&str, usize> = groups.iter().enumerate().filter_map(|(i, g)| Some((g["group"].as_str()?, i))).collect();
+    let rank_of = |ranks: &HashMap<&str, usize>, k: &str| ranks.get(k).copied().unwrap_or(usize::MAX);
+    for (list, prefix, key) in [("projects", "p:", "repo"), ("sections", "s:", "id")] {
+        let Some(list) = data.get_mut(list).and_then(Value::as_array_mut) else { continue };
+        list.sort_by_key(|g| rank_of(&group_rank, &format!("{prefix}{}", g[key].as_str().unwrap_or_default())));
+        for g in list.iter_mut() {
+            let name = format!("{prefix}{}", g[key].as_str().unwrap_or_default());
+            let Some(rows) = group_rank.get(name.as_str()).and_then(|i| groups[*i]["items"].as_array()) else { continue };
+            let row_rank: HashMap<&str, usize> = rows.iter().enumerate().filter_map(|(i, r)| Some((r["path"].as_str()?, i))).collect();
+            let Some(items) = g.get_mut("items").and_then(Value::as_array_mut) else { continue };
+            items.sort_by_key(|w| rank_of(&row_rank, w["path"].as_str().unwrap_or_default()));
+            for w in items.iter_mut() {
+                let Some(chats) = row_rank.get(w["path"].as_str().unwrap_or_default()).and_then(|i| rows[*i]["chats"].as_array()) else { continue };
+                let chat_rank: HashMap<&str, usize> = chats.iter().enumerate().filter_map(|(i, c)| Some((c.as_str()?, i))).collect();
+                if let Some(ids) = w.get_mut("chat_ids").and_then(Value::as_array_mut) {
+                    ids.sort_by_key(|c| rank_of(&chat_rank, c.as_str().unwrap_or_default()));
+                }
+            }
+        }
+    }
 }
 
 fn cut_entries(entries: Option<&mut Value>, max: usize) {

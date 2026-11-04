@@ -142,6 +142,7 @@ ENV_PUSH = {
         {"path": "~/.config/redo/cursor-environments.json"},
         {"path": "~/.config/redo/cursor-typecheck-agents.json"},
         {"path": "~/.claude/hooks/block-squash.py", "replace": True},
+        {"path": "~/.agent-box/sidebar-order.json"},
     ],
     "memory": True, "memory_deletes": True, "max_deletes": 25,
     "skills_link": True,

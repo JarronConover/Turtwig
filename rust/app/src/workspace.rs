@@ -412,6 +412,8 @@ pub struct Workspace {
     /** context_data, and what it was built for: (ctx_rev, model seq, transcript revisions, frame). */
     ctx_data: std::cell::RefCell<Option<((u64, u64, u64, u64), std::time::Instant, Val)>>,
     chat_json_memo: std::cell::RefCell<Option<HashMap<String, Value>>>,
+    /** The sidebar's order as last written to ~/.agent-box/sidebar-order.json, for the phone app. */
+    sidebar_order_written: std::cell::RefCell<String>,
     /** While the context is built: the selected chat, found once for every chat it shows. */
     building_current: std::cell::RefCell<Option<Option<String>>>,
     /** Where each chat sits in `model.chats`, and each worktree in the model (project or section, then
@@ -707,6 +709,7 @@ impl Workspace {
             ctx_cache: None,
             ctx_data: Default::default(),
             chat_json_memo: Default::default(),
+            sidebar_order_written: Default::default(),
             building_current: Default::default(),
             chat_index: Default::default(),
             worktree_index: Default::default(),
@@ -2406,6 +2409,20 @@ impl Workspace {
         }
     }
 
+    /** The phone app lists the box's worktrees and chats in the sidebar's order: projects then sections, each
+    group's rows as shown, each row's chats in tab order. env_push copies the file to the box. */
+    fn write_sidebar_order(&self, groups: Vec<Value>) {
+        let text = json!({"groups": groups}).to_string();
+        if *self.sidebar_order_written.borrow() == text {
+            return;
+        }
+        let path = std::path::PathBuf::from(crate::script::expand("~/.agent-box/sidebar-order.json"));
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
+            *self.sidebar_order_written.borrow_mut() = text;
+        }
+    }
+
     /** A worktree's chats in tab order (`state.tab_order[path]`, set by dragging tabs), the rest after. */
     fn chats_of(&self, w: &Worktree) -> Vec<&Chat> {
         let mut chats: Vec<&Chat> = w.chat_ids.iter().filter_map(|id| self.chat(id)).collect();
@@ -2544,6 +2561,11 @@ impl Workspace {
         let project_gap = self.card_gap("project", "projcard", &project_ids);
         let section_ids: Vec<String> = self.model.sections.iter().map(|s| s.id.clone()).collect();
         let section_gap = self.card_gap("section", "seccard", &section_ids);
+        let order = std::cell::RefCell::new(Vec::<Value>::new());
+        let note_order = |group: String, shown: &[&Worktree]| {
+            let items: Vec<Value> = shown.iter().map(|w| json!({"path": w.path, "chats": self.chats_of(w).iter().map(|c| &c.id).collect::<Vec<_>>()})).collect();
+            order.borrow_mut().push(json!({"group": group, "items": items}));
+        };
         let projects: Vec<Val> = self
             .model
             .projects
@@ -2555,6 +2577,7 @@ impl Workspace {
                 let (name, letter, hue) = self.project_look(&p.repo, &p.name, p.hue);
                 let (show_external, show_primary) = (!self.flag(&format!("hide_external:{}", p.repo)), !self.flag(&format!("hide_primary:{}", p.repo)));
                 let shown = self.visible_items(&p.items, |w| (show_external || !w.external) && (show_primary || !w.is_primary));
+                note_order(format!("p:{}", p.repo), &shown);
                 let gaps = self.drop_gaps(&shown);
                 let primary = p.items.iter().find(|w| w.is_primary).or(p.items.first());
                 let head = json!({"name": name, "repo": p.repo, "hue": hue, "letter": letter,
@@ -2578,6 +2601,7 @@ impl Workspace {
                 if self.settings.get("sidebar.orchestrators_first").and_then(Value::as_bool) != Some(false) {
                     shown.sort_by_cached_key(|w| !self.chats_of(w).iter().any(|c| self.is_orchestrator(c)));
                 }
+                note_order(format!("s:{}", s.id), &shown);
                 let gaps = self.drop_gaps(&shown);
                 let (gap, gap_end) = &section_gap;
                 let head = json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
@@ -2587,6 +2611,7 @@ impl Workspace {
             })
             .collect();
         let into = self.drop_into();
+        self.write_sidebar_order(std::mem::take(&mut *order.borrow_mut()));
         let removed: Vec<Value> = self.model.projects.iter().filter(|p| self.project_removed(&p.repo)).map(|p| json!({"repo": p.repo, "name": self.project_look(&p.repo, &p.name, p.hue).0})).collect();
         let selected_w = self.current_worktree().and_then(|w| worktree_val.get(&(w as *const Worktree))).map(|v| crate::ui::expr::with(v, vec![("section".into(), Val::Null)])).unwrap_or(Val::Null);
         let selected_diff = self.selected.as_deref().map(|p| self.diff_summary(p)).unwrap_or(Value::Null);

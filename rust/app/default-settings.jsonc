@@ -3200,7 +3200,8 @@
         { "path": "~/.agent-box/uploads/" },
         { "path": "~/.config/redo/cursor-environments.json" },
         { "path": "~/.config/redo/cursor-typecheck-agents.json" },
-        { "path": "~/.claude/hooks/block-squash.py", "replace": true }
+        { "path": "~/.claude/hooks/block-squash.py", "replace": true },
+        { "path": "~/.agent-box/sidebar-order.json" }
       ],
       "memory": true, "memory_deletes": true, "max_deletes": 25, "skills_link": true,
       "hooks_match": { "matcher": "mcp__.+__save_issue", "command": "block-squash" }
@@ -3208,7 +3209,7 @@
     // Logs log_tail may read.
     "logs": { "boxd": "~/.agent-box/boxd.log", "agent-box": "~/.agent-box/log/agent-box.log", "supervisor": "~/.agent-box/log/supervisor.log",
               "boxd-build": "~/.agent-box/log/boxd-build.log", "dashboard": "~/.agent-box/log/dashboard.log", "ttyd": "~/.agent-box/log/ttyd.log",
-              "phone": "~/.agent-box/log/phone.log" },
+              "phone": "~/.agent-box/log/phone.log", "ts": "~/.agent-box/log/ts.log" },
     "log_tail_lines": 200, "hook_events_limit": 1000, "subscribe_replay_max": 1000,
     "app_files": ["inspect.json", "activity.log", "problems.txt", "snapshot.png"],
     "exec_allowed": true,                // the exec call (any shell command on this host)
