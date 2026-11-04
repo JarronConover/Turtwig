@@ -1,5 +1,5 @@
 use agent_box_protocol::{encode, Call, Event, Model, Request, Response, ServerMessage, PROTOCOL_VERSION};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -9,7 +9,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::{agents, config, db, hosts, model, term, util};
+use crate::{agents, config, db, hosts, model, sdk, term, util};
 
 struct Watch {
     path: PathBuf,
@@ -48,6 +48,7 @@ struct Shared {
     wake: (Mutex<bool>, Condvar),
     caches: Arc<model::Caches>,
     next_term: AtomicU64,
+    sdk: Arc<sdk::Sdk>,
 }
 
 impl Shared {
@@ -75,6 +76,7 @@ pub fn run() -> anyhow::Result<()> {
     let listener = UnixListener::bind(&sock)?;
 
     let conn = db::open()?;
+    let (sdk, notices) = sdk::Sdk::new();
     let shared = Arc::new(Shared {
         conns: Mutex::new(vec![]),
         model: Mutex::new(None),
@@ -83,6 +85,7 @@ pub fn run() -> anyhow::Result<()> {
         wake: (Mutex::new(true), Condvar::new()),
         caches: Arc::new(model::Caches::default()),
         next_term: AtomicU64::new(1),
+        sdk,
     });
     for e in db::latest_per_session(&conn) {
         shared.apply_event(&e);
@@ -93,6 +96,14 @@ pub fn run() -> anyhow::Result<()> {
     spawn_loop("events", shared.clone(), event_loop);
     spawn_loop("model", shared.clone(), model_loop);
     spawn_loop("transcripts", shared.clone(), transcript_loop);
+    {
+        let shared = shared.clone();
+        std::thread::Builder::new().name("sdk".into()).spawn(move || sdk_loop(&shared, notices)).expect("spawn sdk loop");
+    }
+    {
+        let shared = shared.clone();
+        std::thread::spawn(move || sdk_relaunch(&shared));
+    }
     // Only where no app runs (`relay_app_actions`): there, run.json is the app's own to read.
     if hosts::flag("relay_app_actions", hosts::here() != "mac") {
         spawn_loop("app-actions", shared.clone(), app_action_loop);
@@ -205,7 +216,7 @@ fn model_loop(shared: &Arc<Shared>) {
         return;
     }
     let states = shared.states.lock().unwrap().clone();
-    let mut next = model::build(&shared.caches, &states, shared.last_seq.load(Ordering::SeqCst));
+    let mut next = model::build(&shared.caches, &states, shared.last_seq.load(Ordering::SeqCst), &shared.sdk.snapshots());
     if let Ok(db) = db::open() {
         if config::get("inbox_post_waiting").and_then(|v| v.as_bool()).unwrap_or(true) {
             let before = shared.model.lock().unwrap().as_ref().map(|m| m.chats.iter().map(|c| (c.id.clone(), c.state.clone())).collect::<HashMap<_, _>>());
@@ -396,6 +407,84 @@ pub(crate) fn cut(t: &mut String) {
     }
 }
 
+/** What SDK chats report: a changed state rebuilds the model; a reply being written goes to every subscriber. */
+fn sdk_loop(shared: &Arc<Shared>, notices: std::sync::mpsc::Receiver<sdk::Notice>) {
+    for n in notices {
+        match n {
+            sdk::Notice::Changed => shared.poke(),
+            sdk::Notice::Live(chat_id, message) => {
+                for c in shared.conns.lock().unwrap().iter().filter(|c| c.subscribed.load(Ordering::SeqCst)) {
+                    c.event(Event::ChatLive { chat_id: chat_id.clone(), message: message.clone() });
+                }
+            }
+        }
+    }
+}
+
+/** At startup, every running SDK chat of this host gets its process back (a chat is open while it runs). */
+fn sdk_relaunch(shared: &Arc<Shared>) {
+    if !config::flag("sdk_relaunch", true) {
+        return;
+    }
+    let here = hosts::here();
+    for c in registry_chats() {
+        let s = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("");
+        if s("status") != "running" || agents::transport(&c) != "sdk" || !(s("host") == here || s("host").is_empty()) {
+            continue;
+        }
+        if util::tmux_sessions().contains(&util::chat_session(s("id"))) {
+            continue;
+        }
+        if let Err(e) = sdk_start(shared, s("id")) {
+            eprintln!("sdk: couldn't relaunch {}: {e}", s("id"));
+        }
+    }
+}
+
+fn registry_chats() -> Vec<Value> {
+    let dir = util::agent_home().join("state").join("registry").join("chats");
+    let mut out = vec![];
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if e.path().extension().and_then(|x| x.to_str()) == Some("json") {
+            if let Some(v) = std::fs::read_to_string(e.path()).ok().and_then(|t| serde_json::from_str(&t).ok()) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/** Whether the chat runs (or would run) in SDK mode: its transport is sdk and no tmux session drives it. */
+fn is_sdk(chat: &Value) -> bool {
+    let id = chat.get("id").and_then(Value::as_str).unwrap_or("");
+    agents::transport(chat) == "sdk" && !util::tmux_sessions().contains(&util::chat_session(id))
+}
+
+/** Starts (or finds running) the chat's SDK process: bin/chat `_sdk_launch` readies the folder and says the
+command; a first prompt it hands back is sent as the first message. */
+fn sdk_start(shared: &Arc<Shared>, chat_id: &str) -> Result<Arc<sdk::SdkChat>, String> {
+    if let Some(c) = shared.sdk.running(chat_id) {
+        return Ok(c);
+    }
+    let o = chat_tool(&["_sdk_launch", chat_id], "chat_start_timeout_secs", 300)?;
+    let plan: Value = serde_json::from_str(o["stdout"].as_str().unwrap_or("")).map_err(|e| format!("_sdk_launch: {e}"))?;
+    let argv: Vec<String> = plan["argv"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let envs: Vec<(String, String)> = plan["env"].as_object().map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
+    let text = |k: &str| plan[k].as_str().filter(|v| !v.is_empty()).map(str::to_string);
+    let id = text("id").unwrap_or_else(|| chat_id.to_string());
+    let chat = shared.sdk.start(&id, &argv, plan["cwd"].as_str(), &envs, text("model"), text("mode"), text("effort"))?;
+    if let Some(prompt) = text("prompt") {
+        chat.send(&prompt, vec![])?;
+    }
+    shared.poke();
+    Ok(chat)
+}
+
+/** Records a chat's model, mode or effort in the registry so a resume starts from it. */
+fn sdk_remember(chat_id: &str, fields: Value) {
+    let _ = chat_tool(&["_set", chat_id, "--json", &fields.to_string()], "chat_timeout_secs", 120);
+}
+
 fn transcript_loop(shared: &Arc<Shared>) {
     std::thread::sleep(config::ms("transcripts_poll_ms", 300));
     for c in shared.conns.lock().unwrap().iter() {
@@ -542,7 +631,7 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                 Some(m) => m,
                 None => {
                     let states = shared.states.lock().unwrap().clone();
-                    let m = model::build(&shared.caches, &states, shared.last_seq.load(Ordering::SeqCst));
+                    let m = model::build(&shared.caches, &states, shared.last_seq.load(Ordering::SeqCst), &shared.sdk.snapshots());
                     *shared.model.lock().unwrap() = Some(m.clone());
                     m
                 }
@@ -613,6 +702,8 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             return Ok(json!({}));
         }
         Call::ChatNew { name, kind, branch, base, dir, repo, prompt, model, agent, auto_name } => {
+            let agent_name = agent.clone().filter(|a| !a.is_empty()).unwrap_or_else(|| config::text("default_agent", "claude"));
+            let via_sdk = agents::get(&agent_name, "transport").and_then(|v| v.as_str().map(str::to_string)).as_deref() == Some("sdk");
             let mut args: Vec<String> = vec!["new".into(), name, "--kind".into(), kind];
             if auto_name {
                 args.push("--auto-name".into());
@@ -625,7 +716,15 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
                 }
             }
             let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            chat_tool(&refs, "chat_new_timeout_secs", 900)
+            let out = chat_tool(&refs, "chat_new_timeout_secs", 900)?;
+            // An SDK chat: bin/chat made its record and folder; its process (and first prompt) start here.
+            if via_sdk {
+                let id = out["stdout"].as_str().unwrap_or("").split_whitespace().next().unwrap_or("").to_string();
+                if !id.is_empty() {
+                    sdk_start(shared, &id)?;
+                }
+            }
+            Ok(out)
         }
         Call::History { limit } => {
             let limit = limit.unwrap_or(config::count("history_limit", 200));
@@ -635,10 +734,67 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let limit = limit.unwrap_or(config::count("history_limit", 200));
             return Ok(history(limit, host.as_deref()));
         }
-        Call::ChatFork { chat_id } => chat_tool(&["fork", &chat_id], "chat_timeout_secs", 120),
-        Call::ChatStart { chat_id } => chat_tool(&["start", &chat_id], "chat_start_timeout_secs", 300),
-        Call::ChatStop { chat_id } => chat_tool(&["stop", &chat_id], "chat_timeout_secs", 120),
-        Call::ChatArchive { chat_id } => chat_tool(&["archive", &chat_id], "chat_timeout_secs", 120),
+        Call::ChatFork { chat_id } => {
+            let out = chat_tool(&["fork", &chat_id], "chat_timeout_secs", 120)?;
+            let id = out["stdout"].as_str().unwrap_or("").split_whitespace().next().unwrap_or("").to_string();
+            if registry_chat(&id).as_ref().is_some_and(is_sdk) {
+                sdk_start(shared, &id)?;
+            }
+            Ok(out)
+        }
+        Call::ChatStart { chat_id } => {
+            if registry_chat(&chat_id).as_ref().is_some_and(is_sdk) {
+                if shared.sdk.running(&chat_id).is_none() {
+                    chat_tool(&["start", &chat_id], "chat_start_timeout_secs", 300)?;
+                    sdk_start(shared, &chat_id)?;
+                }
+                Ok(json!({}))
+            } else {
+                chat_tool(&["start", &chat_id], "chat_start_timeout_secs", 300)
+            }
+        }
+        Call::ChatStop { chat_id } => {
+            shared.sdk.stop(&chat_id);
+            chat_tool(&["stop", &chat_id], "chat_timeout_secs", 120)
+        }
+        Call::ChatArchive { chat_id } => {
+            shared.sdk.stop(&chat_id);
+            chat_tool(&["archive", &chat_id], "chat_timeout_secs", 120)
+        }
+        Call::ChatControl { chat_id, request } => {
+            let c = shared.sdk.running(&chat_id).ok_or("the chat isn't running")?;
+            let r = c.request(request.clone())?;
+            // What was set outlives the process: a resume starts from it.
+            let mut remember = Map::new();
+            match request.get("subtype").and_then(Value::as_str) {
+                Some("set_model") => {
+                    remember.insert("model".into(), r.get("model").or(request.get("model")).cloned().unwrap_or(Value::Null));
+                }
+                Some("set_permission_mode") => {
+                    remember.insert("mode".into(), r.get("mode").or(request.get("mode")).cloned().unwrap_or(Value::Null));
+                }
+                Some("apply_flag_settings") => {
+                    if let Some(e) = request.pointer("/settings/effortLevel") {
+                        remember.insert("effort".into(), e.clone());
+                    }
+                }
+                _ => {}
+            }
+            if !remember.is_empty() {
+                sdk_remember(&chat_id, Value::Object(remember));
+            }
+            Ok(r)
+        }
+        Call::ChatAnswer { chat_id, request_id, response } => {
+            let c = shared.sdk.running(&chat_id).ok_or("the chat isn't running")?;
+            c.answer(request_id.as_deref(), response.clone())?;
+            if let Some(mode) = response.get("updatedPermissions").and_then(Value::as_array).and_then(|a| {
+                a.iter().find(|p| p.get("type").and_then(Value::as_str) == Some("setMode")).and_then(|p| p.get("mode")).cloned()
+            }) {
+                sdk_remember(&chat_id, json!({ "mode": mode }));
+            }
+            Ok(json!({}))
+        }
         Call::ChatRename { chat_id, name } => chat_tool(&["rename", &chat_id, &name], "chat_timeout_secs", 120),
         Call::ChatMove { chat_id, to, scope, dry_run } => {
             let mut args = vec!["move", chat_id.as_str(), "--to", to.as_str()];
@@ -675,6 +831,15 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             let ok = |args: &[&str]| util::run("tmux", args, &[], None, util::tmux_wait() * 2).ok;
             let chat = registry_chat(&chat_id);
             let kind = chat.as_ref().map(agents::of).unwrap_or_else(|| "claude".into());
+            if chat.as_ref().is_some_and(is_sdk) {
+                // A slash command that picks a model (what a /model line meant in the TUI) is a control request.
+                if let Some(model) = text.trim().strip_prefix("/model ").map(str::trim).filter(|m| !m.is_empty() && !m.contains(' ')) {
+                    return handle(shared, conn, Call::ChatControl { chat_id, request: json!({ "subtype": "set_model", "model": model }) });
+                }
+                let c = sdk_start(shared, &chat_id)?;
+                c.send(text.trim(), vec![])?;
+                return Ok(json!({}));
+            }
             if !ok(&["has-session", "-t", &target]) {
                 // Not running: bin/chat resumes it first (send_resumes), which can take a while for a long chat.
                 return chat_tool(&["send", &chat_id, &text], "chat_send_timeout_secs", 150);
@@ -711,6 +876,15 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
             Ok(json!({}))
         }
         Call::ChatKeys { chat_id, keys } => {
+            // An SDK chat has no keys: Escape stops the turn, anything else has no meaning there.
+            if registry_chat(&chat_id).as_ref().is_some_and(is_sdk) {
+                if keys.iter().any(|k| k == "Escape") {
+                    if let Some(c) = shared.sdk.running(&chat_id) {
+                        c.interrupt()?;
+                    }
+                }
+                return Ok(json!({ "restored": null }));
+            }
             let target = format!("={}:", util::chat_session(&chat_id));
             let kind = registry_chat(&chat_id).as_ref().map(agents::of).unwrap_or_else(|| "claude".into());
             let prompt = agents::text(&kind, "prompt_char", "❯");

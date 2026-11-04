@@ -70,9 +70,21 @@ CLAUDE_SETTINGS = '{"showThinkingSummaries":true}'
 # "assigned" (the chat id is the session id) or "discovered" (the CLI picks it; found in `sessions_dir`).
 # transcripts_root/backup_dir: what sync-worker backs up, and where under the sessions branch.
 # process_names/process_session_pattern: another process running a session (the pattern's group 1).
+# Claude Code's stream-json mode, as the VS Code extension runs it: the daemon owns the process and talks
+# JSON on its stdio (rust/daemon/src/sdk.rs). `_sdk_launch` fills these; {mode} is the permission mode.
+SDK_FLAGS = ["--print", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
+             "--max-thinking-tokens=31999", "--permission-prompt-tool=stdio", "--setting-sources=user,project,local",
+             "--include-partial-messages", "--replay-user-messages", "--settings", CLAUDE_SETTINGS,
+             ["--model", "{model}"], ["--permission-mode", "{mode}"], ["--effort", "{effort}"]]
+
 AGENTS = {
     "claude": {
         "bin": "claude", "session": "assigned", "trust": "claude", "remote_control": True, "stop_elsewhere": True,
+        # transport "sdk": chats run in stream-json mode under the daemon (no tmux); "tui": the interactive CLI.
+        "transport": "sdk",
+        "sdk_new": ["{bin}", "--session-id", "{id}", *SDK_FLAGS],
+        "sdk_resume": ["{bin}", "--resume", "{session}", *SDK_FLAGS],
+        "sdk_fork": ["{bin}", "--resume", "{from}", "--fork-session", "--session-id", "{id}", *SDK_FLAGS],
         "rc_url_pattern": r"https://claude\.ai/code/session_[A-Za-z0-9]+",
         "transcripts_root": "~/.claude/projects", "backup_dir": "projects",
         "process_names": ["claude"], "process_session_pattern": r"--(?:resume|session-id)[ =]([0-9a-f]{8}-[0-9a-f-]{27})",
@@ -571,6 +583,11 @@ def launch(chat, resume, restore_from=None, wait_rc=True, fork_from=None):
     name = tmux_name(chat)
     if tmux_alive(name):
         return
+    if agent.get("transport") == "sdk":
+        # The daemon starts the process (`_sdk_launch` says how); the record just says the chat is an SDK one.
+        chat["dir"] = str(directory)
+        chat["transport"] = "sdk"
+        return
     session = session_of(chat)
     template = agent["fork"] if fork_from else agent["resume"] if resume and session else agent["new"]
     if agent.get("session") == "discovered" and (fork_from or not (resume and session)):
@@ -776,10 +793,51 @@ def cmd_new(args):
     if chat["agent"] not in agents():
         sys.exit(f"unknown agent {chat['agent']!r} (known: {', '.join(agents())})")
     launch(chat, resume=False, wait_rc=False)
-    chat.pop("prompt", None)
+    if chat.get("transport") != "sdk":
+        chat.pop("prompt", None)
     save(chat, f"chat new: {args.name}")
     after_launch(chat)
     print(f"{chat_id}  {args.name}  {chat['dir']}")
+
+
+def cmd__sdk_launch(args):
+    """For the daemon: ready the chat's folder and print how to run its SDK process as JSON (argv, cwd, env,
+    model, mode, effort, and the first prompt, handed over once)."""
+    chat = find(args.chat)
+    agent = agent_def(chat)
+    directory = ensure_worktree(chat, None)
+    trust_folder(agent, directory)
+    session = session_of(chat)
+    t = transcript(chat)
+    fork_from = None
+    if chat.get("forked_from") and not (t and t.exists()):
+        src = load(chat["forked_from"])
+        fork_from = session_of(src) if src else None
+    template = agent["sdk_fork"] if fork_from else agent["sdk_resume"] if t and t.exists() else agent["sdk_new"]
+    mode = chat.get("mode") or agent.get("permission_mode") or option("permission_mode")
+    cmd = fill(template, {"bin": agent_bin(agent.get("bin") or chat.get("agent") or "claude"), "id": chat["id"],
+                          "session": session, "from": fork_from, "name": chat["name"], "model": chat.get("model"),
+                          "mode": mode, "effort": chat.get("effort"), "dir": str(directory),
+                          "realdir": os.path.realpath(str(directory))})
+    cmd = [str(Path(__file__).parent / "agent-env")] + cmd
+    prompt = chat.pop("prompt", None)
+    chat["dir"] = str(directory)
+    chat["transport"] = "sdk"
+    chat["launched_at"] = time.time()
+    save(chat, f"chat launch: {chat['name']}")
+    print(json.dumps({"id": chat["id"], "argv": cmd, "cwd": str(directory), "env": {}, "prompt": prompt,
+                      "model": chat.get("model"), "mode": mode, "effort": chat.get("effort"), "resume": bool(t and t.exists())}))
+
+
+def cmd__set(args):
+    """For the daemon: record fields on a chat (`--json '{"mode": "plan"}'`; null removes one)."""
+    chat = find(args.chat)
+    for k, v in json.loads(args.json).items():
+        if v is None:
+            chat.pop(k, None)
+        else:
+            chat[k] = v
+    save(chat, f"chat set: {chat['name']}")
 
 
 def after_launch(chat):
@@ -1797,6 +1855,8 @@ def cmd_supervise(args):
         for chat in all_chats():
             if chat["host"] != HOST or chat["status"] != "running":
                 continue
+            if agent_def(chat).get("transport") == "sdk" and not tmux_alive(tmux_name(chat)):
+                continue  # the daemon keeps SDK chats' processes
             if tmux_alive(tmux_name(chat)):
                 if session_of(chat) is None:
                     record_session(chat["id"])
@@ -1945,6 +2005,13 @@ def main():
     h.add_argument("chat")
     h.add_argument("--background", action="store_true")
     h.set_defaults(fn=cmd__session)
+    h = sub.add_parser("_sdk_launch", help="for the daemon: how to run the chat's SDK process, as JSON")
+    h.add_argument("chat")
+    h.set_defaults(fn=cmd__sdk_launch)
+    h = sub.add_parser("_set", help="for the daemon: record fields on a chat")
+    h.add_argument("chat")
+    h.add_argument("--json", required=True)
+    h.set_defaults(fn=cmd__set)
 
     sv = sub.add_parser("supervise")
     sv.add_argument("--interval", type=int, default=None)

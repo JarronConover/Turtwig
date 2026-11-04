@@ -28,6 +28,8 @@ fn builtin(agent: &str) -> Value {
         }),
         "claude" => json!({
             "transcripts": "claude",
+            // How its chats run: "sdk" (stream-json mode, driven by messages) or "tui" (the CLI in tmux).
+            "transport": "sdk",
             "transcripts_root": "~/.claude/projects",
             "provider": "anthropic",
             "process_names": ["claude"],
@@ -159,6 +161,14 @@ pub fn transcript_path(chat: &Value) -> Option<PathBuf> {
         }
         _ => Some(util::transcript_path(s("dir")?, s("id")?)),
     }
+}
+
+/** How the chat's agent runs: the registry's `transport` (set when it was launched), else the agent's
+(`agents.AGENT.transport`), else "tui". */
+pub fn transport(chat: &Value) -> String {
+    chat.get("transport").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string)
+        .or_else(|| get(&of(chat), "transport").and_then(|v| v.as_str().map(str::to_string)))
+        .unwrap_or_else(|| "tui".into())
 }
 
 /** The id the agent's hooks report for the chat: its `session_id` (Codex's own), else the chat id. */

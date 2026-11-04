@@ -539,7 +539,7 @@ fn combine(turn: Option<String>, hook: Option<(String, Option<Value>)>) -> Optio
     }
 }
 
-fn chats(states: &ChatStates) -> Vec<Chat> {
+fn chats(states: &ChatStates, sdk: &HashMap<String, crate::sdk::Snapshot>) -> Vec<Chat> {
     let dir = util::agent_home().join("state").join("registry").join("chats");
     let here = hosts::here();
     let foreign = hosts::flag("foreign_sessions", cfg!(target_os = "macos"));
@@ -568,7 +568,10 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             continue;
         }
         let tmux = util::chat_session(&id);
-        let is_alive = alive.contains(&tmux);
+        // An SDK chat runs as the daemon's own process; one with a tmux session left is still driven there.
+        let snap = sdk.get(&id);
+        let is_sdk = crate::agents::transport(&v) == "sdk" && !alive.contains(&tmux);
+        let is_alive = if is_sdk { snap.is_some_and(|s| s.alive) } else { alive.contains(&tmux) };
         // A stopped chat another tool here still runs (super.engineering, on the Mac): starting it takes it over.
         let status = if !is_alive && foreign && elsewhere
             .get_or_insert_with(crate::elsewhere::sessions_running)
@@ -582,10 +585,12 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
         let turns = crate::agents::get(&agent, "turn_events").and_then(|t| t.as_object().cloned());
         let turn = turns.as_ref().zip(transcript.as_deref()).and_then(|(t, p)| crate::codex::turn_state(p, t));
         let hook = combine(turn, hook);
-        let pane = if is_alive && (turns.is_some() || hook.as_ref().is_none_or(|(st, _)| st == "idle" || st == "working")) { capture(&tmux) } else { None };
+        let pane = if is_alive && !is_sdk && (turns.is_some() || hook.as_ref().is_none_or(|(st, _)| st == "idle" || st == "working")) { capture(&tmux) } else { None };
         let pane_waits = pane.as_deref().is_some_and(|p| pane_waiting(p, &agent));
+        // An SDK chat's state comes from its stream, not from hooks or a pane.
         let (state, waiting_on) = match hook {
             _ if !is_alive => ("stopped".to_string(), None),
+            _ if is_sdk => snap.map(|s| (s.state.clone(), s.waiting_on.clone())).unwrap_or(("stopped".to_string(), None)),
             Some((st, w)) if !(turns.is_some() && pane_waits && st != "waiting") => (st, w),
             _ if pane_waits => ("waiting".to_string(), None),
             _ => ("idle".to_string(), None),
@@ -620,7 +625,7 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             session: s("session_id"),
             repo: s("repo"),
             base: s("base"),
-            model: s("model"),
+            model: snap.filter(|_| is_sdk).and_then(|x| x.model.clone()).or_else(|| s("model")),
             parent: s("parent"),
             feature: s("feature"),
             created_at: s("created_at"),
@@ -629,6 +634,9 @@ fn chats(states: &ChatStates) -> Vec<Chat> {
             transcript: transcript.as_ref().map(|p| p.to_string_lossy().into_owned()),
             status_line: activity,
             screen,
+            transport: if is_sdk { "sdk".into() } else { "tui".into() },
+            mode: snap.filter(|_| is_sdk).and_then(|x| x.mode.clone()).or_else(|| s("mode")),
+            effort: snap.filter(|_| is_sdk).and_then(|x| x.effort.clone()).or_else(|| s("effort")),
         });
     }
     out
@@ -689,10 +697,10 @@ fn sync_status() -> Option<SyncStatus> {
     Some(SyncStatus { pending, queued, last_push_at: s("last_push_at"), error: s("error"), branch: s("branch") })
 }
 
-pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64) -> Model {
+pub fn build(caches: &Arc<Caches>, states: &ChatStates, last_seq: i64, sdk: &HashMap<String, crate::sdk::Snapshot>) -> Model {
     let ws = sc(&["workspace", "list", "--json"]);
     let secs = sc(&["section", "list", "--json"]);
-    let chats = chats(states);
+    let chats = chats(states, sdk);
     let meta: HashMap<String, &Value> = secs
         .get("sections")
         .and_then(|v| v.as_array())
