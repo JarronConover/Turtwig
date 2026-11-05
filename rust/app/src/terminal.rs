@@ -631,7 +631,9 @@ impl TerminalView {
             return;
         }
         let mods = Mods { ctrl: m.control, alt: m.alt || passthrough, shift: m.shift };
-        let Some(bytes) = key_bytes(k.key.as_str(), mods, k.key_char.as_deref().or((passthrough && k.key.chars().count() == 1).then_some(k.key.as_str()))) else { return };
+        // gpui's macOS key_char leaves caps lock out.
+        let caps = k.key_char.as_deref().filter(|_| window.capslock().on).map(str::to_uppercase);
+        let Some(bytes) = key_bytes(k.key.as_str(), mods, caps.as_deref().or(k.key_char.as_deref()).or((passthrough && k.key.chars().count() == 1).then_some(k.key.as_str()))) else { return };
         self.term.selection = None;
         self.to_bottom();
         self.write(&bytes);
