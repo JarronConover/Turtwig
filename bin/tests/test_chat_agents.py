@@ -134,6 +134,15 @@ class Generic(unittest.TestCase):
         self.assertEqual(json.loads(Path(HOME, ".tool", "trust.json").read_text()), {"trusted": {folder: "yes"}})
         chat.trust_folder({"trust": None}, folder)
 
+    def test_a_symlinked_folders_transcript_is_under_its_target(self):
+        target = tempfile.mkdtemp(dir=HOME)
+        link = Path(HOME, "linked-repo")
+        link.symlink_to(target)
+        filed = chat.PROJECTS / chat.project_slug(os.path.realpath(target)) / "c-link.jsonl"
+        filed.parent.mkdir(parents=True, exist_ok=True)
+        filed.write_text("{}\n")
+        self.assertEqual(chat.transcript({"id": "c-link", "dir": str(link)}), filed)
+
     def test_backup_roots_cover_every_agent(self):
         roots = dict(chat.backup_roots())
         self.assertEqual(roots[f"{HOME}/.claude/projects"], "projects")
