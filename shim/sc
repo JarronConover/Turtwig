@@ -13,6 +13,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -345,8 +346,12 @@ def worktree_create(args):
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         cmd = ["worktree", "add", str(path)]
-        cmd += [branch] if exists or on_origin else ["-b", branch, f"origin/{base}"]
+        cmd += [branch] if exists or on_origin else ["--no-track", "-b", branch, f"origin/{base}"]
         git(*cmd, cwd=checkout, check=True)
+        for f in abxcfg.repos()[repo].get("copy_files") or []:
+            src, dst = Path(checkout) / f, path / f
+            if src.is_file() and not dst.exists():
+                shutil.copy2(src, dst)
     resp = {"id": item_id(path, False), "path": str(path), "branch": branch, "worktree": path.name,
             "project_id": repo, "workspace_id": WORKSPACE}
     print(json.dumps({"kind": "worktree_created", "response": resp, **resp}))

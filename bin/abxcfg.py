@@ -80,6 +80,8 @@ HOSTS = {
     "box": {
         "label": "box", "detect": {"env": "CODER_AGENT_URL"}, "ssh": None, "agent_box_dir": "~/agent-box",
         "sc_store": "sc.json", "supervise": True, "relay_app_actions": True, "sync_transcripts": "all", "stacks": False,
+        # No stacks run here, so redo worktrees skip wt (a slot per worktree) for plain `git worktree`.
+        "repos": {"redo": {"worktree_tool": None, "copy_files": ["conf.sh", ".secrets.sh", ".bazelrc.user"]}},
         "foreign_sessions": False, "build_unwatched": True, "env": {"REDO_GITLAB_USER_AUTH": "1"},
         "agent_env": {"path_prepend": ["{agent_box_dir}/shim", "~/redo-monorepo-worktrees/bin", "~/.local/bin"],
                       "set": {"WT_PRIMARY": "~/dev/redo", "WT_BASE": "~/dev/redo-worktrees"}},
@@ -296,7 +298,16 @@ def agent_box_dir(hid=None):
 
 
 def repos():
-    return merged(REPOS, option("repos", {}))
+    """REPOS, then the `repos` option, then this host's own `repos` (an entry's null key removes it)."""
+    out = merged(REPOS, option("repos", {}))
+    for key, over in (host().get("repos") or {}).items():
+        if over is None:
+            out.pop(key, None)
+        elif isinstance(over, dict) and isinstance(out.get(key), dict):
+            out[key] = {k: v for k, v in {**out[key], **over}.items() if v is not None}
+        else:
+            out[key] = over
+    return out
 
 
 def default_repo():
