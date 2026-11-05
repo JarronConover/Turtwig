@@ -60,6 +60,8 @@ BOX_BOOT = {
                "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {packages} > /dev/null 2>&1",
     "claude_onboarding": True,
     "git_insteadof": {"https://gitlab.com/": ["git@gitlab.com:", "ssh://git@gitlab.com/"]},
+    # agent-box-gc runs one gc at a time instead.
+    "git_config": {"maintenance.auto": "false", "gc.auto": "0"},
     "bashrc_hook": True,
     "tmux_status_off": True,
     "services": [
@@ -73,6 +75,7 @@ BOX_BOOT = {
         # The phone app's own tailnet node (the workspace's tailscaled keeps no state, so it can't get certs).
         {"name": "agent-box-ts", "cmd": "mkdir -p {agent_home}/ts && tailscaled --tun=userspace-networking --statedir={agent_home}/ts "
                                         "--socket={agent_home}/ts/tailscaled.sock --port=0 2>&1 | tee -a {agent_home}/log/ts.log"},
+        {"name": "agent-box-gc", "cmd": "{agent_box_dir}/bin/git-gc"},
     ],
 }
 

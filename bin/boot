@@ -59,6 +59,11 @@ while IFS=$'\t' read -r to from; do
     || git config --global --add "url.$to.insteadOf" "$from"
 done < <(b '.git_insteadof // {} | to_entries[] | .key as $to | .value[] | [$to, .] | @tsv')
 
+# Global git config, {key: value}.
+while IFS=$'\t' read -r key value; do
+  [ -n "$key" ] && git config --global "$key" "$value"
+done < <(b '.git_config // {} | to_entries[] | [.key, (.value | tostring)] | @tsv')
+
 if [ "$(b '.bashrc_hook // false')" = true ]; then
   # Second trigger: any ssh into the machine runs boot if it hasn't run.
   dir=$AGENT_BOX_DIR
