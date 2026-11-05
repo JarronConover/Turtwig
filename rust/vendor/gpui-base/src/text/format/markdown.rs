@@ -546,6 +546,14 @@ fn aligned_source_segments(
             && raw_cursor >= final_line_start
         {
             (0, remainder.len())
+        } else if let Some(newline) = (rendered_char == '\n')
+            .then(|| remainder.trim_start_matches([' ', '\t']))
+            .filter(|rest| rest.starts_with(['\n', '\r']))
+        {
+            // A soft break kept as a newline maps to the source's line
+            // ending, with any trailing whitespace before it.
+            let newline_len = if newline.starts_with("\r\n") { 2 } else { 1 };
+            (remainder.len() - newline.len(), newline_len)
         } else if decode_escapes
             && let Some(escaped) = remainder.strip_prefix('\\')
             && escaped.starts_with(rendered_char)
@@ -787,7 +795,14 @@ fn parse_paragraph(
             // so a CRLF document still carries its carriage return here. Take
             // the CR with the newline: dropping only the newline would strand
             // the CR in the middle of the reflowed line.
-            text = val.value.replace("\r\n", " ").replace(['\n', '\r'], " ");
+            //
+            // With soft_breaks_as_newlines (a.box chat), keep each soft break
+            // as one "\n" instead, so it renders as a line break.
+            text = if cx.markdown_extensions.keeps_soft_breaks() {
+                val.value.replace("\r\n", "\n").replace('\r', "\n")
+            } else {
+                val.value.replace("\r\n", " ").replace(['\n', '\r'], " ")
+            };
             paragraph.push(mapped_inline(source, text.clone(), node, cx))
         }
         Node::Emphasis(val) => {
@@ -2074,6 +2089,102 @@ mod tests {
             assert_eq!(paragraph.children[0].text.as_ref(), "Owner: Jane");
             assert_eq!(paragraph.children[1].text.as_ref(), "\n");
             assert_eq!(paragraph.children[2].text.as_ref(), "Persona: assistant");
+        }
+    }
+
+    fn parse_keeping_soft_breaks(source: &str) -> ParsedDocument {
+        let mut cx = NodeContext {
+            markdown_extensions: Arc::new(
+                MarkdownExtensions::default().soft_breaks_as_newlines(true),
+            ),
+            ..NodeContext::default()
+        };
+        parse(source, &mut cx).unwrap()
+    }
+
+    /// With soft_breaks_as_newlines, a bare line ending inside a paragraph
+    /// renders as a line break, for every line ending CommonMark recognises.
+    #[test]
+    fn test_soft_break_kept_as_newline() {
+        for source in ["a) one\nb) two", "a) one\r\nb) two", "a) one\rb) two"] {
+            let document = parse_keeping_soft_breaks(source);
+            let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+                panic!("expected paragraph");
+            };
+            assert_eq!(paragraph.text(), "a) one\nb) two", "source: {source:?}");
+        }
+    }
+
+    /// A hard break stays one line break (no blank line between), blank
+    /// lines still separate paragraphs, and a hand-written option list
+    /// inside a list item keeps one option per line.
+    #[test]
+    fn test_soft_break_kept_beside_hard_breaks_lists_and_paragraphs() {
+        let document = parse_keeping_soft_breaks("a\\\nb  \nc\nd\n\ne");
+        let texts: Vec<_> = document
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                BlockNode::Paragraph(paragraph) => Some(paragraph.text()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["a\nb\nc\nd", "e"]);
+
+        let document = parse_keeping_soft_breaks(
+            "1. Which emails?\n   a) Newsletters only\n   b) Everything\n2. Next",
+        );
+        let BlockNode::List { children, .. } = &document.blocks[0] else {
+            panic!("expected list");
+        };
+        assert_eq!(children.len(), 2);
+        let item = first_paragraph(&children[0]).expect("item paragraph");
+        assert_eq!(
+            item.text(),
+            "Which emails?\na) Newsletters only\nb) Everything"
+        );
+    }
+
+    /// Code blocks and tables are untouched by soft_breaks_as_newlines.
+    #[test]
+    fn test_soft_break_kept_leaves_code_and_tables_alone() {
+        let source = "```\nx  \ny\n```\n\n| A | B |\n| - | - |\n| 1 | 2 |";
+        let kept = parse_keeping_soft_breaks(source);
+        let plain = parse(source, &mut NodeContext::default()).unwrap();
+        let code = |document: &ParsedDocument| {
+            document.blocks.iter().find_map(first_code_block).unwrap().code()
+        };
+        assert_eq!(code(&kept), code(&plain));
+        assert_eq!(code(&kept).as_ref(), "x  \ny");
+        let BlockNode::Table(table) = &kept.blocks[1] else {
+            panic!("expected table");
+        };
+        assert_eq!(table.children[1].children[1].children.text(), "2");
+    }
+
+    /// A kept soft break selects as the source's line ending, so copying
+    /// across it still maps back to the right source range.
+    #[test]
+    fn test_soft_break_kept_maps_to_source_line_ending() {
+        for (source, newline) in [("a \nb", 2..3), ("a \r\nb", 2..4), ("a\n   b", 1..2)] {
+            let document = parse_keeping_soft_breaks(source);
+            let paragraph = document.blocks.iter().find_map(first_paragraph).unwrap();
+            let rendered = paragraph.text();
+            assert_eq!(rendered, "a\nb", "source: {source:?}");
+            for (selection, expected) in [
+                (1..2, newline.clone()),
+                (0..3, 0..source.len()),
+            ] {
+                let mut state = paragraph.state.lock().unwrap();
+                state.set_text(rendered.clone().into());
+                state.selection = Some(selection.clone().into());
+                drop(state);
+                assert_eq!(
+                    document.selected_source_range(),
+                    Some(expected),
+                    "source: {source:?}, selection: {selection:?}"
+                );
+            }
         }
     }
 

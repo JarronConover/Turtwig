@@ -246,6 +246,7 @@ impl PartialEq for MarkdownNode {
 pub struct MarkdownExtensions {
     enable_mdx: bool,
     enable_frontmatter: bool,
+    soft_breaks_as_newlines: bool,
     block_parsers: Vec<Arc<MarkdownBlockParserFn>>,
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
     inline_parsers: Vec<Arc<MarkdownInlineParserFn>>,
@@ -273,6 +274,19 @@ impl MarkdownExtensions {
         self.enable_frontmatter = true;
         self.bump_revision();
         self
+    }
+
+    /// Render a soft break (a bare line ending inside a paragraph) as a line
+    /// break, as GitHub-flavored "breaks" mode does, instead of reflowing it
+    /// to a space.
+    pub fn soft_breaks_as_newlines(mut self, on: bool) -> Self {
+        self.soft_breaks_as_newlines = on;
+        self.bump_revision();
+        self
+    }
+
+    pub(crate) fn keeps_soft_breaks(&self) -> bool {
+        self.soft_breaks_as_newlines
     }
 
     /// Enable MDX JSX/expression constructs.
@@ -352,6 +366,7 @@ impl MarkdownExtensions {
         self.parser_revision == other.parser_revision
             && self.enable_mdx == other.enable_mdx
             && self.enable_frontmatter == other.enable_frontmatter
+            && self.soft_breaks_as_newlines == other.soft_breaks_as_newlines
             && self.block_parsers.len() == other.block_parsers.len()
             && self.block_renderers.len() == other.block_renderers.len()
             && self.inline_parsers.len() == other.inline_parsers.len()

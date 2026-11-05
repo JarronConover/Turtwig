@@ -2516,6 +2516,9 @@
     "pending": { "show": true, "quiet_secs": 60 },
     // Tool step summaries are cut to this many characters.
     "summary_chars": 140,
+    // A single line break inside a message shows as a line break (GitHub's "breaks" mode), so lists
+    // written without Markdown markers keep one item per line; false: it reflows to a space (CommonMark).
+    "soft_breaks_as_newlines": true,
     // Counted labels may have KEY_one / KEY_other forms (e.g. "steps_one"); {s} is `plural` unless n is 1.
     "labels": {
       "plural": "s",
