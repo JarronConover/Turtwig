@@ -1790,6 +1790,67 @@ def wip_key(path):
     return f"{os.path.basename(origin.removesuffix('.git'))}/{branch.replace('/', '~')}"
 
 
+def dispatcher_parent(session):
+    """The /ship-feature parent this Claude session dispatches: the stem of the newest <PARENT>.lock it
+    owns in option dispatcher_ledger. None when it owns none, or that parent's ledger is missing or its
+    latest digest (events.printed or events.paused, `LEG=stage ... | notes`) has every leg done."""
+    folder = Path(abxcfg.expand(option("dispatcher_ledger", "~/.local/state/redo/ship-feature")))
+    owned = []
+    for lock in folder.glob("*.lock") if session and folder.is_dir() else ():
+        if lock.name.endswith((".feature.lock", ".watch.lock")):
+            continue
+        try:
+            held = json.loads(lock.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(held, dict) and held.get("session") == session:
+            owned.append((held.get("at") or 0, lock.stem))
+    if not owned:
+        return None
+    parent = max(owned)[1]
+    try:
+        events = json.loads((folder / f"{parent}.json").read_text()).get("events") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    marks = [m for m in (events.get("printed"), events.get("paused")) if isinstance(m, dict) and m.get("digest")]
+    if marks:
+        legs = max(marks, key=lambda m: m.get("at") or 0)["digest"].split("|", 1)[0].strip()
+        stages = re.findall(r"(\S+)=(.*?)(?=\s+\S+=|$)", legs)
+        if stages and all(stage.strip() == "done" for _, stage in stages):
+            return None
+    return parent
+
+
+RESUMING = set()
+
+
+def resume_dispatcher(chat):
+    """After a relaunch that resumed a dispatcher chat, send it resume_dispatcher_note once its prompt is
+    up, so it re-reads its ledger and re-arms the subagents and watchers the restart killed."""
+    if not option("resume_dispatchers", True) or chat["id"] in RESUMING:
+        return
+    parent = dispatcher_parent(session_of(chat))
+    if not parent:
+        return
+    text = option("resume_dispatcher_note", "/ship-feature {parent}").replace("{parent}", parent)
+    # A chat that died again before its prompt came up stays the supervisor's to relaunch.
+    env = {**os.environ, "AGENT_BOX_OPTIONS": json.dumps({**abxcfg.options(), "send_resumes": False})}
+    RESUMING.add(chat["id"])
+
+    def send():
+        try:
+            r = run([sys.executable, __file__, "send", chat["id"], text, "--wait",
+                     str(option("send_resume_wait_secs", 90))], check=False, capture_output=True, env=env)
+            if r.returncode == 0:
+                print(f"{now()} resumed dispatcher {parent} in {chat['name']}", flush=True)
+            else:
+                print(f"{now()} couldn't resume dispatcher {parent} in {chat['name']}: {one_line(r.stderr)}", flush=True)
+        finally:
+            RESUMING.discard(chat["id"])
+
+    threading.Thread(target=send, daemon=True).start()
+
+
 def cmd_supervise(args):
     """Keep every running chat on this host alive; runs forever."""
     while True:
@@ -1804,9 +1865,15 @@ def cmd_supervise(args):
             try:
                 fresh = chat.get("branch") and not worktree_dir(chat).exists()
                 t = transcript(chat)
-                launch(chat, resume=bool(t and t.exists()), restore_from=HOST if fresh else None)
+                resume = bool(t and t.exists())
+                launch(chat, resume=resume, restore_from=HOST if fresh else None)
                 save(chat, f"chat relaunch: {chat['name']}")
                 print(f"{now()} relaunched {chat['name']}", flush=True)
+                if resume:
+                    try:
+                        resume_dispatcher(chat)
+                    except Exception as err:  # never let it stop the supervisor
+                        print(f"{now()} resume check failed for {chat['name']}: {one_line(err)}", flush=True)
             except (subprocess.CalledProcessError, SystemExit) as err:
                 print(f"{now()} relaunch failed for {chat['name']}: {err}", flush=True)
         time.sleep(args.interval if args.interval is not None else option("supervise_secs", 30))

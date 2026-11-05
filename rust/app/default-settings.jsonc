@@ -3119,6 +3119,11 @@
     "terminal_mouse": false,             // tmux mouse mode on terminal shells (wheel scrolls tmux history)
     "terminal_history_limit": null,
     "chat_tmux_cols": 220, "chat_tmux_rows": 60, "rc_url_wait_secs": 45, "chat_send_pause_secs": 0.5, "supervise_secs": 30,
+    // When the supervisor relaunches a chat by resuming it and the chat's Claude session owns a
+    // /ship-feature lock in dispatcher_ledger (its newest <PARENT>.lock), it sends resume_dispatcher_note
+    // ({parent}) once the prompt is up, unless that parent's ledger digest has every leg done.
+    "resume_dispatchers": true, "resume_dispatcher_note": "/ship-feature {parent}",
+    "dispatcher_ledger": "~/.local/state/redo/ship-feature",
     "sync_transcript_max_mb": 95, "sync_bundle_warn_mb": 50, "sync_lock_wait_secs": 600,
     // How long scripts keep one ssh connection per machine open for the next call (0: a new one each
     // time; through Coder each takes seconds). An app not heard from in config_source_days stops counting
