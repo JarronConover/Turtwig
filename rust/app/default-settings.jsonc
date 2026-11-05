@@ -2901,7 +2901,7 @@
     "starting_chat": "Starting a chat…", "start_failed": "Couldn't start the chat: {error}", "making_worktree": "Making a worktree for {branch}…",
     "working": "Working…", "done": "Done", "failed": "Failed", "copied": "Copied", "nothing_to_undo": "Nothing to undo", "no_window": "No window to capture",
     "sending_after_upload": "Sending when the upload finishes", "stop_elsewhere": "This chat is running in super.engineering: stop it there, or take it over first",
-    "rename_branch_failed": "Couldn't rename the branch: {error}", "new_worktree_failed": "Couldn't make the worktree: {error}", "no_remote": "This project has no origin remote",
+    "rename_branch_failed": "Couldn't rename the branch: {error}", "new_worktree_failed": "Couldn't make the worktree: {error}", "action_failed": "That didn't work: {error}", "no_remote": "This project has no origin remote",
     "no_chat": "No chat here yet.", "new_chat_name": "New chat", "terminal_n": "Terminal {n}", "background_shell": "Background shell", "subagent": "Subagent",
     "waiting": "The agent is waiting for you", "waiting_cancel": "Cancel", "drop_to_attach": "Drop to attach to {chat}", "drag_move_to": "Move to {name}",
     "the_designer": "the designer", "this_chat": "this chat", "a_file": "a file", "n_files": "{n} files",

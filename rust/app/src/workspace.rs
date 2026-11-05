@@ -4176,8 +4176,14 @@ impl Workspace {
 
     pub(crate) fn call(&self, call: Call, cx: &mut Context<Self>) {
         let remote = self.route(&call);
-        cx.spawn(async move |_, _| {
-            let _ = remote.call(call).await;
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = remote.call(call).await {
+                this.update(cx, |ws, cx| {
+                    ws.pending_actions.push(json!({"do": "notify", "text": ws.tr("action_failed", "That didn't work: {error}", &[("error", &e.to_string())])}));
+                    cx.notify();
+                })
+                .ok();
+            }
         })
         .detach();
     }
