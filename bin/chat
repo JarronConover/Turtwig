@@ -1247,7 +1247,25 @@ def move_batch(groups, src, dst, section=None, labels=None):
         out = receive_all(spec)
     else:
         out = json.loads(on_host(dst, "_receive", json.dumps(spec)))
+    # src learns where its chats went from dst itself: through the state repo alone, a failed push left
+    # them "moving" on src, and something there started them again beside dst's.
+    entries = [c["entry"] for w in out["worktrees"] for c in w.get("chats", []) if c.get("entry")]
+    try:
+        if entries and src == HOST:
+            adopt_entries(entries)
+        elif entries:
+            on_host(src, "_adopt_entries", json.dumps(entries))
+    except (SystemExit, Exception) as err:
+        move_log(f"couldn't tell {label(src)} where its chats went: {err}")
     return [(w["folder"], w.get("dir"), w.get("error")) for w in out["worktrees"]]
+
+
+def adopt_entries(entries):
+    """Another machine's registry entries for chats it took over in a move, written here as they are."""
+    with StateLock():
+        for e in entries:
+            (REGISTRY / f"{e['id']}.json").write_text(json.dumps(e, indent=2) + "\n")
+        commit_state(f"chats moved away: {', '.join(e.get('name') or e['id'] for e in entries)}")
 
 
 def each(fn, calls):
@@ -1298,6 +1316,7 @@ def receive_all(spec):
                 take_over(chat, Path(w["dir"]), commit=False)
                 if c.get("stopped"):
                     set_status(chat, "stopped")
+                c["entry"] = load(c["id"])
             except (SystemExit, Exception) as err:
                 w["error"] = str(err).strip() or type(err).__name__
         if w.get("error"):
@@ -1995,6 +2014,9 @@ def main():
         h = sub.add_parser(name)
         h.add_argument("spec")
         h.set_defaults(fn=fn)
+    h = sub.add_parser("_adopt_entries")
+    h.add_argument("entries")
+    h.set_defaults(fn=lambda a: adopt_entries(json.loads(a.entries)))
     h = sub.add_parser("_receive")
     h.add_argument("spec", help="JSON: {from, section?, worktrees: [{folder, repo, branch, label?, chats: [{id, stopped}]}]}")
     h.set_defaults(fn=cmd__receive)
