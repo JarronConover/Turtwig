@@ -5127,6 +5127,7 @@ impl Workspace {
         let w = chat.waiting_on.clone().unwrap_or_default();
         let fallback = self.tr("waiting", "The agent is waiting for you", &[]);
         let message = waiting_message(&w).unwrap_or(fallback);
+        let detail = waiting_detail(&w, self.settings.get("chat.waiting_detail_lines").and_then(Value::as_u64).unwrap_or(12) as usize);
         let (options, mut questions) = waiting_options(&w, &self.settings);
         questions.retain(|q| *q != message);
         let cancel = self.tr("waiting_cancel", "Cancel", &[]);
@@ -5148,6 +5149,7 @@ impl Workspace {
         }
         style::apply(v_flex().gap(px(10.)), &st("waiting"), theme)
             .child(div().child(message))
+            .children(detail.map(|d| style::apply(div(), &st("waiting_detail"), theme).child(d)))
             .children(questions.into_iter().map(|q| div().child(q)))
             .child(row)
             .into_any_element()
@@ -5903,9 +5905,26 @@ pub(crate) fn switch_rows(items: &mut Vec<Worktree>, to: &str, branches: &HashSe
     *items = out;
 }
 
-/** What a waiting chat asks: its (first) question's text, else the agent's message, else the tool's name. */
+/** What a waiting chat asks: its (first) question's text, else the agent's message, else the tool's name
+and what the agent says the call does. */
 pub(crate) fn waiting_message(w: &Value) -> Option<String> {
-    w["tool_input"]["questions"][0]["question"].as_str().or(w["message"].as_str()).or(w["tool_name"].as_str()).map(str::to_string)
+    let tool = w["tool_name"].as_str().map(|t| match w["tool_input"]["description"].as_str() {
+        Some(d) => format!("{t}: {d}"),
+        None => t.to_string(),
+    });
+    w["tool_input"]["questions"][0]["question"].as_str().or(w["message"].as_str()).map(str::to_string).or(tool)
+}
+
+/** What a permission prompt's tool call would run or touch (its command, file, URL, pattern or plan), cut
+to `max_lines`. */
+pub(crate) fn waiting_detail(w: &Value, max_lines: usize) -> Option<String> {
+    let text = ["command", "file_path", "url", "pattern", "plan"].iter().find_map(|k| w["tool_input"][*k].as_str())?;
+    let lines: Vec<&str> = text.trim_end().lines().collect();
+    let mut out = lines[..lines.len().min(max_lines)].join("\n");
+    if lines.len() > max_lines {
+        out.push_str(&format!("\n… {} more lines", lines.len() - max_lines));
+    }
+    Some(out)
 }
 
 /** Each question a waiting chat asks, with its options' labels. */
