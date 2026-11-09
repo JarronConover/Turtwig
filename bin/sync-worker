@@ -105,15 +105,19 @@ sync_sessions() {
     touch "$AGENT_HOME/push-pending"
     log "push failed, retrying on the next turn: $err"
     sync_status "" "$err"
+    # Over the cap, no push succeeds, so the prune after one never comes: prune now (every 15 minutes at most).
+    case $err in *"exceeded the allocated storage"*) prune_remote 15 ;; esac
   fi
 }
 
 # Each push replaces the last snapshot, and GitLab keeps every replaced one until a prune: they
-# passed its 10GB cap, which refuses every push (state included). So a prune every remote_prune_hours.
+# passed its 10GB cap, which refuses every push (state included). So a prune every remote_prune_hours,
+# or every $1 minutes when given.
 prune_remote() {
-  local stamp="$AGENT_HOME/remote-pruned" hours project
-  hours=$(opt remote_prune_hours); hours=${hours:-24}
-  [ -n "$(find "$stamp" -mmin -$((hours * 60)) 2> /dev/null)" ] && return 0
+  local stamp="$AGENT_HOME/remote-pruned" hours minutes project
+  hours=$(opt remote_prune_hours); hours=${hours:-6}
+  minutes=${1:-$((hours * 60))}
+  [ -n "$(find "$stamp" -mmin -"$minutes" 2> /dev/null)" ] && return 0
   project=$(printf '%s' "$AGENT_BOX_REPO_URL" | sed -nE 's#^(https://|ssh://)?(git@)?gitlab\.com[:/](.*)$#\3#p')
   project=${project%.git}
   [ -n "$project" ] && command -v glab > /dev/null || return 0
