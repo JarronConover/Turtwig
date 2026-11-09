@@ -155,12 +155,16 @@ def run(cmd, **kw):
         print(f"[{time.time() - start:6.2f}s] {shlex.join(map(str, cmd))[:160]}", file=sys.stderr)
 
 
+def git_net_env():
+    """A stalled connection to GitLab fails within seconds instead of holding a move (or anything) forever."""
+    return {**os.environ, "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND") or
+            "ssh -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"}
+
+
 def git_state(*args, check=True):
     # A stalled connection to GitLab fails within seconds instead of holding a move (or anything) forever.
-    env = {**os.environ, "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND") or
-           "ssh -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"}
     try:
-        return run(["git", "-C", str(STATE_DIR), *args], capture_output=True, check=check, env=env,
+        return run(["git", "-C", str(STATE_DIR), *args], capture_output=True, check=check, env=git_net_env(),
                    timeout=option("state_git_timeout_secs", 60))
     except subprocess.TimeoutExpired as err:
         if check:
@@ -425,8 +429,11 @@ def make_worktree(repo, branch, wt_dir, base=None, fetched=False, serial=None):
 
 
 def fetch_branch(checkout, branch):
-    run(["git", "-C", str(checkout), "fetch", "-q", "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
-        check=False, capture_output=True)
+    try:
+        run(["git", "-C", str(checkout), "fetch", "-q", "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+            check=False, capture_output=True, env=git_net_env(), timeout=option("fetch_timeout_secs", 180))
+    except subprocess.TimeoutExpired:
+        print(f"warning: fetching {branch} in {checkout} timed out", file=sys.stderr)
 
 
 def ensure_worktree(chat, restore_from=None, incoming=False):
@@ -1135,6 +1142,21 @@ def sc_store(host):
     return data
 
 
+def live_sc_store(host):
+    """A machine's sidebar store as it is there now: this one's file, or the other's over ssh (the state
+    repo's copy lags whenever a push fails, and a move by it takes the wrong worktrees)."""
+    if host == HOST:
+        return sc_store(host)
+    data = json.loads(on_host(host, "_sc_store") or "{}")
+    data.setdefault("sections", [])
+    data.setdefault("worktrees", {})
+    return data
+
+
+def cmd__sc_store(args):
+    print(json.dumps(sc_store(HOST)))
+
+
 def on_host(host, *args):
     """Run this script's command on a machine; returns its stdout."""
     if host == HOST:
@@ -1185,13 +1207,12 @@ def cmd__snapshot_dir(args):
     snapshot_now()
 
 
-def move_group(chat, scope):
+def move_group(chat, scope, store):
     """What moves with this chat: (its section or None, [(source folder, branch, repo, [chats])]).
     scope "section": every worktree in the chat's section and every chat in them; "worktree": the chat's
     worktree and all its chats; "chat": the chat alone."""
     src = chat["host"]
     chats = [c for c in all_chats() if c["host"] == src and c["status"] != "archived" and c.get("dir")]
-    store = sc_store(src)
     known = sorted({c["dir"] for c in chats} | set(store["worktrees"]))
     if src == HOST and scope != "chat":
         # Resolving every folder takes a git call or two each: here, only the ones that can move along.
@@ -1538,23 +1559,33 @@ def cmd_move(args):
         return
     ssh_to(dst if src == HOST else src)
     scope = args.scope or option("move_together", "section")
-    section, groups = move_group(chat, scope)
+    store = live_sc_store(src)
+    section, groups = move_group(chat, scope, store)
     if args.dry_run:
         print(json.dumps({"section": section and section["name"], "from": src, "to": dst, "worktrees": [
             {"folder": f, "branch": b, "repo": r, "chats": [c["name"] for c in cs]} for f, b, r, cs in groups]}, indent=2))
         return
-    labels = {f: sc_store(src)["worktrees"].get(f, {}).get("label") for f, *_ in groups}
+    # One move at a time: a retry beside a running move raced it, and the loser moved the section back.
+    AGENT_HOME.mkdir(parents=True, exist_ok=True)
+    lock = open(AGENT_HOME / "move.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(f"another move is still running on the {label(HOST)}; wait for it to finish")
+    labels = {f: store["worktrees"].get(f, {}).get("label") for f, *_ in groups}
+    # The section's entries as the move found them: one added on src since then keeps the section there.
+    members = [p for p, m in store["worktrees"].items() if section and m.get("section") == section["section_id"]]
     every = [c for *_, cs in groups for c in cs]
     started = time.time()
     # Tells the app each row switches machines as its worktree lands, instead of showing on both.
     app_do([{"do": "state.set", "key": "moving", "value": {"to": dst, "branches": [b for _, b, *_ in groups if b], "at": started}}])
     try:
-        finish_move(chat, src, dst, section, groups, labels, every, started)
+        finish_move(chat, src, dst, section, groups, labels, every, started, members)
     finally:
         app_do([{"do": "state.set", "key": "moving", "value": None}])
 
 
-def finish_move(chat, src, dst, section, groups, labels, every, started):
+def finish_move(chat, src, dst, section, groups, labels, every, started, members):
     # Before the move, which marks each chat "moving" as it stops it.
     running = {c["id"] for *_, cs in groups for c in cs if c["status"] == "running"}
     try:
@@ -1597,7 +1628,7 @@ def finish_move(chat, src, dst, section, groups, labels, every, started):
         set_hidden(leftovers, True)
     # The chats already run on dst; the rest needn't hold the move up (agent-box.log has the outcome).
     background("_after_move", json.dumps({"at": started, "src": src, "dst": dst, "section": section, "moved": moved, "running": sorted(running),
-                                          "chats": [c["id"] for c in every], "leftovers": leftovers}))
+                                          "chats": [c["id"] for c in every], "leftovers": leftovers, "members": members}))
     what = f"section {section['name']}" if section else chat["name"]
     print(f"moved {what} to the {label(dst)}: {len(every)} chat(s), {len(groups)} worktree(s)")
     for a, b in moved.items():
@@ -1617,7 +1648,12 @@ def after_move(spec):
     chats = [c for c in (load(i) for i in spec["chats"]) if c]
     mode = option("move_leftovers", "hide")
     if section and not option("move_keep_section", False):
-        sc_on(src, "section", "delete", section["section_id"])
+        stayed = [p for p, m in live_sc_store(src)["worktrees"].items()
+                  if m.get("section") == section["section_id"] and p not in spec.get("members", [])]
+        if stayed:
+            print(f"kept section {section['name']} on the {label(src)}: {', '.join(stayed)} didn't move")
+        else:
+            sc_on(src, "section", "delete", section["section_id"])
     if section or any(is_orchestrator(c) for c in chats):
         sync_files(src, dst, moved)
     note_moved(chats, src, dst, section, moved, set(spec["running"]))
@@ -2035,6 +2071,8 @@ def main():
     h.add_argument("mode", choices=["remove", "delete"])
     h.add_argument("--since", type=float, help="keep it if a move brought it here after this time")
     h.set_defaults(fn=cmd__drop_worktree)
+    h = sub.add_parser("_sc_store")
+    h.set_defaults(fn=cmd__sc_store)
     h = sub.add_parser("_paths")
     h.add_argument("paths", nargs="*")
     h.set_defaults(fn=cmd__paths)

@@ -120,11 +120,13 @@ prune_remote() {
   [ -n "$(find "$stamp" -mmin -"$minutes" 2> /dev/null)" ] && return 0
   project=$(printf '%s' "$AGENT_BOX_REPO_URL" | sed -nE 's#^(https://|ssh://)?(git@)?gitlab\.com[:/](.*)$#\3#p')
   project=${project%.git}
-  [ -n "$project" ] && command -v glab > /dev/null || return 0
-  if glab api -X POST "projects/${project//\//%2F}/housekeeping?task=prune" > /dev/null 2>&1; then
+  [ -n "$project" ] || { log "no GitLab prune: $AGENT_BOX_REPO_URL isn't a gitlab.com repo"; return 0; }
+  command -v glab > /dev/null || { log "no GitLab prune of $project: glab isn't on PATH"; return 0; }
+  local out
+  if out=$(glab api -X POST "projects/${project//\//%2F}/housekeeping?task=prune" 2>&1); then
     touch "$stamp"
   else
-    log "GitLab prune of $project failed"
+    log "GitLab prune of $project failed: $out"
   fi
 }
 
