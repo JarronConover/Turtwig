@@ -134,6 +134,15 @@ class Generic(unittest.TestCase):
         self.assertEqual(json.loads(Path(HOME, ".tool", "trust.json").read_text()), {"trusted": {folder: "yes"}})
         chat.trust_folder({"trust": None}, folder)
 
+    def test_a_symlinked_folders_transcript_is_under_its_target(self):
+        target = tempfile.mkdtemp(dir=HOME)
+        link = Path(HOME, "linked-repo")
+        link.symlink_to(target)
+        filed = chat.PROJECTS / chat.project_slug(os.path.realpath(target)) / "c-link.jsonl"
+        filed.parent.mkdir(parents=True, exist_ok=True)
+        filed.write_text("{}\n")
+        self.assertEqual(chat.transcript({"id": "c-link", "dir": str(link)}), filed)
+
     def test_backup_roots_cover_every_agent(self):
         roots = dict(chat.backup_roots())
         self.assertEqual(roots[f"{HOME}/.claude/projects"], "projects")
@@ -145,6 +154,47 @@ class Generic(unittest.TestCase):
         self.assertIn("orchestrator", chat.chat_kinds())
         os.environ["AGENT_BOX_OPTIONS"] = json.dumps({"chat_kinds": ["solo"]})
         self.assertEqual(chat.chat_kinds(), ["solo"])
+
+
+class Dispatchers(unittest.TestCase):
+    """dispatcher_parent: which /ship-feature parent a relaunched chat resumes, from its locks and ledger."""
+    LEDGER = Path(HOME, ".local", "state", "redo", "ship-feature")
+
+    def setUp(self):
+        shutil.rmtree(self.LEDGER, ignore_errors=True)
+        self.LEDGER.mkdir(parents=True)
+
+    def lock(self, name, session, at):
+        (self.LEDGER / f"{name}.lock").write_text(json.dumps({"pid": 1, "session": session, "at": at}))
+
+    def ledger(self, parent, printed=None, paused=None):
+        events = {k: {"digest": m[0], "at": m[1]} for k, m in (("printed", printed), ("paused", paused)) if m}
+        (self.LEDGER / f"{parent}.json").write_text(json.dumps({"events": events}))
+
+    def test_the_newest_lock_the_session_owns(self):
+        self.lock("AIOPSUP-1", "s1", 100)
+        self.lock("AIOPSUP-2", "s1", 200)
+        self.lock("AIOPSUP-3", "s2", 300)
+        self.lock("AIOPSUP-9.feature", "s1", 900)
+        self.lock("AIOPSUP-9.watch", "s1", 900)
+        for p in ("AIOPSUP-1", "AIOPSUP-2", "AIOPSUP-3"):
+            self.ledger(p, ("AIOPSUP-5=verifying AIOPSUP-6=your review | ", 1))
+        self.assertEqual(chat.dispatcher_parent("s1"), "AIOPSUP-2")
+        self.assertIsNone(chat.dispatcher_parent("s3"))
+        self.assertIsNone(chat.dispatcher_parent(None))
+
+    def test_a_finished_or_unknown_feature_is_left_alone(self):
+        self.lock("AIOPSUP-1", "s1", 100)
+        self.assertIsNone(chat.dispatcher_parent("s1"))
+        self.ledger("AIOPSUP-1", ("AIOPSUP-5=done AIOPSUP-6=done | ", 1))
+        self.assertIsNone(chat.dispatcher_parent("s1"))
+        # The newer of printed and paused counts.
+        self.ledger("AIOPSUP-1", ("AIOPSUP-5=done AIOPSUP-6=done | ", 1), ("6=hold | fixcap", 2))
+        self.assertEqual(chat.dispatcher_parent("s1"), "AIOPSUP-1")
+        self.ledger("AIOPSUP-1", ("AIOPSUP-5=done AIOPSUP-6=merged/deploying |", 1))
+        self.assertEqual(chat.dispatcher_parent("s1"), "AIOPSUP-1")
+        self.ledger("AIOPSUP-1")
+        self.assertEqual(chat.dispatcher_parent("s1"), "AIOPSUP-1")
 
 
 if __name__ == "__main__":

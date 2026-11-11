@@ -130,6 +130,16 @@ class Repos(Config):
         self.assertEqual(env["WT_BASE"], str(Path.home() / "dev" / "redo-worktrees"))
         self.assertIsNone(abxcfg.worktree_tool("redo-data"))
 
+    def test_box_redo_worktrees_skip_the_worktree_tool(self):
+        os.environ["AGENT_BOX_HOST"] = "box"
+        self.assertIsNone(abxcfg.worktree_tool("redo"))
+        self.assertEqual(abxcfg.primary("redo"), Path.home() / "dev" / "redo")
+        os.environ["AGENT_BOX_HOST"] = "mac"
+        self.assertEqual(abxcfg.worktree_tool("redo")["create"], ["{bin}", "{branch}", "--no-start"])
+        os.environ["AGENT_BOX_HOST"] = "box"
+        self.opts(hosts={"box": {"repos": {"redo": {"worktree_tool": {"bin": "wt", "create": ["{bin}", "{branch}"]}}}}})
+        self.assertEqual(abxcfg.worktree_tool("redo")["create"], ["{bin}", "{branch}"])
+
     def test_default_base_reads_origin_head(self):
         repo = Path(tempfile.mkdtemp(dir=Path.home()))
         run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, check=True)  # noqa: E731

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# One `git gc` at a time over this host's primary checkouts, then again every
+# GC_EVERY_SECS. Hosts that run it turn git's auto maintenance off (boot's
+# git_config): there, every agent's fetch otherwise starts its own detached
+# repack of the whole redo pack, and a dozen at once run the box out of memory.
+set -u
+. "$(dirname "$0")/env.sh"
+
+sleep "${GC_FIRST_DELAY_SECS:-1800}"
+while :; do
+  for dir in $(python3 "$AGENT_BOX_DIR/bin/abxcfg.py" get repos | jq -r '.[].primary // empty'); do
+    dir=${dir/#\~/$HOME}
+    git -C "$dir" rev-parse --git-dir > /dev/null 2>&1 || continue
+    log "gc start $dir"
+    nice -n 19 git -C "$dir" -c pack.threads="${GC_THREADS:-4}" gc --quiet || log "gc failed: $dir"
+    log "gc done $dir"
+  done
+  sleep "${GC_EVERY_SECS:-86400}"
+done

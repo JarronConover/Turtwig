@@ -309,6 +309,10 @@ impl Workspace {
             memo.hash(&path_value(ctx, p)).hash(&mut s);
         }
         drop(memo);
+        // Built-ins draw from the workspace, so any update to it is news to them.
+        if !deps.builtins.is_empty() {
+            self.updates.hash(&mut s);
+        }
         for (kind, props) in &deps.builtins {
             let props = self.exprs.resolve(props, ctx);
             self.builtin_news(kind, &props).hash(&mut s);

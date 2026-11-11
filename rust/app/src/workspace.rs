@@ -412,6 +412,8 @@ pub struct Workspace {
     /** context_data, and what it was built for: (ctx_rev, model seq, transcript revisions, frame). */
     ctx_data: std::cell::RefCell<Option<((u64, u64, u64, u64), std::time::Instant, Val)>>,
     chat_json_memo: std::cell::RefCell<Option<HashMap<String, Value>>>,
+    /** The sidebar's order as last written to ~/.agent-box/sidebar-order.json, for the phone app. */
+    sidebar_order_written: std::cell::RefCell<String>,
     /** While the context is built: the selected chat, found once for every chat it shows. */
     building_current: std::cell::RefCell<Option<Option<String>>>,
     /** Where each chat sits in `model.chats`, and each worktree in the model (project or section, then
@@ -458,6 +460,9 @@ pub struct Workspace {
     settings_val: Val,
     layout_val: std::cell::RefCell<Option<(u64, Val)>>,
     pub(crate) notify_count: u64,
+    /** Updates made to the workspace when this frame began drawing it: unchanged, a view inside it (a
+    scrolled list, a terminal) asked for the frame, so regions holding built-ins can be reused. */
+    pub(crate) updates: u64,
     badge: Option<String>,
     dock_icon: Option<Vec<u8>>,
     pub(crate) diff_collapsed: HashSet<String>,
@@ -707,6 +712,7 @@ impl Workspace {
             ctx_cache: None,
             ctx_data: Default::default(),
             chat_json_memo: Default::default(),
+            sidebar_order_written: Default::default(),
             building_current: Default::default(),
             chat_index: Default::default(),
             worktree_index: Default::default(),
@@ -735,6 +741,7 @@ impl Workspace {
             window_dirty: false,
             hosts_dirty: false,
             notify_count: 0,
+            updates: 0,
             badge: None,
             dock_icon: None,
             diff_collapsed: HashSet::new(),
@@ -2416,6 +2423,20 @@ impl Workspace {
         }
     }
 
+    /** The phone app lists the box's worktrees and chats in the sidebar's order: projects then sections, each
+    group's rows as shown, each row's chats in tab order. env_push copies the file to the box. */
+    fn write_sidebar_order(&self, groups: Vec<Value>) {
+        let text = json!({"groups": groups}).to_string();
+        if *self.sidebar_order_written.borrow() == text {
+            return;
+        }
+        let path = std::path::PathBuf::from(crate::script::expand("~/.agent-box/sidebar-order.json"));
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
+            *self.sidebar_order_written.borrow_mut() = text;
+        }
+    }
+
     /** A worktree's chats in tab order (`state.tab_order[path]`, set by dragging tabs), the rest after. */
     fn chats_of(&self, w: &Worktree) -> Vec<&Chat> {
         let mut chats: Vec<&Chat> = w.chat_ids.iter().filter_map(|id| self.chat(id)).collect();
@@ -2554,6 +2575,11 @@ impl Workspace {
         let project_gap = self.card_gap("project", "projcard", &project_ids);
         let section_ids: Vec<String> = self.model.sections.iter().map(|s| s.id.clone()).collect();
         let section_gap = self.card_gap("section", "seccard", &section_ids);
+        let order = std::cell::RefCell::new(Vec::<Value>::new());
+        let note_order = |group: String, shown: &[&Worktree]| {
+            let items: Vec<Value> = shown.iter().map(|w| json!({"path": w.path, "chats": self.chats_of(w).iter().map(|c| &c.id).collect::<Vec<_>>()})).collect();
+            order.borrow_mut().push(json!({"group": group, "items": items}));
+        };
         let projects: Vec<Val> = self
             .model
             .projects
@@ -2565,6 +2591,7 @@ impl Workspace {
                 let (name, letter, hue) = self.project_look(&p.repo, &p.name, p.hue);
                 let (show_external, show_primary) = (!self.flag(&format!("hide_external:{}", p.repo)), !self.flag(&format!("hide_primary:{}", p.repo)));
                 let shown = self.visible_items(&p.items, |w| (show_external || !w.external) && (show_primary || !w.is_primary));
+                note_order(format!("p:{}", p.repo), &shown);
                 let gaps = self.drop_gaps(&shown);
                 let primary = p.items.iter().find(|w| w.is_primary).or(p.items.first());
                 let head = json!({"name": name, "repo": p.repo, "hue": hue, "letter": letter,
@@ -2588,6 +2615,7 @@ impl Workspace {
                 if self.settings.get("sidebar.orchestrators_first").and_then(Value::as_bool) != Some(false) {
                     shown.sort_by_cached_key(|w| !self.chats_of(w).iter().any(|c| self.is_orchestrator(c)));
                 }
+                note_order(format!("s:{}", s.id), &shown);
                 let gaps = self.drop_gaps(&shown);
                 let (gap, gap_end) = &section_gap;
                 let head = json!({"id": s.id, "name": s.name, "collapsed": s.collapsed,
@@ -2597,6 +2625,7 @@ impl Workspace {
             })
             .collect();
         let into = self.drop_into();
+        self.write_sidebar_order(std::mem::take(&mut *order.borrow_mut()));
         let removed: Vec<Value> = self.model.projects.iter().filter(|p| self.project_removed(&p.repo)).map(|p| json!({"repo": p.repo, "name": self.project_look(&p.repo, &p.name, p.hue).0})).collect();
         let selected_w = self.current_worktree().and_then(|w| worktree_val.get(&(w as *const Worktree))).map(|v| crate::ui::expr::with(v, vec![("section".into(), Val::Null)])).unwrap_or(Val::Null);
         let selected_diff = self.selected.as_deref().map(|p| self.diff_summary(p)).unwrap_or(Value::Null);
@@ -4161,8 +4190,14 @@ impl Workspace {
 
     pub(crate) fn call(&self, call: Call, cx: &mut Context<Self>) {
         let remote = self.route(&call);
-        cx.spawn(async move |_, _| {
-            let _ = remote.call(call).await;
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = remote.call(call).await {
+                this.update(cx, |ws, cx| {
+                    ws.pending_actions.push(json!({"do": "notify", "text": ws.tr("action_failed", "That didn't work: {error}", &[("error", &e.to_string())])}));
+                    cx.notify();
+                })
+                .ok();
+            }
         })
         .detach();
     }
@@ -4744,11 +4779,18 @@ impl Workspace {
                 ws.select_tip = Some(crate::ui::quote_view::SelectTip { chat: tip_chat.clone(), at: e.position, text: String::new() });
                 cx.notify();
             }))
-            .on_scroll_wheel(cx.listener(|ws, _, _, cx| {
-                if ws.select_tip.take().is_some() {
-                    cx.notify();
+            .on_scroll_wheel({
+                // Updating the workspace on every wheel event would draw every region holding a built-in.
+                let view = cx.entity().downgrade();
+                move |_, _, cx| {
+                    if view.read_with(cx, |ws, _| ws.select_tip.is_some()).unwrap_or(false) {
+                        let _ = view.update(cx, |ws, cx| {
+                            ws.select_tip = None;
+                            cx.notify();
+                        });
+                    }
                 }
-            }))
+            })
             .when(drop_attaches, |d| d.on_drop(move |paths: &ExternalPaths, window, cx| {
                 let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
                 let chat = drop_chat.clone();
@@ -5106,6 +5148,7 @@ impl Workspace {
         let w = chat.waiting_on.clone().unwrap_or_default();
         let fallback = self.tr("waiting", "The agent is waiting for you", &[]);
         let message = waiting_message(&w).unwrap_or(fallback);
+        let detail = waiting_detail(&w, self.settings.get("chat.waiting_detail_lines").and_then(Value::as_u64).unwrap_or(12) as usize);
         let (options, mut questions) = waiting_options(&w, &self.settings);
         questions.retain(|q| *q != message);
         let cancel = self.tr("waiting_cancel", "Cancel", &[]);
@@ -5126,6 +5169,7 @@ impl Workspace {
         }
         style::apply(v_flex().gap(px(10.)), &st("waiting"), theme)
             .child(div().child(message))
+            .children(detail.map(|d| style::apply(div(), &st("waiting_detail"), theme).child(d)))
             .children(questions.into_iter().map(|q| div().child(q)))
             .child(row)
             .into_any_element()
@@ -5313,6 +5357,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = std::time::Instant::now();
+        self.updates = cx.updates_of(cx.entity_id());
         crate::ui::anim::set_fps(if self.motion.borrow().enabled { self.settings.motion.get("animation_fps").and_then(Value::as_f64).unwrap_or(60.) } else { 0. });
         crate::ui::anim::clear("");
         self.thumbs.clear("");
@@ -5946,9 +5991,26 @@ pub(crate) fn switch_rows(items: &mut Vec<Worktree>, to: &str, branches: &HashSe
     *items = out;
 }
 
-/** What a waiting chat asks: its (first) question's text, else the agent's message, else the tool's name. */
+/** What a waiting chat asks: its (first) question's text, else the agent's message, else the tool's name
+and what the agent says the call does. */
 pub(crate) fn waiting_message(w: &Value) -> Option<String> {
-    w["tool_input"]["questions"][0]["question"].as_str().or(w["message"].as_str()).or(w["tool_name"].as_str()).map(str::to_string)
+    let tool = w["tool_name"].as_str().map(|t| match w["tool_input"]["description"].as_str() {
+        Some(d) => format!("{t}: {d}"),
+        None => t.to_string(),
+    });
+    w["tool_input"]["questions"][0]["question"].as_str().or(w["message"].as_str()).map(str::to_string).or(tool)
+}
+
+/** What a permission prompt's tool call would run or touch (its command, file, URL, pattern or plan), cut
+to `max_lines`. */
+pub(crate) fn waiting_detail(w: &Value, max_lines: usize) -> Option<String> {
+    let text = ["command", "file_path", "url", "pattern", "plan"].iter().find_map(|k| w["tool_input"][*k].as_str())?;
+    let lines: Vec<&str> = text.trim_end().lines().collect();
+    let mut out = lines[..lines.len().min(max_lines)].join("\n");
+    if lines.len() > max_lines {
+        out.push_str(&format!("\n… {} more lines", lines.len() - max_lines));
+    }
+    Some(out)
 }
 
 /** Each question a waiting chat asks, with its options' labels. */

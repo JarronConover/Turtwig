@@ -76,7 +76,7 @@ impl Render for Shell {
         let mut full = StyleRefinement::default();
         full.size.width = Some(relative(1.).into());
         full.size.height = Some(relative(1.).into());
-        div().relative().size_full().child(AnyView::from(self.ws.clone()).cached(full)).child(self.anim.clone()).child(frame_end)
+        div().relative().size_full().child(AnyView::from(self.ws.clone()).cached(full).reuse_nested()).child(self.anim.clone()).child(frame_end)
     }
 }
 

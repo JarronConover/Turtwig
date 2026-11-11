@@ -1,0 +1,1683 @@
+// Jarron's overrides. Everything else comes from ~/dev/turtwig/rust/app/default-settings.jsonc
+// (the repo defaults). Objects merge key by key; null removes a default.
+{
+  "app": { "source_dir": "~/dev/turtwig" },
+
+  // Accent: a calm sage green instead of the default blue, in levels. @accent is the base (buttons,
+  // links, drop highlights); @accent_bright for hover/pressed; @accent_deep for a filled selected row;
+  // @accent_tint for faint fills; @accent_text for green text on dark. Selection and tab tints follow.
+  "theme": {
+    // Surfaces swapped from the default: the window (sidebar, toolbar, gutters) is the darker gray and
+    // the cards (chat, terminal, changes) sit lighter on top of it.
+    "window": "#171718",
+    "card": "#1f1f21",
+    "composer": "#262628",
+    "line": "#343437",
+    "hover": "#2c2c2f",
+    "pill": "#303033",
+    "pill_hover": "#3a3a3e",
+    "user_bubble": "#333337",
+    "accent": "#5fb58a",
+    "accent_bright": "#7ccba3",
+    "accent_deep": "#1f4a36",
+    "accent_tint": "#5fb58a22",
+    "accent_text": "#8fd4b2",
+    "selection": "#22302a",
+    "selection_border": "#3f5f4e",
+    "tab_border": "#3d5a4a",
+    "tab_bg": "#1f2a24",
+    "success": "#5fb58a",
+    "drag_preview": { "border_color": "#5fb58a" }
+  },
+  // The remaining built-in blue fills (file-drop and drag targets) take the green tint too.
+  "components": {
+    "DropOverlay": { "style": { "background": "@accent_tint" } },
+    "DropSlot": { "style": { "background": "@accent_tint" } },
+    // No tab strip: the tile grid (and the focus list) replace it.
+    "ChatTabs": { "style": { "hidden": true } },
+
+    // A real shell as a tile: black, monospaced, a title bar like Terminal.app. Each terminal tile has its
+    // own shell (its own key "~/redo#tile-ID"), so tiles never share a screen. props: t {id, label, cwd}.
+    "TermTile": {
+      "about": "A shell tile. props: t (from state.term_tiles).",
+      "type": "column",
+      "style": { "width": "full", "height": "full", "min_height": 0, "min_width": 0, "radius": 10, "border": 1, "border_color": "#2a2a2c", "background": "#0c0c0d", "overflow": "hidden" },
+      "children": [
+        {
+          "type": "row",
+          "style": { "height": 30, "shrink": 0, "padding": [0, 6, 0, 10], "gap": 8, "align": "center", "background": "#1b1b1d", "border_bottom": 1, "border_color": "#2a2a2c", "cursor": "grab" },
+          "drag": { "kind": "tile", "value": "term:{{ .props.t.id }}", "label": "{{ .props.t.label }}" },
+          "tooltip": "Drag to move",
+          "children": [
+            { "type": "row", "style": { "gap": 6, "align": "center" }, "children": [
+              { "type": "box", "style": { "width": 10, "height": 10, "radius": 5, "background": "#ff5f57" }, "tooltip": "Close terminal", "on": { "click": { "do": "tiles.close_terminal", "id": "{{ .props.t.id }}" } } },
+              { "type": "box", "style": { "width": 10, "height": 10, "radius": 5, "background": "#febc2e" } },
+              { "type": "box", "style": { "width": 10, "height": 10, "radius": 5, "background": "#28c840" } }
+            ] },
+            { "type": "spacer" },
+            { "type": "icon", "props": { "name": "square-terminal", "size": 12, "color": "#8a8a90" } },
+            { "type": "text", "props": { "text": "{{ .props.t.label }} — {{ (.props.t.cwd // \"~\") | sub(\"^/Users/[^/]+\"; \"~\") }}" }, "style": { "font_family": "@font_mono", "font_size": 12, "color": "#b4b4b9", "truncate": true, "min_width": 0 } },
+            { "type": "spacer" },
+            { "type": "IconButton", "props": { "icon": "x", "size": 20, "icon_size": 11, "tooltip": "Close terminal", "do": { "do": "tiles.close_terminal", "id": "{{ .props.t.id }}" } } }
+          ]
+        },
+        // Bound to the real worktree folder: the app only runs shells for real worktrees. Clicking the tile
+        // makes its shell the active one there (independent shells per tile need the fork change in
+        // briefs/terminal-tiles.md).
+        {
+          "type": "box",
+          "style": { "grow": 1, "min_height": 0, "padding": [6, 8], "background": "#0c0c0d" },
+          "on": { "mouse_down": [{ "do": "terminal.select", "path": "{{ .props.t.cwd }}", "id": "{{ .props.t.id }}" }, { "do": "focus", "area": "terminal" }] },
+          "children": [{ "type": "terminal", "props": { "path": "{{ .props.t.cwd }}" }, "style": { "width": "full", "height": "full" } }]
+        }
+      ]
+    },
+
+    // One agent as a live mini terminal: header (drag to move, click to go full screen), its transcript,
+    // a question card when it waits on you, and its own message box.
+    "AgentTile": {
+      "about": "A live agent tile. props: c (a chat).",
+      "type": "column",
+      // Status ring: green idle, red working, amber waiting on you. Muted tones at 1.5 pt so it reads as a
+      // quiet status line, not an alarm; a stopped agent keeps the plain grey edge.
+      "style": {
+        "width": "full", "height": "full", "min_height": 0, "min_width": 0, "radius": 10, "border": 1.5, "overflow": "hidden",
+        "border_color": "{{ if .props.c.alive == false then \"@line\" elif .props.c.state == \"waiting\" then \"#d9a441\" elif .props.c.state == \"working\" then \"#d9574f\" else \"#4fae7f\" end }}",
+        "background": "@card"
+      },
+      "transition": { "border_color": 220 },
+      "children": [
+        {
+          "id": "tile-head",
+          "type": "row",
+          "style": { "height": 34, "shrink": 0, "padding": [0, 6, 0, 10], "gap": 7, "align": "center", "border_bottom": 1, "border_color": "@line", "background": "@window", "cursor": "grab" },
+          "drag": { "kind": "tile", "value": "{{ .props.c.id }}", "label": "{{ .props.c.name }}" },
+          "tooltip": "Drag to move · click to open full screen",
+          "on": { "click": [{ "do": "chat.show", "chat": "{{ .props.c.id }}" }, { "do": "state.set", "key": "tile_focus", "value": true }] },
+          "children": [
+            { "if": ".props.c.state == \"working\"", "type": "spinner", "props": { "size": "xsmall", "color": "#d9574f" } },
+            { "if": ".props.c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "#d9a441" } },
+            { "if": ".props.c.state != \"working\" and .props.c.state != \"waiting\"", "type": "box", "style": { "width": 7, "height": 7, "radius": 4, "margin": [0, 2], "background": "{{ if .props.c.alive == false then \"@line\" else \"#4fae7f\" end }}" } },
+            { "type": "text", "props": { "text": "{{ .props.c.name }}" }, "style": { "font_size": 13, "font_weight": "semibold", "truncate": true, "min_width": 0, "shrink": 1 } },
+            { "type": "text", "props": { "text": "{{ ((.props.c.dir // \"\") | split(\"/\") | last) }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "truncate": true, "min_width": 0, "shrink": 2 } },
+            { "type": "spacer" },
+            { "if": "(.props.c.activity // \"\") != \"\"", "type": "text", "props": { "text": "{{ .props.c.activity }}" }, "style": { "font_size": 11.5, "color": "@text_muted", "truncate": true, "max_width": 140 } },
+            { "type": "IconButton", "props": { "icon": "maximize-2", "size": 22, "icon_size": 12, "tooltip": "Full screen", "do": [{ "do": "chat.show", "chat": "{{ .props.c.id }}" }, { "do": "state.set", "key": "tile_focus", "value": true }] } },
+            { "type": "IconButton", "props": { "icon": "x", "size": 22, "icon_size": 12, "tooltip": "Close (stops the agent)", "do": { "do": "chat.close", "chat": "{{ .props.c.id }}" } } }
+          ]
+        },
+        { "type": "transcript", "props": { "chat": "{{ .props.c.id }}", "empty": "No messages yet." }, "style": { "grow": 1, "min_height": 0 } },
+        { "type": "waiting", "props": { "chat": "{{ .props.c.id }}" }, "style": { "padding": [0, 8, 6, 8] } },
+        {
+          "type": "row",
+          "style": { "shrink": 0, "margin": [0, 8, 8, 8], "padding": [6, 6, 6, 10], "gap": 6, "align": "end", "radius": 8, "border": 1, "border_color": "@line", "background": "@composer" },
+          "children": [
+            { "type": "composer", "props": { "chat": "{{ .props.c.id }}", "placeholder": "Message {{ .props.c.name }}…" }, "style": { "grow": 1, "min_width": 0 } },
+            {
+              "if": "((.composers[.props.c.id] // \"\") | length) == 0 and .props.c.state == \"working\"",
+              "type": "box",
+              "tooltip": "Pause",
+              "style": { "width": 24, "height": 24, "shrink": 0, "radius": 6, "position": "relative", "cursor": "pointer", "background": "@text" },
+              "on": { "click": { "do": "chat.interrupt", "chat": "{{ .props.c.id }}" } },
+              "children": [
+                { "type": "box", "motion": false, "style": { "position": "absolute", "left": 8.5, "top": 7, "width": 2.5, "height": 10, "radius": 1.25, "background": "@composer" } },
+                { "type": "box", "motion": false, "style": { "position": "absolute", "left": 13, "top": 7, "width": 2.5, "height": 10, "radius": 1.25, "background": "@composer" } }
+              ]
+            },
+            {
+              "if": "((.composers[.props.c.id] // \"\") | length) > 0",
+              "type": "box",
+              "tooltip": "Send  ↩",
+              "style": { "width": 24, "height": 24, "shrink": 0, "radius": 6, "align": "center", "justify": "center", "cursor": "pointer", "background": "@accent", "hover": { "background": "@accent_bright" } },
+              "on": { "click": { "do": "composer.send", "chat": "{{ .props.c.id }}" } },
+              "children": [{ "type": "icon", "props": { "name": "arrow-up", "size": 14, "color": "#ffffff" } }]
+            }
+          ]
+        }
+      ]
+    },
+    // The title bar, copied from the defaults (its two editor pills have no ids to patch) with the Cursor
+    // and VS Code pills merged into one "Open in editor" icon: click opens Cursor, the chevron menu offers
+    // both. Being a copy, later changes to the default Toolbar don't reach it.
+    "Toolbar": {
+      "about": "The title bar: sidebar toggle (when hidden), worktree and chat, status, one editor button and MR button. Drag it to move the window.",
+      "type": "row",
+      "style": { "height": 44, "shrink": 0, "gap": 8, "align": "center", "padding": [0, 0, 0, "{{ if .state.sidebar_open then 23 else 88 end }}"] },
+      "children": [
+        { "if": ".state.sidebar_open | not", "type": "IconButton", "id": "sidebar-toggle", "props": { "icon": "panel-left", "size": 24, "tooltip": "Show sidebar  ⌘\\", "do": { "do": "state.toggle", "key": "sidebar_open" } } },
+        { "if": ".state.sidebar_open | not", "type": "DesignerButton", "id": "designer-button", "style": { "margin": [0, 8, 0, 0] } },
+        {
+          "id": "nav-buttons",
+          "type": "row",
+          "style": { "gap": 0, "align": "center", "margin": [0, 4, 0, -6] },
+          "children": [
+            { "type": "box", "style": { "opacity": "{{ if .app.nav.back then 1 else 0.35 end }}" }, "children": [{ "type": "IconButton", "id": "nav-back", "props": { "icon": "chevron-left", "size": 24, "tooltip": "Back  ⌘[", "do": "nav.back" } }] },
+            { "type": "box", "style": { "opacity": "{{ if .app.nav.forward then 1 else 0.35 end }}" }, "children": [{ "type": "IconButton", "id": "nav-forward", "props": { "icon": "chevron-right", "size": 24, "tooltip": "Forward  ⌘]", "do": "nav.forward" } }] }
+          ]
+        },
+        { "type": "box", "style": { "width": 6, "height": 6, "radius": 3, "background": "{{ if .selected.chat.alive then \"@success\" else \"@text_faint\" end }}" } },
+        {
+          "if": ".selected.worktree",
+          "type": "row",
+          "style": { "gap": 8, "align": "center" },
+          "children": [
+            { "type": "Badge", "props": { "letter": "{{ .selected.worktree.letter }}", "hue": "{{ .selected.worktree.hue }}", "size": 16 } },
+            { "type": "text", "props": { "text": "{{ .selected.worktree.title }}" }, "style": { "font_size": 13 } },
+            { "if": ".selected.chat", "type": "icon", "props": { "name": "chevron-right", "size": 12, "color": "@text_faint" } },
+            { "if": ".selected.chat", "type": "text", "props": { "text": "{{ .selected.chat.name }}" }, "style": { "font_size": 12, "color": "@age" } },
+            { "if": ".selected.worktree.uncommitted > 0", "type": "box", "style": { "width": 6, "height": 6, "radius": 3, "background": "@warning" }, "tooltip": "Uncommitted changes" }
+          ]
+        },
+        { "id": "toolbar-drag", "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } },
+        { "type": "CostButton", "id": "usage-cost" },
+        { "type": "PlanButton", "id": "usage-plan" },
+        {
+          "id": "history",
+          "type": "box",
+          "style": { "position": "relative" },
+          "children": [
+            { "type": "IconButton", "id": "history-button", "props": { "icon": "clock", "size": 26, "tooltip": "History: past and closed chats on every machine", "do": [{ "do": "state.toggle", "key": "history_open" }, "history.load"] } },
+            { "type": "IconButton", "if": ".state.history_open", "id": "history-button-above", "layer": "above", "motion": false, "style": { "position": "absolute", "top": 0, "left": 0 }, "props": { "icon": "clock", "size": 26, "tooltip": "History: past and closed chats on every machine", "do": [{ "do": "state.toggle", "key": "history_open" }, "history.load"] } },
+            {
+              "if": ".state.history_open and (.app.dragging | not)",
+              "type": "box",
+              "layer": "top",
+              "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
+              "on": { "click": { "do": "state.set", "key": "history_open", "value": false } }
+            },
+            {
+              "if": ".state.history_open",
+              "id": "history-panel",
+              "type": "column",
+              "layer": "top",
+              "style": {
+                "position": "absolute", "top": 32, "right": -6, "width": 460, "max_height": 560, "padding": 8, "gap": 6,
+                "radius": 12, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg"
+              },
+              "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 120 },
+              "children": [
+                {
+                  "type": "row",
+                  "style": { "gap": 8, "align": "center", "padding": [2, 4] },
+                  "children": [
+                    { "type": "icon", "props": { "name": "search", "size": 14, "color": "@text_faint" } },
+                    { "id": "history-search", "type": "input", "props": { "state": "history_query", "placeholder": "Search chats by name or folder", "autofocus": true, "appearance": false }, "style": { "grow": 1 } },
+                    { "if": ".app.history_loading", "type": "spinner", "props": { "size": "xsmall" } }
+                  ]
+                },
+                { "type": "divider" },
+                {
+                  "type": "scroll",
+                  "style": { "max_height": 480, "gap": 1 },
+                  "children": [
+                    { "if": "(.history | length) == 0 and (.app.history_loading | not)", "type": "text", "props": { "text": "No past chats yet." }, "style": { "padding": 10, "font_size": 13, "color": "@text_faint" } },
+                    {
+                      "for": "(.state.history_query // \"\" | ascii_downcase) as $q | [.history[] | select($q == \"\" or ((.name // \"\") | ascii_downcase | contains($q)) or ((.folder // \"\") | ascii_downcase | contains($q)))] | .[:150]",
+                      "as": "h", "key": ".h.host + .h.id",
+                      "type": "row",
+                      "style": { "height": 40, "padding": [0, 8], "gap": 10, "align": "center", "radius": 8, "cursor": "pointer", "hover": { "background": "@hover" } },
+                      "tooltip": "{{ .h.dir // \"\" }}",
+                      "on": { "click": [{ "do": "chat.open", "chat": "{{ .h.id }}", "host": "{{ .h.host }}" }, { "do": "state.set", "key": "history_open", "value": false }] },
+                      "children": [
+                        { "type": "HostIcon", "props": { "host": "{{ .h.host }}", "size": 13 } },
+                        {
+                          "type": "column",
+                          "style": { "grow": 1, "min_width": 0 },
+                          "children": [
+                            { "type": "text", "props": { "text": "{{ .h.name }}" }, "style": { "font_size": 13, "truncate": true } },
+                            { "type": "text", "props": { "text": "{{ .h.folder }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "truncate": true } }
+                          ]
+                        },
+                        { "if": ".h.closed | not", "type": "text", "props": { "text": "open" }, "style": { "font_size": 11, "color": "@accent" } },
+                        { "type": "text", "props": { "text": "{{ .h.age_text }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "shrink": 0 } }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        { "id": "status-pill", "type": "Pill", "props": { "text": "{{ if .app.connected then \"Turtwig\" else .app.status end }}", "mono": true, "tooltip": "{{ .app.status }}", "do": "palette.open" } },
+        {
+          "if": ".selected.worktree",
+          "id": "open-editor",
+          "type": "row",
+          "style": { "height": 26, "align": "center", "radius": 13, "border": 1, "border_color": "@line", "background": "@pill" },
+          "children": [
+            {
+              "id": "open-editor-main",
+              "type": "row",
+              "tooltip": "Open in {{ if .state.editor == \"vscode\" then \"VS Code\" else \"Cursor\" end }}",
+              "style": { "height": 26, "padding": [0, 6, 0, 10], "align": "center", "radius": { "top_left": 13, "bottom_left": 13, "top_right": 0, "bottom_right": 0 }, "cursor": "pointer", "hover": { "background": "@pill_hover" } },
+              "on": { "click": { "do": "open", "url": "{{ (if .state.editor == \"vscode\" then \"vscode\" else \"cursor\" end) as $e | if .selected.worktree.host == \"mac\" then $e + \"://file\" + .selected.worktree.path else $e + \"://vscode-remote/ssh-remote+\" + .app.ssh_host + .selected.worktree.path end }}" } },
+              "children": [{ "type": "icon", "props": { "name": "code", "size": 13 } }]
+            },
+            {
+              "id": "open-editor-menu",
+              "type": "row",
+              "menu_on": "click",
+              "tooltip": "Choose the editor",
+              "style": { "height": 26, "padding": [0, 7, 0, 3], "align": "center", "radius": { "top_left": 0, "bottom_left": 0, "top_right": 13, "bottom_right": 13 }, "cursor": "pointer", "hover": { "background": "@pill_hover" } },
+              "menu": [
+                { "label": "Open in Cursor", "icon": "square-terminal", "checked": ".state.editor != \"vscode\"", "do": [{ "do": "state.set", "key": "editor", "value": "cursor" }, { "do": "open", "url": "{{ if .selected.worktree.host == \"mac\" then \"cursor://file\" + .selected.worktree.path else \"cursor://vscode-remote/ssh-remote+\" + .app.ssh_host + .selected.worktree.path end }}" }] },
+                { "label": "Open in VS Code", "icon": "code", "checked": ".state.editor == \"vscode\"", "do": [{ "do": "state.set", "key": "editor", "value": "vscode" }, { "do": "open", "url": "{{ if .selected.worktree.host == \"mac\" then \"vscode://file\" + .selected.worktree.path else \"vscode://vscode-remote/ssh-remote+\" + .app.ssh_host + .selected.worktree.path end }}" }] }
+              ],
+              "children": [{ "type": "icon", "props": { "name": "chevron-down", "size": 11, "color": "@text_faint" } }]
+            }
+          ]
+        },
+        { "if": ".selected.worktree.mr", "type": "Pill", "props": { "text": "!{{ .selected.worktree.mr.number }}", "icon": "git-pull-request", "tooltip": "Open the merge request", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } } },
+        { "type": "InboxButton", "id": "inbox" }
+      ]
+    },
+    // The effort slider (Low · Medium · High · Max) with a dot at every stop; the current stop's dot
+    // hides under the thumb. Writes effortLevel through claude.effort.
+    "EffortSlider": {
+      "type": "box",
+      "style": { "position": "relative", "width": 150, "height": 22, "shrink": 0 },
+      "children": [
+        {
+          "type": "slider",
+          "props": {
+            "value": "{{ {\"low\": 0, \"medium\": 1, \"high\": 2, \"xhigh\": 3}[.data.effort // \"high\"] // 2 }}",
+            "min": 0, "max": 3, "step": 1, "height": 22,
+            "track": { "height": 22, "radius": 11, "background": "#3a3a3d" },
+            "fill": { "background": "@accent", "radius": 11 },
+            "thumb": { "width": 18, "height": 18, "radius": 9, "background": "#e8e8ea", "shadow": "sm" }
+          },
+          "style": { "position": "absolute", "left": 0, "top": 0, "width": 150, "height": 22 },
+          "on": { "change": { "do": "claude.effort", "level": "{{ [\"low\", \"medium\", \"high\", \"xhigh\"][(.value | round)] }}" } }
+        },
+        {
+          "for": "({\"low\": 0, \"medium\": 1, \"high\": 2, \"xhigh\": 3}[.data.effort // \"high\"] // 2) as $cur | [0, 1, 2, 3] | map(select(. != $cur))",
+          "as": "i", "key": ".i",
+          "type": "box",
+          "motion": false,
+          "style": { "position": "absolute", "top": 9, "left": "{{ 7 + (.i * 44) }}", "width": 4, "height": 4, "radius": 2,
+                     "background": "{{ ({\"low\": 0, \"medium\": 1, \"high\": 2, \"xhigh\": 3}[.data.effort // \"high\"] // 2) as $cur | if .i < $cur then \"#ffffffb0\" else \"#8a8a90\" end }}" }
+        }
+      ]
+    }
+  },
+  "chat": {
+    "drop_overlay": { "background": "@accent_tint" },
+    "composer_drop": { "background": "@accent_tint" },
+    // Pasted images fit inside the message bubble even in the narrow designer panel (click one to view it full size).
+    "image": { "max_width": 270, "max_height": 220 },
+
+    // ── Transcript laid out like Claude Code in VS Code ──
+    // Every step on its own line (no "N steps" folding), each led by a timeline dot, named by its tool
+    // ("Bash  Check cloud-delegate setup", "Read  mcp.ts"), with Bash steps showing IN/OUT blocks when opened.
+    "group_steps": false,
+    "fold_running": false,
+    "fold_steps_after": 1000,
+    "fold_background": false,
+    "tools": {
+      "*": { "icon": "dot" },
+      "Bash": { "doing": "Bash", "done": "Bash", "failed": "Bash failed:" },
+      "Read": { "doing": "Read", "done": "Read", "failed": "Read failed:" },
+      "Edit": { "doing": "Edit", "done": "Edit", "failed": "Edit failed:" },
+      "MultiEdit": { "doing": "Edit", "done": "Edit", "failed": "Edit failed:" },
+      "Write": { "doing": "Write", "done": "Write", "failed": "Write failed:" },
+      "Grep": { "doing": "Grep", "done": "Grep", "failed": "Grep failed:" },
+      "Glob": { "doing": "Glob", "done": "Glob", "failed": "Glob failed:" },
+      "WebFetch": { "doing": "Fetch", "done": "Fetch", "failed": "Fetch failed:" },
+      "WebSearch": { "doing": "Web search", "done": "Web search", "failed": "Web search failed:" },
+      "Task": { "doing": "Agent", "done": "Agent", "failed": "Agent failed:" },
+      "Agent": { "doing": "Agent", "done": "Agent", "failed": "Agent failed:" },
+      "TodoWrite": { "doing": "Update todos", "done": "Update todos" }
+    },
+    "labels": { "thought_summary": "Thought", "thinking": "Thinking", "pending_working": "Working", "pending_thinking": "Thinking" },
+    "step_line": {
+      "icon_size": 16, "chevron_size": 11,
+      "icons": { "pending": "dot", "thinking": "dot", "fold": "dot", "background": "dot", "open": "chevron-down", "closed": "chevron-right" }
+    },
+    "trace": { "gap": 6 },
+    "trace_line": { "gap": 6, "align": "center", "font_size": 13.5, "color": "@text_muted", "hover": { "color": "@text" } },
+    "trace_line_error": { "color": "@danger" },
+    // An opened step: a bordered card holding the command (IN) and its output (OUT), like VS Code.
+    "trace_content": { "margin": [6, 0, 8, 22], "padding": [0, 0], "border": 1, "border_color": "@line", "radius": 8, "background": "@window", "color": "@text_muted", "font_size": 12.5, "line_height": 1.5, "gap": 0, "overflow": "hidden" },
+    "step_code": { "font_family": "@font_mono", "font_size": 12, "radius": 0, "background": "transparent", "padding": [8, 0], "overflow": "hidden", "color": "@text" },
+    "step_detail": { "command_prefix": "IN   ", "padding_x": 12, "padding_bottom": 8 },
+    "step_detail_lines": 24,
+    // Your messages as a full-width box at the top of each turn, not a right-hand bubble.
+    "user": { "max_width": "full", "width": "full", "padding": [10, 14], "radius": 8, "border": 1, "border_color": "@line", "background": "@user_bubble", "font_size": 14, "line_height": 1.5, "gap": 6 },
+    "assistant": { "font_size": 14, "line_height": 1.6 },
+    // A wider reading column, like the VS Code panel.
+    "list": { "gap": 16, "padding": [16, 24], "width": "full", "max_width": 1040, "self": "center" },
+    "sent_time": { "style": { "color": "@text_faint", "font_size": 11.5, "padding": [0, 4] } },
+    "message_actions": { "buttons": ["copy", "fork"], "show": "always" },
+    "placeholder": "⌘ Esc to focus or unfocus Claude",
+    // Tables wrap to the reading column: each cell is capped so long text wraps instead of pushing the
+    // table off the edge; anything still wider scrolls sideways (trackpad swipe or Shift + scroll).
+    "markdown": {
+      // Wide tables squeeze to the column width: every cell may shrink (min_width 0), so text wraps inside
+      // it instead of the table running off the edge (sideways scrolling isn't possible for tables here).
+      "table": { "width": "full", "max_width": "full", "overflow_x": "hidden" },
+      "table_cell": { "padding": [6, 8], "min_width": 0, "shrink": 1, "max_width": 360 }
+    },
+    "code_scroll": { "shift": false, "speed": 1, "shift_holds_transcript": false, "scrollbar": "always" },
+    "scrollbar": "hover"
+  },
+  // The terminal's black (ANSI 0) matches the lighter card it sits in; blue (4, 12) follows the green accent.
+  "terminal": {
+    // A visible, blinking block cursor while focused, like Terminal.app.
+    "cursor": { "shape": "block", "focused_alpha": 0.9, "unfocused_alpha": 0.35, "blink_ms": 530 },
+    "palette": ["#1f1f21", "#e5534b", "#5fb58a", "#d29922", "#5fb58a", "#bc8cff", "#39c5cf", "#d6d6d8",
+                "#6e7681", "#ff7b72", "#7ccba3", "#e3b341", "#8fd4b2", "#d2a8ff", "#56d4dd", "#ffffff"]
+  },
+
+  // a.box's checkout moved from ~/dev/agent-box to ~/dev/turtwig: the Mac's daemon binary and the
+  // folder the daemon's scripts live in follow it (the defaults still name ~/dev/agent-box).
+  "local": { "enabled": true, "daemon": "~/dev/turtwig/rust/target/release/agent-boxd" },
+
+  "daemon": {
+    "hosts": { "mac": { "agent_box_dir": "~/dev/turtwig" } },
+    // New Claude chats start in Auto mode (bin/chat passes --permission-mode). ~/.claude/settings.json
+    // permissions.defaultMode is "auto" too, so terminal sessions match.
+    "permission_mode": "auto",
+    // The Claude agent's own permission_mode wins over the line above (it defaulted to "default", i.e.
+    // Manual), so set it here too.
+    "agents": { "claude": { "permission_mode": "auto" } },
+    // This Mac's repos: the monorepo at ~/redo with sibling worktrees (~/redo-<name>), plain git worktree
+    // (no `wt` tool here), and internal-tools; redo-data isn't checked out on this machine.
+    "repos": {
+      "redo": { "primary": "~/redo", "worktrees": "~/redo-{name}", "worktree_tool": null },
+      "internal-tools": { "primary": "~/redotech-internal-tools", "worktrees": "~/redotech-internal-tools-{name}" },
+      "redo-data": null
+    },
+    // The same checkout on each machine (a Coder workspace keeps the monorepo at ~/project).
+    "path_aliases": [{ "mac": "~/redo", "box": "~/project" }],
+    // No super.engineering on this Mac.
+    "foreign_tools": null
+  },
+
+  // ⌘N starts an agent in redo (~/redo) wherever you are; the chat card's own "+" still uses its worktree.
+  "keys": [
+    // Esc leaves a full-screen agent for the tile grid (when you aren't typing).
+    { "key": "escape", "if": ".state.tile_focus == true and .app.focus_area != \"composer\" and (.app.confirm | not)", "do": { "do": "state.set", "key": "tile_focus", "value": false } },
+    // ⌘Esc focuses the message box, or leaves it when it already has focus (as in VS Code).
+    { "key": "cmd-escape", "do": { "do": "if", "cond": "{{ .app.focus_area == \"composer\" }}", "then": { "do": "focus", "area": "none" }, "else": { "do": "focus", "area": "composer" } } },
+    { "key": "cmd-n", "do": { "do": "chat.new", "dir": "{{ ([.worktrees[] | select(.repo == \"redo\" and .is_primary)][0].path) // \"/Users/jarron.conover/redo\" }}", "model": "claude-opus-5-5" } }
+  ],
+
+  // Redo agents (agents.redo.builders) shown in the sidebar: only these slugs, plus any agent whose last
+  // change was authored by someone matching author_match (case-insensitive). Right-click the section
+  // header to add one, a row to remove it; both edit this list.
+  "redo_agents": {
+    "include": ["developer-platform-lead", "devp-headless-gap-closer", "devp-public-api-contract-reviewer", "devp-sentinel"],
+    "exclude": [],
+    "author_match": "jarron"
+  },
+
+  // Datadog monitors pinned in the sidebar (scripts/datadog_monitors.rs). Add with the section's "+"
+  // (paste a monitor link), remove with right-click. Keys: ~/.config/datadog/keys.env.
+  "datadog": {
+    "site": "datadoghq.com",
+    "monitors": [],
+    "refresh_minutes": 5
+  },
+
+  // Snappier motion: shorter glides and fades so the window feels immediate.
+  "motion": {
+    // A springy glide, so tiles settle into new cells with a little bounce, like iPhone icons.
+    "move": { "duration": 280, "easing": "spring" },
+    "enter": { "duration": 160 },
+    "style": { "duration": 120 }
+  },
+
+  // Models offered by the message box's model menu (id: what /model takes; match: a lowercase substring
+  // of the chat's reported model id that identifies it).
+  "composer_models": [
+    { "name": "Opus 5.5", "id": "claude-opus-5-5", "match": "opus-5-5", "about": "Default · complex work and everyday tasks" },    { "name": "Fable 5.1", "id": "claude-fable-5-1", "match": "fable", "about": "For your toughest challenges (slower, costs more)" },
+    { "name": "Sonnet 5", "id": "claude-sonnet-5", "match": "sonnet", "about": "Efficient for routine tasks" },
+    { "name": "Haiku 4.5", "id": "claude-haiku-4-5-20251001", "match": "haiku", "about": "Fastest for quick answers" }
+  ],
+
+  // The mode menu's entries (id: what the chat's footer and chat.mode use; Shift+Tab cycles them).
+  "composer_modes": [
+    { "id": "manual", "name": "Manual", "icon": "hand", "about": "Claude asks for approval before each edit" },
+    { "id": "edits", "name": "Edit automatically", "icon": "code-xml", "about": "Claude edits files without asking; other tools still ask" },
+    { "id": "plan", "name": "Plan", "icon": "notebook-pen", "about": "Claude explores the code and presents a plan before editing" },
+    { "id": "auto", "name": "Auto", "icon": "zap", "about": "Claude approves actions that pass a safety check and pauses for anything risky" }
+  ],
+
+  // Keep the History list fresh so the sidebar's dropdown is ready when opened.
+  "events": {
+    "host.connected": [{ "do": "history.load" }],
+    "chat.removed": [{ "do": "history.load" }]
+  },
+
+  // Sidebar: only the agents running right now, then a History dropdown of past ones.
+  // Projects, sections and worktree rows are hidden (the toolbar and ⌘K "Go to…" still pick worktrees).
+  // native_titlebar: AppKit owns dragging and double-click zoom of the title strip, so dragging to a
+  // screen edge tiles (macOS tiling, Raycast) like any other app instead of the app moving itself.
+  "window": { "title": "Turtwig", "native_titlebar": true },
+  // The app's name wherever the UI prints it (menu bar, notifications).
+  "strings": { "app_name": "Turtwig" },
+
+  "patch": [
+    // The brand at the top of the sidebar: a bigger icon and "turtwig" in a playful face.
+    { "id": "brand", "set": { "style": { "height": 44, "padding": [6, 8, 0, 6], "gap": 10, "align": "center" } } },
+    // Click the icon: it hops twice (an eased offset driven by state.brand_hop).
+    {
+      "id": "brand-logo",
+      "set": {
+        "props": { "size": 32 },
+        "style": { "cursor": "pointer", "margin": "{{ if .state.brand_hop then [-10, 0, 10, 0] else [0, 0, 0, 0] end }}" },
+        "transition": { "margin": 140 },
+        "tooltip": "Turtwig",
+        "on": {
+          "click": [
+            { "do": "state.set", "key": "brand_hop", "value": true },
+            { "do": "after", "ms": 150, "then": { "do": "state.set", "key": "brand_hop", "value": false } },
+            { "do": "after", "ms": 300, "then": { "do": "state.set", "key": "brand_hop", "value": true } },
+            { "do": "after", "ms": 450, "then": { "do": "state.set", "key": "brand_hop", "value": false } }
+          ]
+        }
+      }
+    },
+    { "id": "brand-name", "set": { "props": { "text": "Turtwig" }, "style": { "font_size": 22, "font_weight": "bold", "font_family": "Chalkboard SE", "color": "@text" } } },
+
+    // Toolbar: no "Turtwig" pill (the name is in the sidebar; ⌘K opens the palette), and no "move to the
+    // cloud" button until a box is set up.
+    { "id": "status-pill", "set": { "if": ".app.connected | not" } },
+    { "id": "move-chat", "set": { "if": ".app.hosts_up.box == true" } },
+    // No conversation-cost button in the toolbar.
+    { "id": "usage-cost", "remove": true },
+
+    { "id": "projects-label", "remove": true },
+    { "id": "project-drop", "remove": true },
+    { "id": "section-drop", "remove": true },
+    { "id": "footer-new-section", "remove": true },
+    // New agents default to the redo monorepo (~/redo), not whichever worktree happens to be selected.
+    { "id": "footer-new-chat", "set": { "props": { "tooltip": "New agent in redo  ⌘N", "do": { "do": "chat.new", "dir": "{{ ([.worktrees[] | select(.repo == \"redo\" and .is_primary)][0].path) // \"/Users/jarron.conover/redo\" }}", "model": "claude-opus-5-5" } } } },
+
+    // ── Sidebar rail: the panel button folds the sidebar to a slim column of icons (state sidebar_rail) ──
+    // Expanded: the button at the top folds it. Rail: the top icon unfolds it. ⌘\ still hides it entirely.
+    { "id": "sidebar", "set": { "style": { "width": "{{ if .state.sidebar_rail == true then 78 else .state.sidebar_width end }}" } } },
+    {
+      "id": "sidebar-header",
+      "set": {
+        "children": [
+          { "if": ".state.sidebar_rail != true", "type": "DesignerButton", "id": "designer-button" },
+          { "id": "sidebar-drag", "type": "spacer", "style": { "height": "full" }, "on": { "mouse_down": "window.move", "double_click": "window.zoom" } }
+        ]
+      }
+    },
+    // The collapse button sits at the right end of the "Turtwig" row.
+    { "insert": { "id": "brand-spacer", "type": "spacer" }, "into": "brand", "at": -1 },
+    {
+      "insert": { "type": "IconButton", "id": "sidebar-toggle", "props": { "icon": "panel-left-close", "size": 28, "icon_size": 16, "tooltip": "Collapse to icons  (⌘\\ hides the sidebar)", "do": { "do": "state.set", "key": "sidebar_rail", "value": true } } },
+      "into": "brand", "at": -1
+    },
+    { "id": "sidebar-list", "set": { "if": ".state.sidebar_rail != true" } },
+    { "id": "sidebar-footer", "set": { "if": ".state.sidebar_rail != true" } },
+    {
+      "insert": {
+        "id": "sidebar-rail",
+        "if": ".state.sidebar_rail == true",
+        "type": "column",
+        "style": { "grow": 1, "min_height": 0, "width": "full", "align": "center", "gap": 6, "padding": [2, 0, 12, 0] },
+        "children": [
+          { "type": "IconButton", "id": "rail-expand", "props": { "icon": "panel-left-open", "size": 30, "icon_size": 16, "tooltip": "Expand the sidebar", "do": { "do": "state.set", "key": "sidebar_rail", "value": false } } },
+          { "id": "rail-logo", "type": "logo", "props": { "size": 34 }, "style": { "margin": [4, 0, 6, 0] }, "tooltip": "Turtwig" },
+          { "type": "divider", "style": { "width": 36 } },
+          {
+            "type": "scroll",
+            "props": { "scrollbar": "never" },
+            "style": { "grow": 1, "min_height": 0, "width": "full", "align": "center", "gap": 8, "padding": [6, 0] },
+            "children": [
+              {
+                "for": "[.chats[] | select(.open)] | sort_by(.last_activity // 0) | reverse",
+                "as": "c", "key": ".c.id",
+                "id": "rail-agent",
+                "type": "box",
+                "style": {
+                  "position": "relative", "width": 40, "height": 40, "shrink": 0, "radius": 12, "align": "center", "justify": "center", "cursor": "pointer",
+                  "border": 2,
+                  "border_color": "{{ if .c.id == .selected.chat.id then \"@accent\" elif .c.state == \"waiting\" then \"@warning\" else \"transparent\" end }}",
+                  "background": "{{ if .c.id == .selected.chat.id then \"@selection\" else \"@pill\" end }}",
+                  "hover": { "background": "@pill_hover" },
+                  "font_size": 13, "font_weight": "semibold", "color": "@text"
+                },
+                "tooltip": "{{ .c.name }} · {{ .c.state }}",
+                "on": { "click": [{ "do": "chat.show", "chat": "{{ .c.id }}" }, { "do": "state.set", "key": "tile_focus", "value": true }] },
+                "children": [
+                  { "type": "text", "props": { "text": "{{ (.c.name | split(\" \") | map(select(length > 0) | .[0:1]) | .[0:2] | join(\"\")) | ascii_upcase }}" } },
+                  {
+                    "type": "box",
+                    "motion": false,
+                    "style": {
+                      "position": "absolute", "right": -2, "bottom": -2, "width": 11, "height": 11, "radius": 6, "border": 2, "border_color": "@window",
+                      "background": "{{ if .c.state == \"working\" then \"@accent\" elif .c.state == \"waiting\" then \"@warning\" elif .c.alive == false then \"@line\" else \"@success\" end }}"
+                    }
+                  }
+                ]
+              },
+              { "type": "IconButton", "props": { "icon": "plus", "size": 36, "icon_size": 16, "tooltip": "New agent in redo  ⌘N", "do": { "do": "chat.new", "dir": "{{ ([.worktrees[] | select(.repo == \"redo\" and .is_primary)][0].path) // \"/Users/jarron.conover/redo\" }}", "model": "claude-opus-5-5" } } }
+            ]
+          },
+          { "type": "IconButton", "props": { "icon": "layout-grid", "size": 32, "icon_size": 15, "tooltip": "All agents (tile grid)", "do": { "do": "state.set", "key": "tile_focus", "value": false } } },
+          { "type": "IconButton", "props": { "icon": "palette", "size": 32, "icon_size": 15, "tooltip": "Redesign the app  ⌘⇧D", "do": { "do": "state.toggle", "key": "designer_open" } } },
+          { "type": "IconButton", "props": { "icon": "settings", "size": 32, "icon_size": 15, "tooltip": "Settings  ⌘,", "do": "settings.open" } }
+        ]
+      },
+      "after": "sidebar-list"
+    },
+
+    // ── Agent tile grid (scripts/tiles.rs) ────────────────────────────────────
+    // The middle area is a grid of live agent tiles. Columns follow the area's width; one empty row
+    // always sits at the bottom so a tile can go anywhere. Drag a tile by its header onto any cell
+    // (a tile already there swaps). Click a tile's header to open it full screen, with the other
+    // agents in a list on the left; "Grid" or Esc goes back.
+    { "id": "terminal-card", "set": { "if": "false" } },
+    { "id": "branch-bar", "set": { "if": "false" } },
+    {
+      "insert": {
+        "id": "tile-grid",
+        "if": ".state.tile_focus != true",
+        // The page doesn't scroll with the wheel: the wheel always goes to the tile under the pointer. The
+        // page moves only with the scrollbar in its own gutter on the right (drag the thumb, or use the wheel
+        // over the gutter). state.grid_scroll is the offset in points.
+        // Not a cached region: a terminal tile inside a cached region painted a stray copy of itself at
+        // the grid's top-left corner.
+        "type": "row",
+        "style": { "grow": 1, "min_height": 0, "width": "full", "gap": 6 },
+        "children": [
+          {
+            "id": "tile-viewport",
+            "type": "box",
+            "style": { "grow": 1, "min_width": 0, "height": "full", "position": "relative", "overflow": "hidden" },
+            "children": [
+          {
+            "id": "tile-grid-cells",
+            "type": "box",
+            "transition": { "top": 0 },
+            "style": {
+              "position": "absolute", "left": 0, "right": 0,
+              "top": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([$content - $view, 0] | max) as $max | 0 - ([[(.state.grid_scroll // 0), $max] | min, 0] | max) }}",
+              "gap": 10, "padding": [2, 0, 14, 0],
+              "display": "grid",
+              "grid_cols": "{{ (.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end }}"
+            },
+            "children": [
+              {
+                "for": "([.chats[] | select(.open) | {id, kind: \"agent\", c: .}] + [(.state.term_tiles // [])[] | {id: (\"term:\" + .id), kind: \"term\", t: .}]) as $cs | (.state.tile_slots // {}) as $s0 | ($s0 | with_entries(select(.key as $k | $cs | any(.id == $k)))) as $s | (reduce ($cs[] | select($s[.id] == null) | .id) as $id ($s; . as $m | ([range(0; 400)] | map(select(. as $i | ([$m[]] | index($i)) == null)) | .[0]) as $f | .[$id] = $f)) as $m0 | (if .app.drag.kind == \"tile\" and ((.app.drop.key // \"\") | startswith(\"tile:\")) then ((.app.drop.key | ltrimstr(\"tile:\") | tonumber) as $to | .app.drag.value as $d | ($m0[$d]) as $from | ([$m0 | to_entries[] | select(.value == $to) | .key] | .[0]) as $occ | $m0 | .[$d] = $to | (if $occ != null and $occ != $d then .[$occ] = $from else . end)) else $m0 end) as $m | ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | (([$m[]] | max) // -1) as $mx | (((($mx + 1) / $cols) | ceil) + 1) * $cols as $total | [range(0; $total)] | map(. as $i | { i: $i, c: ([$cs[] | select($m[.id] == $i)] | .[0]) }) | . as $cells | ([$cells[] | select(.c == null) | .i] | .[0]) as $firstfree | map(. + { plus: (.i == $firstfree) })",
+                // Keyed by the agent (not the cell), so a tile glides to its new cell instead of popping.
+                // While a tile is dragged over a cell, the grid previews the move live: the tile already
+                // there slides into the dragged tile's old cell, and the dragged tile shows lifted in its
+                // new spot, like rearranging apps on an iPhone.
+                "as": "cell", "key": ".cell.c.id // (\"empty-\" + (.cell.i | tostring))",
+                "id": "tile-cell",
+                "type": "box",
+                "style": {
+                  "position": "relative", "min_width": 0,
+                  "height": "{{ [(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max }}",
+                  "radius": 10
+                },
+                "drop_key": "tile:{{ .cell.i }}",
+                "drop_zones": { "tile": "inside" },
+                "on": { "drop_item": { "accept": "tile", "do": { "do": "tiles.move", "dragged": "{{ .dragged }}", "to": "{{ .cell.i }}" } } },
+                "children": [
+                  { "if": ".cell.c.kind == \"agent\" and .cell.c.id != .app.drag.value", "type": "AgentTile", "props": { "c": "{{ .cell.c.c }}" } },
+                  { "if": ".cell.c.kind == \"term\" and .cell.c.id != .app.drag.value", "type": "TermTile", "props": { "t": "{{ .cell.c.t }}" } },
+                  // The tile being dragged: lifted where it would land (accent ring, deep shadow, slightly larger).
+                  {
+                    "if": ".cell.c != null and .cell.c.id == .app.drag.value",
+                    "type": "box",
+                    "animate": { "from": { "opacity": 0.6, "y": 6 }, "duration": 180 },
+                    "style": { "position": "absolute", "top": -6, "left": -6, "right": -6, "bottom": -6, "radius": 12, "border": 2, "border_color": "@accent", "shadow": "xl", "opacity": 0.92, "overflow": "hidden" },
+                    "children": [
+                      { "if": ".cell.c.kind == \"agent\"", "type": "AgentTile", "props": { "c": "{{ .cell.c.c }}" } },
+                      { "if": ".cell.c.kind == \"term\"", "type": "TermTile", "props": { "t": "{{ .cell.c.t }}" } }
+                    ]
+                  },
+                  // The first free cell offers a new agent or a new terminal; other free cells take drops.
+                  {
+                    "if": ".cell.c == null",
+                    "type": "column",
+                    "style": {
+                      "width": "full", "height": "full", "radius": 10, "align": "center", "justify": "center", "gap": 10,
+                      "border": "{{ if .app.drag.kind == \"tile\" or .cell.plus then 1 else 0 end }}", "border_style": "dashed", "border_color": "@line",
+                      "color": "@text_faint", "font_size": 13
+                    },
+                    "children": [
+                      {
+                        "if": ".cell.plus and .app.drag.kind != \"tile\"",
+                        "type": "row",
+                        "style": { "gap": 10 },
+                        "children": [
+                          {
+                            "type": "column",
+                            "style": { "width": 132, "height": 92, "gap": 8, "align": "center", "justify": "center", "radius": 10, "border": 1, "border_color": "@line", "background": "@card", "cursor": "pointer", "color": "@text_muted", "hover": { "background": "@hover", "color": "@text", "border_color": "@accent" } },
+                            "tooltip": "Start a Claude agent in redo on Opus 5.5",
+                            "on": { "click": { "do": "chat.new", "dir": "{{ ([.worktrees[] | select(.repo == \"redo\" and .is_primary)][0].path) // \"/Users/jarron.conover/redo\" }}", "model": "claude-opus-5-5" } },
+                            "children": [
+                              { "type": "icon", "props": { "name": "bot", "size": 20 } },
+                              { "type": "text", "props": { "text": "New agent" } }
+                            ]
+                          },
+                          {
+                            "type": "column",
+                            "style": { "width": 132, "height": 92, "gap": 8, "align": "center", "justify": "center", "radius": 10, "border": 1, "border_color": "@line", "background": "#0c0c0d", "cursor": "pointer", "color": "@text_muted", "font_family": "@font_mono", "hover": { "color": "@text", "border_color": "@accent" } },
+                            "tooltip": "Open a shell in ~/redo",
+                            "on": { "click": { "do": "tiles.new_terminal" } },
+                            "children": [
+                              { "type": "icon", "props": { "name": "square-terminal", "size": 20 } },
+                              { "type": "text", "props": { "text": "New terminal" }, "style": { "font_size": 12.5 } }
+                            ]
+                          }
+                        ]
+                      },
+                      { "if": ".app.drag.kind == \"tile\"", "type": "text", "props": { "text": "Drop here" } }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+            ]
+          },
+          // The page scrollbar, in a gutter of its own so it never covers a tile. Drag the thumb, or use the
+          // wheel over the gutter. Hidden when everything fits.
+          {
+            "id": "tile-scrollbar",
+            "if": "((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) > ((.app.window.height // 1000) - 58)",
+            "type": "box",
+            "style": { "width": 14, "shrink": 0, "height": "full", "position": "relative", "radius": 7, "background": "#ffffff12", "border": 1, "border_color": "#ffffff14", "margin": [2, 0, 14, 0] },
+            "on": { "scroll": { "do": "state.set", "key": "grid_scroll", "value": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([$content - $view, 0] | max) as $max | ([[((.state.grid_scroll // 0) - ((.dy // 0) * 0.5)), $max] | min, 0] | max) }}" } },
+            "children": [
+              {
+                "id": "tile-scroll-thumb",
+                "type": "resize_handle",
+                "motion": false,
+                "props": {
+                  "state": "grid_scroll", "axis": "y", "min": 0, "default": 0,
+                  "max": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | [$content - $view, 1] | max }}"
+                },
+                "style": {
+                  "position": "absolute", "left": 2, "right": 2, "radius": 5, "background": "#ffffff66", "cursor": "grab", "hover": { "background": "#ffffff99" }, "active": { "background": "@accent" },
+                  "height": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([($view * $view / $content), 40] | max | floor) }}",
+                  "top": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([$content - $view, 1] | max) as $max | ([($view * $view / $content), 40] | max) as $th | ([[(.state.grid_scroll // 0), $max] | min, 0] | max) as $s | (($s / $max) * ($view - 16 - $th)) | floor }}"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "after": "chat-card"
+    },
+    // Full screen: the other agents in a list on the left, the chosen agent's full chat on the right.
+    {
+      "insert": {
+        "id": "focus-row",
+        "if": ".state.tile_focus == true",
+        "type": "row",
+        "style": { "grow": 1, "min_height": 0, "gap": 10, "padding": [0, 0, 14, 0] },
+        "children": [
+          {
+            "id": "focus-list",
+            "type": "column",
+            "style": { "width": 250, "shrink": 0, "min_height": 0, "gap": 6 },
+            "children": [
+              {
+                "type": "row",
+                "style": { "height": 32, "shrink": 0, "padding": [0, 4], "gap": 6, "align": "center", "radius": 8, "cursor": "pointer", "color": "@text_muted", "hover": { "background": "@hover", "color": "@text" } },
+                "tooltip": "Back to the grid  Esc",
+                "on": { "click": { "do": "state.set", "key": "tile_focus", "value": false } },
+                "children": [
+                  { "type": "icon", "props": { "name": "layout-grid", "size": 14 } },
+                  { "type": "text", "props": { "text": "All agents" }, "style": { "font_size": 13 } }
+                ]
+              },
+              {
+                "type": "scroll",
+                "props": { "scrollbar": "hover" },
+                "style": { "grow": 1, "min_height": 0, "gap": 6 },
+                "children": [
+                  {
+                    "for": "(.chats | map(select(.open))) as $cs | (.state.tile_slots // {}) as $s | $cs | sort_by($s[.id] // 999)",
+                    "as": "c", "key": ".c.id",
+                    "id": "focus-item",
+                    "type": "column",
+                    "style": {
+                      "padding": [8, 10], "gap": 3, "radius": 8, "border": 1, "cursor": "pointer",
+                      "border_color": "{{ if .c.id == .selected.chat.id then \"@accent\" elif .c.state == \"waiting\" then \"@warning\" else \"@line\" end }}",
+                      "background": "{{ if .c.id == .selected.chat.id then \"@selection\" else \"@card\" end }}",
+                      "hover": { "background": "@hover" }
+                    },
+                    "on": { "click": { "do": "chat.show", "chat": "{{ .c.id }}" } },
+                    "children": [
+                      {
+                        "type": "row",
+                        "style": { "gap": 7, "align": "center" },
+                        "children": [
+                          { "if": ".c.state == \"working\"", "type": "spinner", "props": { "size": "xsmall", "color": "@accent" } },
+                          { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" } },
+                          { "if": ".c.state != \"working\" and .c.state != \"waiting\"", "type": "box", "style": { "width": 7, "height": 7, "radius": 4, "background": "{{ if .c.alive == false then \"@line\" else \"@success\" end }}" } },
+                          { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "font_size": 13, "font_weight": "semibold", "truncate": true, "min_width": 0, "grow": 1 } },
+                          { "type": "text", "props": { "text": "{{ .c.age_text }}" }, "style": { "font_size": 11, "color": "@text_faint", "shrink": 0 } }
+                        ]
+                      },
+                      { "type": "text", "props": { "text": "{{ if (.c.activity // \"\") != \"\" then .c.activity else ((.c.last_message // \"\") | gsub(\"\\n\"; \" \")) end }}" }, "style": { "font_size": 12, "color": "@text_muted", "truncate": 2 } }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "after": "tile-grid"
+    },
+    { "id": "chat-card", "move": { "into": "focus-row", "at": -1 } },
+
+    // Claude sign-in expired (scripts/claude_auth.rs): a banner over the chat with a one-click sign-in.
+    {
+      "insert": {
+        "id": "auth-banner",
+        "if": ".data.claude_auth.expired and ((.data.claude_auth.dismissed // 0) < (.data.claude_auth.checked // 0) or (.data.claude_auth.dismissed == null))",
+        "type": "row",
+        "layer": "above",
+        "style": { "position": "absolute", "top": 8, "left": 24, "right": 24, "padding": [10, 14], "gap": 10, "align": "center", "radius": 10, "border": 1, "border_color": "@warning", "background": "@waiting_bg", "shadow": "md", "font_size": 13.5 },
+        "animate": { "from": { "opacity": 0, "y": -6 }, "duration": 140 },
+        "children": [
+          { "type": "icon", "props": { "name": "key-round", "size": 15, "color": "@warning" } },
+          { "type": "text", "props": { "text": "Claude's sign-in expired. Agents can't run until you sign in again." }, "style": { "grow": 1, "min_width": 0 } },
+          { "type": "Pill", "props": { "text": "Sign in again", "icon": "log-in", "do": "claude.relogin" } },
+          { "type": "IconButton", "props": { "icon": "refresh-cw", "size": 24, "icon_size": 13, "tooltip": "Check again", "do": "claude.auth_check" } },
+          { "type": "IconButton", "props": { "icon": "x", "size": 24, "icon_size": 13, "tooltip": "Hide", "do": "claude.auth_dismiss" } }
+        ]
+      },
+      "after": "transcript"
+    },
+
+    // Sticky prompt (scripts/sticky_prompt.rs): once your latest message scrolls off the top, it stays
+    // pinned at the top of the chat. Click it to jump back to it.
+    {
+      "insert": {
+        "id": "sticky-prompt",
+        "if": ".data.sticky_prompt.show and .data.sticky_prompt.chat == .selected.chat.id and (.selected.chat.screen | not)",
+        "type": "box",
+        "layer": "above",
+        "motion": false,
+        "style": { "position": "absolute", "top": 0, "left": 0, "right": 0, "padding": [8, 24, 10, 24], "background": "@card", "border_bottom": 1, "border_color": "@line", "shadow": "md" },
+        "animate": { "from": { "opacity": 0, "y": -6 }, "duration": 120 },
+        "children": [
+          {
+            "type": "row",
+            "style": { "width": "full", "max_width": 1040, "self": "center", "padding": [8, 14], "gap": 10, "align": "start", "radius": 8, "border": 1, "border_color": "@line", "background": "@user_bubble", "cursor": "pointer", "hover": { "border_color": "@accent" } },
+            "tooltip": "Your latest message. Click to scroll back to it.",
+            "on": { "click": "sticky.jump" },
+            "children": [
+              { "type": "text", "props": { "text": "{{ .data.sticky_prompt.text }}" }, "style": { "grow": 1, "min_width": 0, "font_size": 14, "line_height": 1.5, "truncate": 3 } }
+            ]
+          }
+        ]
+      },
+      "after": "transcript"
+    },
+
+    // The default model line under the box is now inside it.
+    { "id": "composer-model", "remove": true },
+
+    // When the agent shows a selection menu on its screen (scripts/composer_tools.rs reads it every 2.5s),
+    // the waiting card lists those real options instead of the generic Yes / No, and clicking one presses
+    // the keys that pick it. The built-in card stays for prompts with no such menu.
+    // The generic card (its buttons type 1/2/3) only while the terminal shows a prompt that couldn't be
+    // parsed; once the prompt is answered on the terminal it goes away even if the app still says "waiting".
+    { "id": "waiting", "set": { "if": "(.selected.chat.screen | not) and ((.data.chat_menu[.selected.chat.id] // null) == null) and ((.data.chat_screen[.selected.chat.id] // \"prompt\") == \"prompt\")" } },
+    {
+      "insert": {
+        "id": "menu-card",
+        "if": ".selected.chat and (.selected.chat.screen | not) and ((.data.chat_menu[.selected.chat.id] // null) != null)",
+        "type": "box",
+        "style": { "padding": [0, 28, 10, 28], "width": "full", "max_width": 916, "self": "center" },
+        "children": [
+          {
+            "type": "column",
+            "style": { "padding": [12, 16], "gap": 10, "radius": 12, "border": 1, "border_color": "@warning", "background": "@waiting_bg" },
+            "animate": { "from": { "opacity": 0, "y": 6 }, "duration": 160 },
+            "children": [
+              { "type": "text", "props": { "text": "{{ .selected.chat.waiting_on.message // \"The agent is waiting for you\" }}" }, "style": { "font_size": 14 } },
+              {
+                "type": "row",
+                "style": { "gap": 8, "wrap": true, "align": "center" },
+                "children": [
+                  {
+                    "for": ".data.chat_menu[.selected.chat.id].options | to_entries", "as": "o", "key": ".o.key",
+                    "type": "row",
+                    "style": { "height": 30, "padding": [0, 14], "gap": 6, "align": "center", "radius": 15, "cursor": "pointer", "font_size": 13,
+                               "background": "{{ if .o.key == .data.chat_menu[.selected.chat.id].selected then \"@accent_deep\" else \"@pill\" end }}",
+                               "border": 1, "border_color": "{{ if .o.key == .data.chat_menu[.selected.chat.id].selected then \"@accent\" else \"@line\" end }}",
+                               "hover": { "background": "@pill_hover" } },
+                    "tooltip": "{{ if .o.key == .data.chat_menu[.selected.chat.id].selected then \"Highlighted on the agent's screen: Enter picks it\" else \"Picks this option\" end }}",
+                    "on": { "click": { "do": "chat.menu_pick", "chat": "{{ .selected.chat.id }}", "index": "{{ .o.key }}" } },
+                    "children": [{ "type": "text", "props": { "text": "{{ .o.value }}" } }]
+                  },
+                  { "type": "spacer" },
+                  {
+                    "type": "row",
+                    "style": { "height": 30, "padding": [0, 12], "align": "center", "radius": 15, "cursor": "pointer", "font_size": 13, "color": "@text_muted", "hover": { "background": "@hover", "color": "@text" } },
+                    "tooltip": "Esc in the chat",
+                    "on": { "click": { "do": "chat.keys", "chat": "{{ .selected.chat.id }}", "keys": ["Escape"] } },
+                    "children": [{ "type": "text", "props": { "text": "Cancel" } }]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "before": "waiting"
+    },
+
+    // ── Message box, laid out like Claude in VS Code ─────────────────────────
+    // Top: the text and a microphone (icon only for now). Bottom: "+" (attach files from the Mac), the
+    // model (menu switches it with /model), then right-aligned: permission mode (Auto / Plan / Manual,
+    // Shift+Tab in the chat via scripts/composer_tools.rs), effort (effortLevel in ~/.claude/settings.json),
+    // the Ultra toggle (prefixes "ultrathink" when sending with the button), and send (bright blue once
+    // something is typed) or pause (Esc to the agent) when the box is empty.
+    {
+      "id": "composer-frame",
+      "set": {
+        "style": { "direction": "column", "radius": 12, "border": 1, "border_color": "{{ if .app.focus_area == \"composer\" then \"@accent\" else \"@line\" end }}", "background": "@composer", "padding": 0, "gap": 0, "align": "stretch" },
+        "children": [
+          {
+            "id": "composer-top",
+            "type": "row",
+            "style": { "padding": [8, 10, 6, 12], "gap": 8, "align": "end" },
+            "children": [
+              { "type": "composer", "style": { "grow": 1, "min_width": 0 } },
+              {
+                "id": "composer-mic",
+                "type": "box",
+                "tooltip": "Voice input (coming soon)",
+                "style": { "width": 26, "height": 26, "shrink": 0, "radius": 6, "margin": [0, 0, 4, 0], "align": "center", "justify": "center", "cursor": "pointer", "hover": { "background": "@hover" } },
+                "children": [{ "type": "icon", "props": { "name": "mic", "size": 15, "color": "@text_muted" } }]
+              }
+            ]
+          },
+          { "type": "divider", "style": { "margin": [0, 0] } },
+          {
+            "id": "composer-tools",
+            "type": "row",
+            "style": { "height": 44, "padding": [0, 8, 0, 8], "gap": 6, "align": "center" },
+            "children": [
+              {
+                "id": "composer-attach",
+                "type": "box",
+                "tooltip": "Attach files from your Mac",
+                "style": { "width": 28, "height": 28, "shrink": 0, "radius": 6, "align": "center", "justify": "center", "cursor": "pointer", "hover": { "background": "@hover" }, "active": { "opacity": 0.7 } },
+                "on": {
+                  "click": {
+                    "do": "shell",
+                    "run": "osascript -e 'set fs to choose file with prompt \"Attach to the agent\" with multiple selections allowed' -e 'set out to \"\"' -e 'repeat with f in fs' -e 'set out to out & POSIX path of f & linefeed' -e 'end repeat' -e 'return out' 2>/dev/null",
+                    "timeout": 600,
+                    "then": { "do": "if", "cond": "{{ ((.output.stdout // \"\") | length) > 0 }}", "then": { "do": "chat.attach", "chat": "{{ .selected.chat.id }}", "paths": "{{ (.output.stdout // \"\") | split(\"\\n\") | map(select(length > 0)) }}" } }
+                  }
+                },
+                "children": [{ "type": "icon", "props": { "name": "plus", "size": 16, "color": "@text_muted" } }]
+              },
+              {
+                "id": "composer-model-wrap",
+                "type": "box",
+                "style": { "position": "relative" },
+                "children": [
+                  {
+                    "id": "composer-model-pick",
+                    "type": "row",
+                    "tooltip": "Model for this chat (switches with /model)",
+                    "style": { "height": 26, "padding": [0, 10], "gap": 5, "align": "center", "radius": 13, "background": "{{ if .state.model_menu_open then \"@pill_hover\" else \"@pill\" end }}", "font_size": 12.5, "cursor": "pointer", "hover": { "background": "@pill_hover" } },
+                    "on": { "click": { "do": "state.toggle", "key": "model_menu_open", "default": false } },
+                    "children": [
+                      { "type": "text", "props": { "text": "{{ (.state[\"model_pick:\" + .selected.chat.id] // .selected.chat.model_used // .selected.chat.model // \"\") as $cur | ([.settings.composer_models[] | select(.match as $k | ($cur | ascii_downcase | contains($k)))] | .[0].name) // (if $cur == \"\" then \"Default model\" else $cur end) }}" }, "style": { "color": "@text" } },
+                      { "if": "(.data.effort // \"\") != \"\"", "type": "text", "props": { "text": "{{ (.data.effort // \"high\") as $e | if $e == \"xhigh\" then \"Max\" else ($e | (.[0:1] | ascii_upcase) + .[1:]) end }}" }, "style": { "color": "@text_muted" } },
+                      { "type": "icon", "props": { "name": "chevron-down", "size": 11, "color": "@text_faint" } }
+                    ]
+                  },
+                  {
+                    "if": ".state.model_menu_open and (.app.dragging | not)",
+                    "type": "box",
+                    "layer": "top",
+                    "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
+                    "on": { "click": { "do": "state.set", "key": "model_menu_open", "value": false } }
+                  },
+                  {
+                    "if": ".state.model_menu_open",
+                    "id": "model-panel",
+                    "type": "column",
+                    "layer": "top",
+                    "style": { "position": "absolute", "bottom": 34, "left": -40, "width": 420, "padding": [10, 8, 8, 8], "gap": 2, "radius": 12, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg", "font_size": 13 },
+                    "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 120 },
+                    "children": [
+                      { "type": "text", "props": { "text": "Select a model" }, "style": { "padding": [0, 10, 6, 10], "color": "@text_muted", "font_size": 13.5 } },
+                      {
+                        "for": ".settings.composer_models", "as": "m", "key": ".m.id", "id": "model-option",
+                        "type": "row",
+                        "style": { "padding": [8, 10], "gap": 12, "align": "center", "radius": 8, "cursor": "pointer", "hover": { "background": "@accent_deep" } },
+                        // /model switches at once; Claude then asks whether to keep it as the default, which the
+                        // Enter a moment later accepts. The pill shows the pick right away (state model_pick:CHAT)
+                        // instead of waiting for the next reply to report its model.
+                        "on": { "click": [
+                          { "do": "state.set", "key": "model_menu_open", "value": false },
+                          { "do": "state.set", "key": "model_pick:{{ .selected.chat.id }}", "value": "{{ .m.id }}" },
+                          { "do": "chat.send", "chat": "{{ .selected.chat.id }}", "text": "/model {{ .m.id }}" },
+                          { "do": "after", "ms": 1800, "then": { "do": "chat.keys", "chat": "{{ .selected.chat.id }}", "keys": ["Enter"] } }
+                        ] },
+                        "children": [
+                          {
+                            "type": "column",
+                            "style": { "grow": 1, "min_width": 0, "gap": 2 },
+                            "children": [
+                              { "type": "text", "props": { "text": "{{ .m.name }}" }, "style": { "font_size": 14, "color": "@text" } },
+                              { "type": "text", "props": { "text": "{{ .m.about }}" }, "style": { "font_size": 12.5, "color": "@text_muted" } }
+                            ]
+                          },
+                          { "if": "(.state[\"model_pick:\" + .selected.chat.id] // .selected.chat.model_used // .selected.chat.model // \"\") as $cur | .m.match as $k | ($cur | ascii_downcase | contains($k))", "type": "icon", "props": { "name": "check", "size": 16, "color": "@text" } }
+                        ]
+                      },
+                      { "type": "divider", "style": { "margin": [6, 0] } },
+                      {
+                        "type": "row",
+                        "style": { "padding": [6, 10], "gap": 8, "align": "center" },
+                        "tooltip": "How hard Claude thinks: Low, Medium, High, Max. Saved as effortLevel in ~/.claude/settings.json; applies from the next turn.",
+                        "children": [
+                          { "type": "text", "props": { "text": "Effort" }, "style": { "font_size": 14, "color": "@text" } },
+                          { "type": "text", "props": { "text": "({{ (.data.effort // \"high\") as $e | if $e == \"xhigh\" then \"Max\" else ($e | (.[0:1] | ascii_upcase) + .[1:]) end }})" }, "style": { "font_size": 13, "color": "@text_muted" } },
+                          { "type": "spacer" },
+                          { "id": "model-effort-slider", "type": "EffortSlider" }
+                        ]
+                      },
+                      {
+                        "type": "row",
+                        "style": { "padding": [6, 10], "gap": 8, "align": "center" },
+                        "tooltip": "Ultracode: messages sent with the send button start with “ultrathink” for the deepest reasoning.",
+                        "children": [
+                          { "type": "text", "props": { "text": "Ultracode" }, "style": { "font_size": 14, "color": "@text" } },
+                          { "type": "spacer" },
+                          { "type": "switch", "props": { "state": "ultra", "track": { "background": "#3a3a3d" }, "track_on": { "background": "@accent" }, "thumb": { "background": "#e8e8ea" } } }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              { "type": "spacer" },
+              {
+                "id": "composer-mode",
+                "type": "box",
+                "style": { "position": "relative" },
+                "children": [
+                  {
+                    "id": "composer-mode-button",
+                    "type": "row",
+                    "tooltip": "Mode, effort and Ultracode",
+                    "style": { "height": 26, "padding": [0, 8], "gap": 6, "align": "center", "radius": 6, "font_size": 13, "cursor": "pointer", "background": "{{ if .state.mode_menu_open then \"@hover\" else \"transparent\" end }}", "hover": { "background": "@hover" } },
+                    "on": { "click": { "do": "state.toggle", "key": "mode_menu_open", "default": false } },
+                    "children": [
+                      { "type": "icon", "props": { "name": "{{ (.data.chat_mode[.selected.chat.id] // \"auto\") as $m | if $m == \"auto\" then \"zap\" elif $m == \"plan\" then \"notebook-pen\" elif $m == \"edits\" then \"code-xml\" else \"hand\" end }}", "size": 14, "color": "@text" } },
+                      { "type": "text", "props": { "text": "{{ (.data.chat_mode[.selected.chat.id] // \"auto\") as $m | if $m == \"auto\" then \"Auto\" elif $m == \"plan\" then \"Plan\" elif $m == \"edits\" then \"Edit automatically\" else \"Manual\" end }}" }, "style": { "color": "@text" } },
+                      { "if": ".state.ultra", "type": "icon", "props": { "name": "rocket", "size": 12, "color": "@accent" }, "tooltip": "Ultracode is on" }
+                    ]
+                  },
+                  {
+                    "if": ".state.mode_menu_open and (.app.dragging | not)",
+                    "type": "box",
+                    "layer": "top",
+                    "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
+                    "on": { "click": { "do": "state.set", "key": "mode_menu_open", "value": false } }
+                  },
+                  {
+                    "if": ".state.mode_menu_open",
+                    "id": "mode-panel",
+                    "type": "column",
+                    "layer": "top",
+                    "style": { "position": "absolute", "bottom": 34, "right": -120, "width": 360, "padding": [10, 8, 8, 8], "gap": 2, "radius": 12, "border": 1, "border_color": "@line", "background": "@card", "shadow": "lg", "font_size": 13 },
+                    "animate": { "from": { "opacity": 0, "y": 4 }, "duration": 120 },
+                    "children": [
+                      {
+                        "type": "row",
+                        "style": { "padding": [0, 8, 6, 8], "align": "center", "gap": 6 },
+                        "children": [
+                          { "type": "text", "props": { "text": "Modes" }, "style": { "color": "@text_muted", "font_size": 13.5 } },
+                          { "type": "spacer" },
+                          { "type": "text", "props": { "text": "⇧ + tab" }, "style": { "font_size": 11, "padding": [1, 6], "radius": 4, "border": 1, "border_color": "@line", "color": "@text_muted" } },
+                          { "type": "text", "props": { "text": "to switch" }, "style": { "font_size": 12, "color": "@text_faint" } }
+                        ]
+                      },
+                      {
+                        "for": ".settings.composer_modes", "as": "m", "key": ".m.id", "id": "mode-option",
+                        "type": "row",
+                        "style": { "padding": [8, 10], "gap": 12, "align": "center", "radius": 8, "cursor": "pointer",
+                                   "background": "{{ if (.data.chat_mode[.selected.chat.id] // \"auto\") == .m.id then \"@accent_deep\" else \"transparent\" end }}",
+                                   "hover": { "background": "{{ if (.data.chat_mode[.selected.chat.id] // \"auto\") == .m.id then \"@accent_deep\" else \"@hover\" end }}" } },
+                        "on": { "click": [{ "do": "chat.mode", "chat": "{{ .selected.chat.id }}", "mode": "{{ .m.id }}" }, { "do": "state.set", "key": "mode_menu_open", "value": false }] },
+                        "children": [
+                          { "type": "icon", "props": { "name": "{{ .m.icon }}", "size": 18, "color": "@text" }, "style": { "width": 22, "shrink": 0 } },
+                          {
+                            "type": "column",
+                            "style": { "grow": 1, "min_width": 0, "gap": 2 },
+                            "children": [
+                              { "type": "text", "props": { "text": "{{ .m.name }}" }, "style": { "font_size": 14, "color": "@text" } },
+                              { "type": "text", "props": { "text": "{{ .m.about }}" }, "style": { "font_size": 12.5, "color": "@text_muted" } }
+                            ]
+                          },
+                          { "if": "(.data.chat_mode[.selected.chat.id] // \"auto\") == .m.id", "type": "icon", "props": { "name": "check", "size": 16, "color": "@text" } }
+                        ]
+                      },
+                      { "type": "divider", "style": { "margin": [6, 0] } },
+                      {
+                        "id": "mode-effort",
+                        "type": "row",
+                        "style": { "padding": [6, 10], "gap": 12, "align": "center" },
+                        "tooltip": "How hard Claude thinks: Low, Medium, High, Max. Saved as effortLevel in ~/.claude/settings.json; applies from the next turn.",
+                        "children": [
+                          { "type": "icon", "props": { "name": "dumbbell", "size": 18, "color": "@text" }, "style": { "width": 22, "shrink": 0 } },
+                          { "type": "text", "props": { "text": "Effort" }, "style": { "font_size": 14, "color": "@text" } },
+                          { "type": "text", "props": { "text": "({{ (.data.effort // \"high\") as $e | if $e == \"xhigh\" then \"Max\" else ($e | (.[0:1] | ascii_upcase) + .[1:]) end }})" }, "style": { "font_size": 13, "color": "@text_muted" } },
+                          { "type": "spacer" },
+                          { "id": "effort-slider", "type": "EffortSlider" }
+                        ]
+                      },
+                      {
+                        "id": "mode-ultra",
+                        "type": "row",
+                        "style": { "padding": [6, 10], "gap": 12, "align": "center" },
+                        "tooltip": "Ultracode: messages sent with the send button start with “ultrathink” for the deepest reasoning.",
+                        "children": [
+                          { "type": "icon", "props": { "name": "rocket", "size": 18, "color": "@text" }, "style": { "width": 22, "shrink": 0 } },
+                          { "type": "text", "props": { "text": "Ultracode" }, "style": { "font_size": 14, "color": "@text" } },
+                          { "type": "spacer" },
+                          { "id": "ultra-switch", "type": "switch", "props": { "state": "ultra", "track": { "background": "#3a3a3d" }, "track_on": { "background": "@accent" }, "thumb": { "background": "#e8e8ea" } } }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "if": ".selected.chat.foreground_shell and (.agents[.selected.chat.agent].background_keys // [] | length > 0)",
+                "id": "composer-background",
+                "type": "box",
+                "tooltip": "Run the command in the background and keep chatting (Ctrl-B in the chat)",
+                "style": { "width": 28, "height": 28, "shrink": 0, "radius": 14, "align": "center", "justify": "center", "border": 1, "border_color": "@line", "cursor": "pointer", "hover": { "background": "@hover" } },
+                "on": { "click": { "do": "chat.background", "chat": "{{ .selected.chat.id }}" } },
+                "children": [{ "type": "icon", "props": { "name": "send-to-back", "size": 14, "color": "@text" } }]
+              },
+              {
+                "if": "((.composers[.selected.chat.id] // \"\") | length) == 0",
+                "id": "composer-stop",
+                "type": "box",
+                "tooltip": "{{ if .selected.chat.state == \"working\" then \"Pause the agent (Esc in the chat)\" else \"Pause: sends Esc to the agent (it looks idle right now)\" end }}",
+                "style": { "width": 28, "height": 28, "shrink": 0, "radius": 8, "padding": 0, "position": "relative", "cursor": "pointer", "hover": { "opacity": 0.85 }, "background": "{{ if .selected.chat.state == \"working\" then \"@text\" else \"@pill_hover\" end }}" },
+                "on": { "click": { "do": "chat.interrupt", "chat": "{{ .selected.chat.id }}" } },
+                "children": [
+                  { "id": "composer-stop-bar-a", "type": "box", "motion": false, "style": { "position": "absolute", "left": 10.5, "top": 8.5, "width": 3, "height": 11, "radius": 1.5, "background": "{{ if .selected.chat.state == \"working\" then \"@composer\" else \"@text\" end }}" } },
+                  { "id": "composer-stop-bar-b", "type": "box", "motion": false, "style": { "position": "absolute", "left": 14.5, "top": 8.5, "width": 3, "height": 11, "radius": 1.5, "background": "{{ if .selected.chat.state == \"working\" then \"@composer\" else \"@text\" end }}" } }
+                ]
+              },
+              {
+                "if": "((.composers[.selected.chat.id] // \"\") | length) > 0",
+                "id": "composer-send",
+                "type": "box",
+                "tooltip": "{{ if .selected.chat.state == \"working\" then \"Send when the agent finishes  ↩\" else \"Send  ↩   (⇧↩ new line)\" end }}",
+                "style": { "width": 28, "height": 28, "shrink": 0, "radius": 8, "align": "center", "justify": "center", "background": "@accent", "cursor": "pointer", "hover": { "background": "@accent_bright" }, "active": { "opacity": 0.8 } },
+                "on": {
+                  "click": {
+                    "do": "if", "cond": "{{ .state.ultra // false }}",
+                    "then": [{ "do": "composer.set", "chat": "{{ .selected.chat.id }}", "text": "ultrathink {{ .composers[.selected.chat.id] }}" }, { "do": "composer.send", "chat": "{{ .selected.chat.id }}" }],
+                    "else": { "do": "composer.send", "chat": "{{ .selected.chat.id }}" }
+                  }
+                },
+                "children": [{ "type": "icon", "props": { "name": "arrow-up", "size": 16, "color": "#ffffff" } }]
+              }
+            ]
+          }
+        ]
+      }
+    },
+
+    // Chat tabs: the name is editable in place. Click the active tab's name (e.g. "New chat") to type a new
+    // one; Enter saves (chat.rename), Esc or clicking away cancels. state.tab_edit holds the chat being edited.
+    {
+      "id": "chat-tab",
+      "set": {
+        "children": [
+          { "type": "DropLineX", "props": { "key": "tab:{{ .c.id }}" } },
+          { "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 12 } },
+          { "type": "AgentIcon", "props": { "agent": "{{ .c.agent }}", "size": 12 } },
+          {
+            "if": ".state.tab_edit != .c.id",
+            "id": "chat-tab-name",
+            "type": "text",
+            "props": { "text": "{{ .c.name }}" },
+            "style": {
+              "max_width": 240, "truncate": true, "radius": 4, "padding": [1, 4], "margin": [0, -4],
+              "cursor": "{{ if .c.active and (.c.id | startswith(\"sub:\") | not) then \"text\" else \"pointer\" end }}",
+              "hover": "{{ if .c.active and (.c.id | startswith(\"sub:\") | not) then {\"background\": \"@hover\"} else {} end }}"
+            },
+            "tooltip": "{{ if .c.active and (.c.id | startswith(\"sub:\") | not) then \"Click to rename\" else \"\" end }}",
+            "on": {
+              "click": {
+                "do": "if", "cond": "{{ .c.active and (.c.id | startswith(\"sub:\") | not) }}",
+                "then": [
+                  { "do": "state.set", "key": "tab_edit_name", "value": "{{ .c.name }}" },
+                  { "do": "state.set", "key": "tab_edit", "value": "{{ .c.id }}" },
+                  // The field is created unfocused so it picks up the name from state, then takes focus (`after`
+                  // re-resolves `then` later, when .c is gone, hence the state key in the id).
+                  { "do": "after", "ms": 60, "then": { "do": "ui.focus", "id": "chat-tab-name-input[{{ .state.tab_edit }}]" } },
+                  // Select the whole name so typing replaces it. Late enough to land after a double click's
+                  // second press (which would otherwise drop a caret in the text).
+                  { "do": "after", "ms": 120, "then": { "do": "ui.keystroke", "key": "cmd-a" } },
+                  { "do": "after", "ms": 380, "then": { "do": "if", "cond": "{{ .state.tab_edit != null }}", "then": { "do": "ui.keystroke", "key": "cmd-a" } } }
+                ],
+                "else": { "do": "select", "chat": "{{ .c.id }}" }
+              }
+            }
+          },
+          {
+            "if": ".state.tab_edit == .c.id",
+            "id": "chat-tab-name-input",
+            "type": "input",
+            "motion": false,
+            "props": {
+              "state": "tab_edit_name", "placeholder": "Name this chat", "appearance": false,
+              "field": { "font_size": 13, "color": "@text", "padding": [0, 0], "background": "transparent" }
+            },
+            // Same place as the name it replaces, the name's width plus room to type; no fixed height, so the
+            // field keeps its natural text height and the tab row centers it like the other labels.
+            // (Width fixed while editing: a width change re-creates the field, which drops its focus.)
+            "style": {
+              "width": "{{ [([(((.c.name // \"\") | length) * 7.2 + 44), 96] | max), 260] | min }}",
+              "padding": [1, 4], "margin": [0, -4], "radius": 4, "font_size": 13, "color": "@text",
+              "background": "@selection", "cursor": "text", "self": "center"
+            },
+            // Enter or clicking anywhere else saves (when the name changed and isn't empty); Esc cancels. The
+            // typed text lives in state.tab_edit_name so click_outside can read it. No blur handler: blur also
+            // fires whenever the field is re-created (a settings reload), which closed the editor on its own.
+            "on": {
+              "submit": [
+                { "do": "if", "cond": "{{ (.input // \"\" | ltrimstr(\" \") | rtrimstr(\" \")) as $n | ($n | length) > 0 and $n != .c.name }}", "then": { "do": "chat.rename", "chat": "{{ .c.id }}", "name": "{{ .input | ltrimstr(\" \") | rtrimstr(\" \") }}" } },
+                { "do": "state.set", "key": "tab_edit_name", "value": "" },
+                { "do": "state.set", "key": "tab_edit", "value": null }
+              ],
+              "click_outside": [
+                { "do": "if", "cond": "{{ (.state.tab_edit_name // \"\" | ltrimstr(\" \") | rtrimstr(\" \")) as $n | ($n | length) > 0 and $n != .c.name }}", "then": { "do": "chat.rename", "chat": "{{ .c.id }}", "name": "{{ .state.tab_edit_name | ltrimstr(\" \") | rtrimstr(\" \") }}" } },
+                { "do": "state.set", "key": "tab_edit_name", "value": "" },
+                { "do": "state.set", "key": "tab_edit", "value": null }
+              ],
+              "key": {
+                "escape": [
+                  { "do": "state.set", "key": "tab_edit_name", "value": "" },
+                  { "do": "state.set", "key": "tab_edit", "value": null }
+                ]
+              }
+            }
+          },
+          { "if": ".c.state == \"working\" or .c.moving", "type": "spinner", "props": { "size": "xsmall", "color": "{{ if .c.moving then \"@accent\" else null end }}" } },
+          { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 12, "color": "@warning" } },
+          {
+            "id": "chat-tab-close",
+            "type": "box",
+            "style": { "width": 18, "height": 18, "radius": 4, "align": "center", "justify": "center", "opacity": "{{ if .c.active then 0.9 else 0.45 end }}", "hover": { "background": "@hover", "opacity": 1 } },
+            "tooltip": "Close tab (stops the chat)",
+            "on": { "click": { "do": "if", "cond": "{{ .c.state == \"working\" or .c.state == \"waiting\" }}", "then": { "do": "confirm", "title": "Stop “{{ .c.name }}”?", "text": "It's still working. Closing the tab stops its {{ .agents[.c.agent].name // \"agent\" }} process; the chat stays under the clock to reopen later.", "confirm": "Stop and close", "cancel": "Keep it running", "then": { "do": "chat.close", "chat": "{{ .c.id }}" } }, "else": { "do": "chat.close", "chat": "{{ .c.id }}" } } },
+            "children": [{ "type": "icon", "props": { "name": "x", "size": 11, "color": "@text_muted" } }]
+          },
+          { "if": ".c.active", "type": "box", "motion": false, "style": { "position": "absolute", "left": 0, "right": 0, "bottom": 0, "height": 2, "background": "@accent" } }
+        ]
+      }
+    },
+
+    // ── Active agents ────────────────────────────────────────────────────────
+    {
+      "insert": {
+        "id": "agents-label",
+        "type": "row",
+        "style": { "height": 30, "padding": [14, 8, 2, 8], "gap": 6, "align": "center", "font_size": 12, "font_weight": "semibold", "color": "@text_faint" },
+        "children": [
+          { "type": "text", "props": { "text": "Active agents" } },
+          {
+            "if": "([.chats[] | select(.open != false)] | length) > 0",
+            "type": "text",
+            "props": { "text": "{{ [.chats[] | select(.open != false)] | length }}" },
+            "style": { "font_size": 11, "padding": [1, 6], "radius": 8, "background": "@pill", "color": "@text_faint" }
+          },
+          { "type": "spacer" },
+          { "type": "IconButton", "id": "agents-new", "props": { "icon": "plus", "size": 22, "tooltip": "New agent in redo  ⌘N", "do": { "do": "chat.new", "dir": "{{ ([.worktrees[] | select(.repo == \"redo\" and .is_primary)][0].path) // \"/Users/jarron.conover/redo\" }}", "model": "claude-opus-5-5" } } }
+        ]
+      },
+      "after": "brand"
+    },
+    {
+      "insert": {
+        "id": "agents-empty",
+        "if": "([.chats[] | select(.open != false)] | length) == 0",
+        "type": "text",
+        "props": { "text": "No agents running. Press ⌘N to start one." },
+        "style": { "padding": [8, 10], "font_size": 12.5, "color": "@text_faint" }
+      },
+      "after": "agents-label"
+    },
+    {
+      "insert": {
+        "id": "agent-row",
+        "for": "[.chats[] | select(.open != false)] | sort_by(.last_activity // 0) | reverse",
+        "as": "c", "key": ".c.id",
+        "type": "row",
+        "style": {
+          "height": 50, "padding": [5, 10, 5, 8], "margin": [2, 0], "gap": 8, "align": "center", "radius": 8, "border": 1, "cursor": "pointer",
+          "border_color": "{{ if .selected.chat.id == .c.id then \"@selection_border\" else \"transparent\" end }}",
+          "background": "{{ if .selected.chat.id == .c.id then \"@selection\" else \"transparent\" end }}",
+          "hover": "{{ if .selected.chat.id == .c.id then {} else {\"background\": \"@hover\"} end }}",
+          "opacity": "{{ if .c.alive == false or .c.state == \"stopped\" then 0.55 else 1 end }}"
+        },
+        "tooltip": "{{ .c.name }} · {{ .hosts[.c.host].label // .c.host }} · {{ .c.state }}{{ if (.c.dir // \"\") != \"\" then \"\\n\" + .c.dir else \"\" end }}",
+        "on": {
+          "click": [{ "do": "chat.show", "chat": "{{ .c.id }}" }, { "do": "state.set", "key": "tile_focus", "value": true }],
+          "double_click": { "do": "chat.rename", "chat": "{{ .c.id }}" }
+        },
+        "menu": [
+          { "label": "Rename…", "icon": "pencil", "shortcut": "double-click", "do": { "do": "chat.rename", "chat": "{{ .c.id }}" } },
+          { "if": ".c.state == \"working\"", "label": "Interrupt", "icon": "octagon-pause", "do": { "do": "chat.interrupt", "chat": "{{ .c.id }}" } },
+          { "if": ".c.alive == false or .c.state == \"stopped\"", "label": "Start again", "icon": "play", "do": { "do": "chat.start", "chat": "{{ .c.id }}" } },
+          { "separator": true },
+          { "label": "Close agent", "icon": "x", "danger": true, "do": { "do": "chat.close", "chat": "{{ .c.id }}" } }
+        ],
+        "children": [
+          { "if": ".c.state == \"working\"", "type": "spinner", "props": { "size": "xsmall", "color": "@age" }, "style": { "width": 14 } },
+          { "if": ".c.state == \"waiting\"", "type": "icon", "props": { "name": "bell", "size": 13, "color": "@warning" }, "tooltip": "Waiting for you", "style": { "width": 14 } },
+          { "if": ".c.state != \"working\" and .c.state != \"waiting\"", "type": "box", "style": { "width": 14, "align": "center", "justify": "center" }, "children": [
+            { "type": "box", "style": { "width": 7, "height": 7, "radius": 4, "background": "{{ if .c.state == \"stopped\" or .c.alive == false then \"@line\" else \"@success\" end }}" } }
+          ] },
+          {
+            "type": "column",
+            "style": { "grow": 1, "min_width": 0, "gap": 1 },
+            "children": [
+              { "type": "text", "props": { "text": "{{ .c.name }}" }, "style": { "font_size": 13.5, "truncate": true } },
+              {
+                "type": "text",
+                "props": { "text": "{{ (.c.branch // ((.c.dir // \"\") | split(\"/\") | last)) }}{{ if (.c.activity // \"\") != \"\" then \" · \" + .c.activity else \"\" end }}" },
+                "style": { "font_size": 11.5, "color": "@text_faint", "truncate": true }
+              }
+            ]
+          },
+          { "type": "AgentIcon", "props": { "agent": "{{ .c.agent }}", "size": 12 } },
+          { "type": "HostIcon", "props": { "host": "{{ .c.host }}", "size": 11 } },
+          { "type": "text", "props": { "text": "{{ .c.age_text }}" }, "style": { "min_width": 22, "text_align": "right", "font_size": 12, "color": "@age", "shrink": 0 } }
+        ]
+      },
+      "after": "agents-empty"
+    },
+
+    // ── History dropdown ─────────────────────────────────────────────────────
+    {
+      "insert": {
+        "id": "history-label",
+        "type": "row",
+        "style": {
+          "height": 30, "padding": [14, 8, 2, 8], "gap": 6, "align": "center", "font_size": 12, "font_weight": "semibold", "color": "@text_faint",
+          "cursor": "pointer", "radius": 6, "hover": { "color": "@text" }
+        },
+        "tooltip": "{{ if .state.sidebar_history_open then \"Hide\" else \"Show\" end }} past agents on every machine",
+        "on": {
+          "click": [
+            { "do": "if", "cond": "{{ .state.sidebar_history_open | not }}", "then": "history.load" },
+            { "do": "state.toggle", "key": "sidebar_history_open", "default": false }
+          ]
+        },
+        "children": [
+          { "type": "icon", "props": { "name": "{{ if .state.sidebar_history_open then \"chevron-down\" else \"chevron-right\" end }}", "size": 12 } },
+          { "type": "text", "props": { "text": "History" } },
+          {
+            "if": "(.history | length) > 0",
+            "type": "text",
+            "props": { "text": "{{ [.history[] | select(.closed != false)] | length }}" },
+            "style": { "font_size": 11, "padding": [1, 6], "radius": 8, "background": "@pill", "color": "@text_faint" }
+          },
+          { "type": "spacer" },
+          { "if": ".app.history_loading", "type": "spinner", "props": { "size": "xsmall" } }
+        ]
+      },
+      "after": "agent-row"
+    },
+    {
+      "insert": {
+        "id": "history-search-row",
+        "if": ".state.sidebar_history_open",
+        "type": "row",
+        "style": { "height": 30, "margin": [4, 4, 2, 4], "padding": [0, 8], "gap": 6, "align": "center", "radius": 7, "border": 1, "border_color": "@line", "background": "@card" },
+        "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 140 },
+        "children": [
+          { "type": "icon", "props": { "name": "search", "size": 13, "color": "@text_faint" } },
+          { "id": "sidebar-history-search", "type": "input", "props": { "state": "history_query", "placeholder": "Search past agents", "appearance": false }, "style": { "grow": 1, "font_size": 12.5 } }
+        ]
+      },
+      "after": "history-label"
+    },
+    {
+      "insert": {
+        "id": "history-empty",
+        "if": ".state.sidebar_history_open and ([.history[] | select(.closed != false)] | length) == 0 and (.app.history_loading | not)",
+        "type": "text",
+        "props": { "text": "No past agents yet." },
+        "style": { "padding": [8, 10], "font_size": 12.5, "color": "@text_faint" }
+      },
+      "after": "history-search-row"
+    },
+    {
+      "insert": {
+        "id": "history-row",
+        "for": "if (.state.sidebar_history_open | not) then [] else ((.state.history_query // \"\") | ascii_downcase) as $q | [.history[] | select(.closed != false) | select($q == \"\" or ((.name // \"\") | ascii_downcase | contains($q)) or ((.folder // \"\") | ascii_downcase | contains($q)))] | .[:200] end",
+        "as": "h", "key": ".h.host + .h.id",
+        "type": "row",
+        "style": { "height": 44, "padding": [5, 10, 5, 8], "margin": [1, 0], "gap": 8, "align": "center", "radius": 8, "cursor": "pointer", "hover": { "background": "@hover" } },
+        "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 140 },
+        "tooltip": "{{ .h.dir // \"\" }}\nClick to resume",
+        "on": { "click": { "do": "chat.open", "chat": "{{ .h.id }}", "host": "{{ .h.host }}" } },
+        "children": [
+          { "type": "box", "style": { "width": 14, "align": "center", "justify": "center" }, "children": [
+            { "type": "box", "style": { "width": 7, "height": 7, "radius": 4, "background": "@line" } }
+          ] },
+          {
+            "type": "column",
+            "style": { "grow": 1, "min_width": 0, "gap": 1 },
+            "children": [
+              { "type": "text", "props": { "text": "{{ .h.name }}" }, "style": { "font_size": 13, "truncate": true, "color": "@text_muted" } },
+              { "type": "text", "props": { "text": "{{ .h.folder }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "truncate": true } }
+            ]
+          },
+          { "type": "HostIcon", "props": { "host": "{{ .h.host }}", "size": 11 } },
+          { "type": "text", "props": { "text": "{{ .h.age_text }}" }, "style": { "min_width": 22, "text_align": "right", "font_size": 11.5, "color": "@text_faint", "shrink": 0 } }
+        ]
+      },
+      "after": "history-empty"
+    },
+
+    // ── Redo agents (agents.redo.builders, via scripts/redo_agents.rs) ───────
+    {
+      "insert": {
+        "id": "redo-agents-label",
+        "type": "row",
+        "style": {
+          "height": 30, "padding": [14, 8, 2, 8], "gap": 6, "align": "center", "font_size": 12, "font_weight": "semibold", "color": "@text_faint",
+          "cursor": "pointer", "radius": 6, "hover": { "color": "@text" }
+        },
+        "tooltip": "{{ if (.state.sidebar_redo_agents_open != false) then \"Hide\" else \"Show\" end }} the Redo agents (agents.redo.builders){{ if .data.redo_agents.updated then \"\\nUpdated \" + ((.now - .data.redo_agents.updated) | floor | tostring) + \"s ago\" else \"\" end }}",
+        "on": { "click": { "do": "state.set", "key": "sidebar_redo_agents_open", "value": "{{ (.state.sidebar_redo_agents_open != false) | not }}" } },
+        "menu": [
+          { "label": "Add agent…", "icon": "plus", "do": [{ "do": "state.set", "key": "redo_agents_query", "value": "" }, { "do": "state.set", "key": "redo_agents_adding", "value": true }] },
+          { "separator": true },
+          { "label": "Refresh now", "icon": "refresh-cw", "do": "redo_agents.refresh" },
+          { "label": "Open agents.redo.builders", "icon": "external-link", "do": { "do": "open", "url": "https://agents.redo.builders/projects" } }
+        ],
+        "children": [
+          { "type": "icon", "props": { "name": "{{ if (.state.sidebar_redo_agents_open != false) then \"chevron-down\" else \"chevron-right\" end }}", "size": 12 } },
+          { "type": "text", "props": { "text": "Redo agents" } },
+          {
+            "if": ".data.redo_agents.ok and ([(.data.redo_agents.agents // [])[] | select(.shown) | .running] | add // 0) > 0",
+            "type": "text",
+            "props": { "text": "{{ [(.data.redo_agents.agents // [])[] | select(.shown) | .running] | add }} running" },
+            "style": { "font_size": 11, "padding": [1, 6], "radius": 8, "background": "@pill", "color": "@success" }
+          },
+          {
+            "if": ".data.redo_agents.ok and ([(.data.redo_agents.agents // [])[] | select(.shown) | .attention] | add // 0) > 0",
+            "type": "text",
+            "props": { "text": "{{ [(.data.redo_agents.agents // [])[] | select(.shown) | .attention] | add }} need you" },
+            "style": { "font_size": 11, "padding": [1, 6], "radius": 8, "background": "@pill", "color": "@warning" }
+          },
+          { "type": "spacer" },
+          { "if": ".data.redo_agents.loading", "type": "spinner", "props": { "size": "xsmall" } },
+          { "if": ".data.redo_agents.loading | not", "type": "IconButton", "id": "redo-agents-refresh", "props": { "icon": "refresh-cw", "size": 20, "icon_size": 12, "tooltip": "Refresh now (otherwise once a day)", "do": "redo_agents.refresh" } },
+          { "if": ".data.redo_agents.ok", "type": "IconButton", "id": "redo-agents-add", "props": { "icon": "plus", "size": 20, "icon_size": 13, "tooltip": "Add an agent to this list", "do": [{ "do": "state.set", "key": "redo_agents_query", "value": "" }, { "do": "state.toggle", "key": "redo_agents_adding", "default": false }] } }
+        ]
+      },
+      "after": "history-row"
+    },
+    // The picker: a search box and a scrolling list of every agent not yet in the list (ten rows tall).
+    {
+      "insert": {
+        "id": "redo-agents-picker",
+        "if": "(.state.sidebar_redo_agents_open != false) and .state.redo_agents_adding and .data.redo_agents.ok",
+        "type": "column",
+        "style": { "margin": [2, 4, 4, 4], "padding": 6, "gap": 4, "radius": 10, "border": 1, "border_color": "@line", "background": "@card" },
+        "animate": { "from": { "opacity": 0, "y": -4 }, "duration": 140 },
+        "children": [
+          {
+            "type": "row",
+            "style": { "gap": 6, "align": "center", "padding": [0, 4] },
+            "children": [
+              { "type": "icon", "props": { "name": "search", "size": 13, "color": "@text_faint" } },
+              { "id": "redo-agents-search", "type": "input", "props": { "state": "redo_agents_query", "placeholder": "Search agents by name, slug or author", "autofocus": true, "appearance": false }, "style": { "grow": 1, "font_size": 12.5 }, "on": { "key": { "escape": { "do": "state.set", "key": "redo_agents_adding", "value": false } } } },
+              { "type": "IconButton", "props": { "icon": "x", "size": 20, "icon_size": 12, "tooltip": "Close", "do": { "do": "state.set", "key": "redo_agents_adding", "value": false } } }
+            ]
+          },
+          { "type": "divider" },
+          {
+            "type": "scroll",
+            "props": { "scrollbar": "hover" },
+            "style": { "max_height": 320, "gap": 1 },
+            "children": [
+              {
+                "for": "((.state.redo_agents_query // \"\") | ascii_downcase) as $q | (.settings.redo_agents.include // []) as $inc | (.settings.redo_agents.exclude // []) as $exc | [(.data.redo_agents.agents // [])[] | select(.shown | not) | select($q == \"\" or ((.name + \" \" + .slug + \" \" + (.author // \"\")) | ascii_downcase | contains($q)))] | sort_by(.name)",
+                "as": "x", "key": ".x.id", "id": "redo-agents-pick",
+                "type": "row",
+                "style": { "height": 32, "padding": [0, 8], "gap": 8, "align": "center", "radius": 6, "cursor": "pointer", "hover": { "background": "@hover" } },
+                "tooltip": "Add {{ .x.name }}",
+                "on": { "click": { "do": "settings.set", "values": { "redo_agents.include": "{{ ((.settings.redo_agents.include // []) + [.x.slug]) | unique }}", "redo_agents.exclude": "{{ (.settings.redo_agents.exclude // []) - [.x.slug] }}" } } },
+                "children": [
+                  { "type": "icon", "props": { "name": "plus", "size": 12, "color": "@text_faint" } },
+                  { "type": "text", "props": { "text": "{{ .x.name }}" }, "style": { "font_size": 12.5, "truncate": true, "min_width": 0 } },
+                  { "type": "spacer" },
+                  { "type": "text", "props": { "text": "{{ .x.author // \"\" }}" }, "style": { "font_size": 11, "color": "@text_faint", "truncate": true, "max_width": 120 } }
+                ]
+              },
+              {
+                "if": "((.state.redo_agents_query // \"\") | ascii_downcase) as $q | ([(.data.redo_agents.agents // [])[] | select(.shown | not) | select($q == \"\" or ((.name + \" \" + .slug + \" \" + (.author // \"\")) | ascii_downcase | contains($q)))] | length) == 0",
+                "type": "text", "props": { "text": "No matches." }, "style": { "padding": [8, 10], "font_size": 12, "color": "@text_faint" }
+              }
+            ]
+          }
+        ]
+      },
+      "after": "redo-agents-label"
+    },
+    {
+      "insert": {
+        "id": "redo-agents-connect",
+        "if": "(.state.sidebar_redo_agents_open != false) and (.data.redo_agents.no_key // (.data.redo_agents == null))",
+        "type": "column",
+        "style": { "margin": [2, 4], "padding": [8, 10], "gap": 4, "radius": 8, "border": 1, "border_color": "@line", "cursor": "pointer", "hover": { "background": "@hover" } },
+        "tooltip": "Opens Integrations & API → API keys. Create a “Run agents” key, then save it with:\nmkdir -p ~/.config/redo-agents && pbpaste > ~/.config/redo-agents/api-key",
+        "on": { "click": { "do": "open", "url": "https://agents.redo.builders/integrations?tab=credentials" } },
+        "children": [
+          { "type": "row", "style": { "gap": 6, "align": "center" }, "children": [
+            { "type": "icon", "props": { "name": "key-round", "size": 13, "color": "@accent" } },
+            { "type": "text", "props": { "text": "Connect to Redo agents" }, "style": { "font_size": 13, "color": "@text" } }
+          ] },
+          { "type": "text", "props": { "text": "Create an API key, save it to ~/.config/redo-agents/api-key, and this list fills in." }, "style": { "font_size": 11.5, "color": "@text_faint" } }
+        ]
+      },
+      "after": "redo-agents-label"
+    },
+    {
+      "insert": {
+        "id": "redo-agents-error",
+        "if": "(.state.sidebar_redo_agents_open != false) and .data.redo_agents.error",
+        "type": "row",
+        "style": { "padding": [6, 10], "gap": 6, "align": "center", "font_size": 12, "color": "@danger" },
+        "tooltip": "{{ .data.redo_agents.error }}",
+        "children": [
+          { "type": "icon", "props": { "name": "triangle-alert", "size": 12, "color": "@danger" } },
+          { "type": "text", "props": { "text": "{{ if .data.redo_agents.error == \"unreachable\" then \"Can't reach agents.redo.builders (Tailscale on?)\" elif .data.redo_agents.error == \"unauthenticated\" then \"API key rejected or expired\" else \"Error: \" + .data.redo_agents.error end }}" }, "style": { "truncate": true, "min_width": 0 } }
+        ]
+      },
+      "after": "redo-agents-connect"
+    },
+    {
+      "insert": {
+        "id": "redo-agent-row",
+        "for": "if (.state.sidebar_redo_agents_open != false) and .data.redo_agents.ok then [.data.redo_agents.agents[] | select(.shown)] else [] end",
+        "as": "a", "key": ".a.id",
+        "type": "row",
+        "style": { "height": 44, "padding": [5, 10, 5, 8], "margin": [1, 0], "gap": 8, "align": "center", "radius": 8, "cursor": "pointer", "hover": { "background": "@hover" },
+                   "opacity": "{{ if .a.triggers_paused then 0.6 else 1 end }}" },
+        "tooltip": "{{ .a.name }} · {{ if .a.running > 0 then (.a.running | tostring) + \" running\" elif .a.attention > 0 then (.a.attention | tostring) + \" waiting on someone\" else \"idle\" end }}{{ if .a.triggers_paused then \" · triggers paused\" else \"\" end }}\n{{ .a.runs_7d }} run{{ if .a.runs_7d == 1 then \"\" else \"s\" end }} in the last 7 days. {{ if ((.a.works // []) | length) > 0 then \"Click to open its current work\" else \"Click to open the agent\" end }}; right-click for all its work.",
+        // A busy agent opens its current Work (running first, else the one waiting on someone); an idle one
+        // opens the agent's page.
+        "on": { "click": { "do": "open", "url": "{{ ((.a.works // []) | (map(select(.activity == \"running\")) + map(select(.activity != \"running\"))) | .[0].url) // .a.url }}" } },
+        "menu": [
+          { "label": "Open {{ .a.name }}", "icon": "external-link", "do": { "do": "open", "url": "{{ .a.url }}" } },
+          { "if": "(.a.works | length) > 0", "separator": true },
+          { "for": ".a.works", "as": "w", "label": "{{ if .w.activity == \"running\" then \"▶ \" elif .w.activity == \"needs_attention\" then \"? \" else \"… \" end }}{{ .w.title }}", "do": { "do": "open", "url": "{{ .w.url }}" } },
+          { "separator": true },
+          { "label": "New work with {{ .a.name }}…", "icon": "plus", "do": { "do": "open", "url": "https://agents.redo.builders/" } },
+          { "separator": true },
+          {
+            "label": "Remove from my list",
+            "icon": "eye-off",
+            "do": { "do": "settings.set", "values": { "redo_agents.include": "{{ (.settings.redo_agents.include // []) - [.a.slug] }}", "redo_agents.exclude": "{{ if .a.mine then ((.settings.redo_agents.exclude // []) + [.a.slug] | unique) else (.settings.redo_agents.exclude // []) end }}" } }
+          }
+        ],
+        "children": [
+          { "if": ".a.running > 0", "type": "spinner", "props": { "size": "xsmall", "color": "@success" }, "style": { "width": 14 } },
+          { "if": ".a.running == 0 and .a.attention > 0", "type": "icon", "props": { "name": "bell", "size": 13, "color": "@warning" }, "style": { "width": 14 } },
+          { "if": ".a.running == 0 and .a.attention == 0", "type": "box", "style": { "width": 14, "align": "center", "justify": "center" }, "children": [
+            { "type": "box", "style": { "width": 7, "height": 7, "radius": 4, "background": "{{ if .a.triggers_paused then \"@line\" else \"@text_faint\" end }}" } }
+          ] },
+          {
+            "type": "column",
+            "style": { "grow": 1, "min_width": 0, "gap": 1 },
+            "children": [
+              { "type": "text", "props": { "text": "{{ .a.name }}" }, "style": { "font_size": 13.5, "truncate": true } },
+              {
+                "type": "text",
+                "props": { "text": "{{ if .a.running > 0 then (.a.works | map(select(.activity == \"running\")) | .[0].title) elif .a.attention > 0 then (.a.works | map(select(.activity != \"running\")) | .[0].title) elif .a.triggers_paused then \"Triggers paused\" elif .a.runs_7d > 0 then (.a.runs_7d | tostring) + \" run\" + (if .a.runs_7d == 1 then \"\" else \"s\" end) + \" this week\" else \"Idle\" end }}" },
+                "style": { "font_size": 11.5, "color": "{{ if .a.running > 0 then \"@success\" elif .a.attention > 0 then \"@warning\" else \"@text_faint\" end }}", "truncate": true }
+              }
+            ]
+          },
+          { "if": "(.a.running + .a.attention) > 1", "type": "text", "props": { "text": "{{ .a.running + .a.attention }}" }, "style": { "font_size": 11, "padding": [1, 6], "radius": 8, "background": "@pill", "color": "@text_muted", "shrink": 0 } },
+          {
+            "if": ".a.last_invoked",
+            "type": "text",
+            "props": { "text": "{{ (.now - .a.last_invoked) as $s | if $s < 60 then \"now\" elif $s < 3600 then (($s / 60) | floor | tostring) + \"m\" elif $s < 86400 then (($s / 3600) | floor | tostring) + \"h\" else (($s / 86400) | floor | tostring) + \"d\" end }}" },
+            "style": { "min_width": 22, "text_align": "right", "font_size": 12, "color": "@age", "shrink": 0 }
+          }
+        ]
+      },
+      "after": "redo-agents-error"
+    },
+    {
+      "insert": {
+        "id": "redo-agents-empty",
+        "if": "(.state.sidebar_redo_agents_open != false) and .data.redo_agents.ok and (([.data.redo_agents.agents[] | select(.shown)] | length) == 0)",
+        "type": "text",
+        "props": { "text": "{{ if (.data.redo_agents.agents | length) == 0 then \"No agents yet.\" else \"None picked yet. Right-click “Redo agents” → Add agent.\" end }}" },
+        "style": { "padding": [8, 10], "font_size": 12.5, "color": "@text_faint" }
+      },
+      "after": "redo-agent-row"
+    },
+
+    // ── Datadog monitors (scripts/datadog_monitors.rs) ───────────────────────
+    {
+      "insert": {
+        "id": "dd-label",
+        "type": "row",
+        "style": { "height": 30, "padding": [14, 8, 2, 8], "gap": 6, "align": "center", "font_size": 12, "font_weight": "semibold", "color": "@text_faint", "cursor": "pointer", "radius": 6, "hover": { "color": "@text" } },
+        "tooltip": "Datadog monitors{{ if .data.datadog.updated then \"\\nUpdated \" + (((.now - .data.datadog.updated) / 60) | floor | tostring) + \" min ago\" else \"\" end }}",
+        "on": { "click": { "do": "state.set", "key": "sidebar_dd_open", "value": "{{ .state.sidebar_dd_open == false }}" } },
+        "children": [
+          { "type": "icon", "props": { "name": "{{ if .state.sidebar_dd_open != false then \"chevron-down\" else \"chevron-right\" end }}", "size": 12 } },
+          { "type": "text", "props": { "text": "Monitors" } },
+          {
+            "if": "([(.data.datadog.monitors // [])[] | select(.state == \"Alert\")] | length) > 0",
+            "type": "text",
+            "props": { "text": "{{ [(.data.datadog.monitors // [])[] | select(.state == \"Alert\")] | length }} alerting" },
+            "style": { "font_size": 11, "padding": [1, 6], "radius": 8, "background": "@pill", "color": "@danger" }
+          },
+          { "type": "spacer" },
+          { "if": ".data.datadog.loading", "type": "spinner", "props": { "size": "xsmall" } },
+          { "if": ".data.datadog.loading | not", "type": "IconButton", "id": "dd-refresh", "props": { "icon": "refresh-cw", "size": 20, "icon_size": 12, "tooltip": "Refresh now", "do": "datadog.refresh" } },
+          { "type": "IconButton", "id": "dd-add", "props": { "icon": "plus", "size": 20, "icon_size": 13, "tooltip": "Add a monitor (paste its Datadog link)", "do": { "do": "prompt", "title": "Add a Datadog monitor", "placeholder": "https://app.datadoghq.com/monitors/123456 or 123456", "then": { "do": "datadog.add", "text": "{{ .input }}" } } } }
+        ]
+      },
+      "after": "redo-agents-empty"
+    },
+    {
+      "insert": {
+        "id": "dd-connect",
+        "if": ".state.sidebar_dd_open != false and .data.datadog.no_key",
+        "type": "column",
+        "style": { "margin": [2, 4], "padding": [8, 10], "gap": 4, "radius": 8, "border": 1, "border_color": "@line", "cursor": "pointer", "hover": { "background": "@hover" } },
+        "tooltip": "Opens Datadog's Application Keys page. Save both keys in ~/.config/datadog/keys.env as DD_API_KEY=… and DD_APP_KEY=…",
+        "on": { "click": { "do": "open", "url": "https://app.{{ .settings.datadog.site // \"datadoghq.com\" }}/organization-settings/application-keys" } },
+        "children": [
+          { "type": "row", "style": { "gap": 6, "align": "center" }, "children": [
+            { "type": "icon", "props": { "name": "key-round", "size": 13, "color": "@accent" } },
+            { "type": "text", "props": { "text": "Connect Datadog for live states" }, "style": { "font_size": 13, "color": "@text" } }
+          ] },
+          { "type": "text", "props": { "text": "Links work now; states need an API and an application key." }, "style": { "font_size": 11.5, "color": "@text_faint" } }
+        ]
+      },
+      "after": "dd-label"
+    },
+    {
+      "insert": {
+        "id": "dd-error",
+        "if": ".state.sidebar_dd_open != false and .data.datadog.error",
+        "type": "row",
+        "style": { "padding": [4, 10], "gap": 6, "align": "center", "font_size": 12, "color": "@danger" },
+        "children": [
+          { "type": "icon", "props": { "name": "triangle-alert", "size": 12, "color": "@danger" } },
+          { "type": "text", "props": { "text": "{{ if .data.datadog.error == \"unreachable\" then \"Can't reach Datadog\" else .data.datadog.error end }}" }, "style": { "truncate": true, "min_width": 0 } }
+        ]
+      },
+      "after": "dd-connect"
+    },
+    {
+      "insert": {
+        "id": "dd-row",
+        "for": "if .state.sidebar_dd_open != false then (.data.datadog.monitors // []) else [] end",
+        "as": "m", "key": ".m.id",
+        "type": "row",
+        "style": { "height": 34, "padding": [0, 10, 0, 8], "margin": [1, 0], "gap": 8, "align": "center", "radius": 8, "cursor": "pointer", "hover": { "background": "@hover" } },
+        "tooltip": "{{ .m.name }}\n{{ .m.state }} · click to open in Datadog",
+        "on": { "click": { "do": "open", "url": "{{ .m.url }}" } },
+        "menu": [
+          { "label": "Open in Datadog", "icon": "external-link", "do": { "do": "open", "url": "{{ .m.url }}" } },
+          { "label": "Copy link", "icon": "link", "do": { "do": "clipboard.copy", "text": "{{ .m.url }}" } },
+          { "separator": true },
+          { "label": "Remove from sidebar", "icon": "x", "danger": true, "do": { "do": "datadog.remove", "id": "{{ .m.id }}" } }
+        ],
+        "children": [
+          {
+            "type": "icon",
+            "props": {
+              "name": "{{ if .m.state == \"OK\" then \"circle-check\" elif .m.state == \"Alert\" then \"circle-alert\" elif .m.state == \"Warn\" then \"triangle-alert\" elif .m.state == \"No Data\" then \"circle-dashed\" elif .m.state == \"Ignored\" then \"circle-minus\" else \"circle-help\" end }}",
+              "size": 14,
+              "color": "{{ if .m.state == \"OK\" then \"@success\" elif .m.state == \"Alert\" then \"@danger\" elif .m.state == \"Warn\" then \"@warning\" else \"@text_faint\" end }}"
+            },
+            "style": { "width": 14, "shrink": 0 }
+          },
+          { "type": "text", "props": { "text": "{{ .m.name }}" }, "style": { "grow": 1, "min_width": 0, "font_size": 13, "truncate": true } },
+          { "type": "text", "props": { "text": "{{ if .m.state == \"Unknown\" then \"\" else .m.state end }}" }, "style": { "font_size": 11.5, "shrink": 0, "color": "{{ if .m.state == \"OK\" then \"@success\" elif .m.state == \"Alert\" then \"@danger\" elif .m.state == \"Warn\" then \"@warning\" else \"@text_faint\" end }}" } }
+        ]
+      },
+      "after": "dd-error"
+    },
+    {
+      "insert": {
+        "id": "dd-empty",
+        "if": ".state.sidebar_dd_open != false and ((.settings.datadog.monitors // []) | length) == 0",
+        "type": "text",
+        "props": { "text": "No monitors yet. Click + and paste a monitor link." },
+        "style": { "padding": [6, 10], "font_size": 12.5, "color": "@text_faint" }
+      },
+      "after": "dd-row"
+    }
+  ]
+}
