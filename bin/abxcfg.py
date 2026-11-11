@@ -60,6 +60,8 @@ BOX_BOOT = {
                "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {packages} > /dev/null 2>&1",
     "claude_onboarding": True,
     "git_insteadof": {"https://gitlab.com/": ["git@gitlab.com:", "ssh://git@gitlab.com/"]},
+    # agent-box-gc runs one gc at a time instead.
+    "git_config": {"maintenance.auto": "false", "gc.auto": "0"},
     "bashrc_hook": True,
     "tmux_status_off": True,
     "services": [
@@ -69,6 +71,11 @@ BOX_BOOT = {
                                          "-t 'theme={\"background\":\"#1e1e1f\",\"foreground\":\"#d6d6d8\",\"cursor\":\"#d6d6d8\",\"selectionBackground\":\"#3a4252\"}' "
                                          "-t disableLeaveAlert=true tmux attach -t 2>&1 | tee -a {agent_home}/log/ttyd.log"},
         {"name": "agent-boxd", "cmd": "{boxd} run 2>&1 | tee -a {agent_home}/log/boxd.log", "build": True},
+        {"name": "agent-box-phone", "cmd": "{boxd} web 2>&1 | tee -a {agent_home}/log/phone.log", "build": True},
+        # The phone app's own tailnet node (the workspace's tailscaled keeps no state, so it can't get certs).
+        {"name": "agent-box-ts", "cmd": "mkdir -p {agent_home}/ts && tailscaled --tun=userspace-networking --statedir={agent_home}/ts "
+                                        "--socket={agent_home}/ts/tailscaled.sock --port=0 2>&1 | tee -a {agent_home}/log/ts.log"},
+        {"name": "agent-box-gc", "cmd": "{agent_box_dir}/bin/git-gc"},
     ],
 }
 
@@ -76,6 +83,8 @@ HOSTS = {
     "box": {
         "label": "box", "detect": {"env": "CODER_AGENT_URL"}, "ssh": None, "agent_box_dir": "~/agent-box",
         "sc_store": "sc.json", "supervise": True, "relay_app_actions": True, "sync_transcripts": "all", "stacks": False,
+        # No stacks run here, so redo worktrees skip wt (a slot per worktree) for plain `git worktree`.
+        "repos": {"redo": {"worktree_tool": None, "copy_files": ["conf.sh", ".secrets.sh", ".bazelrc.user"]}},
         "foreign_sessions": False, "build_unwatched": True, "env": {"REDO_GITLAB_USER_AUTH": "1"},
         "agent_env": {"path_prepend": ["{agent_box_dir}/shim", "~/redo-monorepo-worktrees/bin", "~/.local/bin"],
                       "set": {"WT_PRIMARY": "~/dev/redo", "WT_BASE": "~/dev/redo-worktrees"}},
@@ -125,6 +134,7 @@ LOGS = {
     "boxd": "~/.agent-box/boxd.log", "agent-box": "~/.agent-box/log/agent-box.log",
     "supervisor": "~/.agent-box/log/supervisor.log", "boxd-build": "~/.agent-box/log/boxd-build.log",
     "dashboard": "~/.agent-box/log/dashboard.log", "ttyd": "~/.agent-box/log/ttyd.log",
+    "phone": "~/.agent-box/log/phone.log", "ts": "~/.agent-box/log/ts.log",
 }
 
 ENV_PUSH = {
@@ -137,6 +147,7 @@ ENV_PUSH = {
         {"path": "~/.config/redo/cursor-environments.json"},
         {"path": "~/.config/redo/cursor-typecheck-agents.json"},
         {"path": "~/.claude/hooks/block-squash.py", "replace": True},
+        {"path": "~/.agent-box/sidebar-order.json"},
     ],
     "memory": True, "memory_deletes": True, "max_deletes": 25,
     "skills_link": True,
@@ -290,7 +301,16 @@ def agent_box_dir(hid=None):
 
 
 def repos():
-    return merged(REPOS, option("repos", {}))
+    """REPOS, then the `repos` option, then this host's own `repos` (an entry's null key removes it)."""
+    out = merged(REPOS, option("repos", {}))
+    for key, over in (host().get("repos") or {}).items():
+        if over is None:
+            out.pop(key, None)
+        elif isinstance(over, dict) and isinstance(out.get(key), dict):
+            out[key] = {k: v for k, v in {**out[key], **over}.items() if v is not None}
+        else:
+            out[key] = over
+    return out
 
 
 def default_repo():

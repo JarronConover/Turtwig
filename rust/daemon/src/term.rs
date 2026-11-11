@@ -20,6 +20,8 @@ pub fn open(term_id: u64, session: &str, cols: u16, rows: u16, tx: Sender<String
     if session.starts_with("chat-") {
         crate::util::run("tmux", &["set-option", "-t", &format!("={session}"), "status", "off"], &[], None, crate::util::tmux_wait());
     }
+    // tmux's default ("external") drops a program's own OSC 52 copy (Claude Code's "c to copy").
+    crate::util::run("tmux", &["set-option", "-s", "set-clipboard", "on"], &[], None, crate::util::tmux_wait());
     let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
     let mut cmd = CommandBuilder::new("tmux");
     cmd.args(["attach", "-t", &format!("={session}")]);

@@ -897,8 +897,9 @@ pub struct App {
     pub(crate) text_rendering_mode: Rc<Cell<TextRenderingMode>>,
 
     pub(crate) window_update_stack: Vec<WindowId>,
-    /// a.box: entities drawn again after every update made outside a draw (see `redraw_on_update`).
-    pub(crate) redraw_on_update: FxHashSet<EntityId>,
+    /// a.box: entities drawn again after every update made outside a draw (see `redraw_on_update`), and
+    /// how many such updates each has had.
+    pub(crate) redraw_on_update: FxHashMap<EntityId, u64>,
     /// a.box: how many windows are drawing right now.
     pub(crate) drawing: usize,
     pub(crate) mode: GpuiMode,
@@ -970,7 +971,7 @@ impl App {
                 new_entity_observers: SubscriberSet::new(),
                 windows: SlotMap::with_key(),
                 window_update_stack: Vec::new(),
-                redraw_on_update: FxHashSet::default(),
+                redraw_on_update: FxHashMap::default(),
                 drawing: 0,
                 window_handles: FxHashMap::default(),
                 focus_handles: Arc::new(RwLock::new(SlotMap::with_key())),
@@ -3054,13 +3055,19 @@ impl App {
         FocusHandle::new(&self.focus_handles)
     }
 
-    /// Tell GPUI that an entity has changed and observers of it should be notified.
     /// a.box: every update of `entity` made outside a draw notifies it, as if each update ended with
     /// `cx.notify()`, so a view cached by its parent can't miss a change.
     pub fn redraw_on_update(&mut self, entity_id: EntityId) {
-        self.redraw_on_update.insert(entity_id);
+        self.redraw_on_update.entry(entity_id).or_insert(0);
     }
 
+    /// a.box: how many updates made outside a draw an entity passed to `redraw_on_update` has had. A frame
+    /// that draws it again with this unchanged was asked for by a view inside it, not by a change to it.
+    pub fn updates_of(&self, entity_id: EntityId) -> u64 {
+        self.redraw_on_update.get(&entity_id).copied().unwrap_or(0)
+    }
+
+    /// Tell GPUI that an entity has changed and observers of it should be notified.
     pub fn notify(&mut self, entity_id: EntityId) {
         let window_invalidators = mem::take(
             self.window_invalidators_by_entity
@@ -3220,7 +3227,10 @@ impl App {
             let mut lease = cx.entities.lease_erased(handle, entity_type);
             update(lease.entity.as_deref_mut().unwrap(), cx);
             cx.entities.end_lease_erased(handle.entity_id, lease);
-            if cx.drawing == 0 && cx.redraw_on_update.contains(&handle.entity_id) {
+            if cx.drawing == 0
+                && let Some(n) = cx.redraw_on_update.get_mut(&handle.entity_id)
+            {
+                *n += 1;
                 cx.notify(handle.entity_id);
             }
         });
