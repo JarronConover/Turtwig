@@ -460,6 +460,9 @@ pub struct Workspace {
     settings_val: Val,
     layout_val: std::cell::RefCell<Option<(u64, Val)>>,
     pub(crate) notify_count: u64,
+    /** Updates made to the workspace when this frame began drawing it: unchanged, a view inside it (a
+    scrolled list, a terminal) asked for the frame, so regions holding built-ins can be reused. */
+    pub(crate) updates: u64,
     badge: Option<String>,
     dock_icon: Option<Vec<u8>>,
     pub(crate) diff_collapsed: HashSet<String>,
@@ -738,6 +741,7 @@ impl Workspace {
             window_dirty: false,
             hosts_dirty: false,
             notify_count: 0,
+            updates: 0,
             badge: None,
             dock_icon: None,
             diff_collapsed: HashSet::new(),
@@ -4765,11 +4769,18 @@ impl Workspace {
                 ws.select_tip = Some(crate::ui::quote_view::SelectTip { chat: tip_chat.clone(), at: e.position, text: String::new() });
                 cx.notify();
             }))
-            .on_scroll_wheel(cx.listener(|ws, _, _, cx| {
-                if ws.select_tip.take().is_some() {
-                    cx.notify();
+            .on_scroll_wheel({
+                // Updating the workspace on every wheel event would draw every region holding a built-in.
+                let view = cx.entity().downgrade();
+                move |_, _, cx| {
+                    if view.read_with(cx, |ws, _| ws.select_tip.is_some()).unwrap_or(false) {
+                        let _ = view.update(cx, |ws, cx| {
+                            ws.select_tip = None;
+                            cx.notify();
+                        });
+                    }
                 }
-            }))
+            })
             .when(drop_attaches, |d| d.on_drop(move |paths: &ExternalPaths, window, cx| {
                 let files = paths.paths().iter().cloned().map(Attachment::Path).collect();
                 let chat = drop_chat.clone();
@@ -5272,6 +5283,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let started = std::time::Instant::now();
+        self.updates = cx.updates_of(cx.entity_id());
         crate::ui::anim::set_fps(if self.motion.borrow().enabled { self.settings.motion.get("animation_fps").and_then(Value::as_f64).unwrap_or(60.) } else { 0. });
         crate::ui::anim::clear("");
         self.thumbs.clear("");

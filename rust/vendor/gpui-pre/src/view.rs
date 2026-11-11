@@ -8,7 +8,6 @@ use crate::{Empty, Window};
 use anyhow::Result;
 use collections::FxHashSet;
 use refineable::Refineable;
-use std::mem;
 use std::{
     any::{TypeId, type_name},
     fmt,
@@ -259,6 +258,7 @@ pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
     cached_style: Option<StyleRefinement>,
+    reuse_nested: bool,
     #[cfg(feature = "profiler")]
     view_type_name: &'static str,
     #[cfg(debug_assertions)]
@@ -281,6 +281,7 @@ impl<V: View> ViewElement<V> {
         ViewElement {
             entity_id,
             cached_style: None,
+            reuse_nested: false,
             #[cfg(feature = "profiler")]
             view_type_name,
             view: Some(view),
@@ -300,6 +301,13 @@ impl<V: View> ViewElement<V> {
     /// entity-backed by construction.
     pub(crate) fn cached(mut self, style: StyleRefinement) -> Self {
         self.cached_style = Some(style);
+        self
+    }
+
+    /// When this cached view draws again, the cached views inside it that weren't notified are reused
+    /// instead of drawn again with it. Their owner must notify them when what they show changes.
+    pub fn reuse_nested(mut self) -> Self {
+        self.reuse_nested = true;
         self
     }
 }
@@ -394,6 +402,7 @@ impl<V: View> Element for ViewElement<V> {
             let start = window.window_profiler.begin_view();
             let prepainted = prepaint_view(
                 entity_id,
+                self.reuse_nested,
                 global_id,
                 bounds,
                 element,
@@ -437,6 +446,7 @@ impl<V: View> Element for ViewElement<V> {
             paint_view(
                 entity_id,
                 self.cached_style.is_some(),
+                self.reuse_nested,
                 global_id,
                 element,
                 window,
@@ -507,6 +517,7 @@ fn request_layout_component(
 #[inline(never)]
 fn prepaint_view(
     entity_id: EntityId,
+    reuse_nested: bool,
     global_id: Option<&GlobalElementId>,
     bounds: Bounds<Pixels>,
     element: &mut Option<AnyElement>,
@@ -544,7 +555,8 @@ fn prepaint_view(
                     return (None, element_state);
                 }
 
-                let refreshing = mem::replace(&mut window.refreshing, true);
+                let refreshing = window.refreshing;
+                window.refreshing |= !reuse_nested;
                 let prepaint_start = window.prepaint_index();
                 let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                     let mut element = render(window, cx);
@@ -591,6 +603,7 @@ fn prepaint_component(
 fn paint_view(
     entity_id: EntityId,
     cached: bool,
+    reuse_nested: bool,
     global_id: Option<&GlobalElementId>,
     element: &mut Option<AnyElement>,
     window: &mut Window,
@@ -607,7 +620,8 @@ fn paint_view(
                     let paint_start = window.paint_index();
 
                     if let Some(element) = element {
-                        let refreshing = mem::replace(&mut window.refreshing, true);
+                        let refreshing = window.refreshing;
+                        window.refreshing |= !reuse_nested;
                         element.paint(window, cx);
                         window.refreshing = refreshing;
                     } else {
