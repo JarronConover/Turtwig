@@ -4,7 +4,7 @@ painted with GPUI text runs. Keystrokes go back as bytes; the PTY follows this v
 use crate::remote::Remote;
 use crate::settings::{parse_color, TerminalSettings};
 use agent_box_protocol::Call;
-use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
@@ -143,8 +143,21 @@ impl Dimensions for Size {
     }
 }
 
+/** Text a program in the terminal copies to the clipboard (OSC 52, e.g. Claude Code's "c to copy"). */
+#[derive(Clone, Default)]
+struct Copies(Rc<std::cell::RefCell<Vec<String>>>);
+
+impl EventListener for Copies {
+    fn send_event(&self, event: TermEvent) {
+        if let TermEvent::ClipboardStore(_, text) = event {
+            self.0.borrow_mut().push(text);
+        }
+    }
+}
+
 pub struct TerminalView {
-    term: Term<VoidListener>,
+    term: Term<Copies>,
+    copies: Copies,
     parser: Processor<StdSyncHandler>,
     remote: Remote,
     /** Which daemon the PTY lives on ("box", "mac"); terminal ids are only unique per daemon. */
@@ -195,8 +208,10 @@ impl TerminalView {
         let size = Size { cols: cols as usize, rows: rows as usize };
         let history = ts.extra.get("scrollback").and_then(Value::as_u64).unwrap_or(10_000) as usize;
         let config = Config { scrolling_history: history, ..Config::default() };
+        let copies = Copies::default();
         Self {
-            term: Term::new(config, &size, VoidListener),
+            term: Term::new(config, &size, copies.clone()),
+            copies,
             parser: Processor::new(),
             remote,
             host,
@@ -544,6 +559,9 @@ impl TerminalView {
     pub fn output(&mut self, data: &str, cx: &mut Context<Self>) {
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
             self.parser.advance(&mut self.term, &bytes);
+            if let Some(text) = self.copies.0.borrow_mut().drain(..).last() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
             cx.notify();
         }
     }
@@ -631,7 +649,9 @@ impl TerminalView {
             return;
         }
         let mods = Mods { ctrl: m.control, alt: m.alt || passthrough, shift: m.shift };
-        let Some(bytes) = key_bytes(k.key.as_str(), mods, k.key_char.as_deref().or((passthrough && k.key.chars().count() == 1).then_some(k.key.as_str()))) else { return };
+        // gpui's macOS key_char leaves caps lock out.
+        let caps = k.key_char.as_deref().filter(|_| window.capslock().on).map(str::to_uppercase);
+        let Some(bytes) = key_bytes(k.key.as_str(), mods, caps.as_deref().or(k.key_char.as_deref()).or((passthrough && k.key.chars().count() == 1).then_some(k.key.as_str()))) else { return };
         self.term.selection = None;
         self.to_bottom();
         self.write(&bytes);

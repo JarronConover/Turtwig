@@ -918,11 +918,12 @@ impl Workspace {
         }
     }
 
-    /** What a `chat.render.waiting` component gets as `.props`: the question, its options (each with the
-    action that answers it) and the cancel action. */
+    /** What a `chat.render.waiting` component gets as `.props`: the question, what a permission prompt's
+    tool would run (`detail`), its options (each with the action that answers it) and the cancel action. */
     fn waiting_props(&self, c: &agent_box_protocol::Chat) -> Value {
         let w = c.waiting_on.clone().unwrap_or_default();
         let message = crate::workspace::waiting_message(&w).unwrap_or_else(|| self.tr("waiting", "The agent is waiting for you", &[]));
+        let detail = crate::workspace::waiting_detail(&w, self.settings.get("chat.waiting_detail_lines").and_then(Value::as_u64).unwrap_or(12) as usize);
         let (options, mut questions) = crate::workspace::waiting_options(&w, &self.settings);
         questions.retain(|q| *q != message);
         let options: Vec<Value> = options
@@ -931,7 +932,7 @@ impl Workspace {
             .map(|(i, label)| serde_json::json!({"label": label, "index": i, "do": {"do": "chat.answer", "chat": c.id, "option": i}}))
             .collect();
         serde_json::json!({
-            "chat": c.id, "message": message, "questions": questions, "options": options, "tool": w["tool_name"],
+            "chat": c.id, "message": message, "detail": detail, "questions": questions, "options": options, "tool": w["tool_name"],
             "cancel": {"label": self.tr("waiting_cancel", "Cancel", &[]), "do": {"do": "chat.answer", "chat": c.id, "option": "cancel"}},
         })
     }

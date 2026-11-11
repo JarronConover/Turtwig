@@ -776,7 +776,8 @@ fn handle(shared: &Arc<Shared>, conn: &Arc<Conn>, call: Call) -> Result<Value, S
         Call::WorktreeDelete { path } => {
             let ws = sc_tool(&["workspace", "list"], None)?;
             let id = find_item_id(&ws, &path).ok_or("no such worktree")?;
-            sc_tool(&["worktree", "delete", &id], None)
+            // The app confirms first, saying uncommitted changes go with the folder.
+            sc_tool(&["worktree", "delete", &id, "--force"], None)
         }
         Call::WorktreeMove { path, section, before } => {
             let ws = sc_tool(&["workspace", "list"], None)?;

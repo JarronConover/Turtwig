@@ -382,7 +382,9 @@ impl Workspace {
     fn markdown(&self, key: &str, text: &str, theme: &Map<String, Value>) -> TextView {
         let selectable = self.settings.chat.get("selectable").and_then(Value::as_bool) != Some(false);
         let md = self.settings.chat.get("markdown").and_then(Value::as_object).cloned();
-        self.markdown_with(key, text, md.as_ref(), selectable, theme)
+        let breaks = self.settings.chat.get("soft_breaks_as_newlines").and_then(Value::as_bool) != Some(false);
+        let view = self.markdown_with(key, text, md.as_ref(), selectable, theme);
+        view.markdown_extensions(gpui_kit::base::MarkdownExtensions::default().soft_breaks_as_newlines(breaks))
     }
 
     /** Markdown drawn with `md` (the shape of `chat.markdown`; None: the built-in look). */

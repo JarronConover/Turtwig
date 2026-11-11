@@ -155,12 +155,16 @@ def run(cmd, **kw):
         print(f"[{time.time() - start:6.2f}s] {shlex.join(map(str, cmd))[:160]}", file=sys.stderr)
 
 
+def git_net_env():
+    """A stalled connection to GitLab fails within seconds instead of holding a move (or anything) forever."""
+    return {**os.environ, "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND") or
+            "ssh -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"}
+
+
 def git_state(*args, check=True):
     # A stalled connection to GitLab fails within seconds instead of holding a move (or anything) forever.
-    env = {**os.environ, "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND") or
-           "ssh -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"}
     try:
-        return run(["git", "-C", str(STATE_DIR), *args], capture_output=True, check=check, env=env,
+        return run(["git", "-C", str(STATE_DIR), *args], capture_output=True, check=check, env=git_net_env(),
                    timeout=option("state_git_timeout_secs", 60))
     except subprocess.TimeoutExpired as err:
         if check:
@@ -425,8 +429,11 @@ def make_worktree(repo, branch, wt_dir, base=None, fetched=False, serial=None):
 
 
 def fetch_branch(checkout, branch):
-    run(["git", "-C", str(checkout), "fetch", "-q", "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
-        check=False, capture_output=True)
+    try:
+        run(["git", "-C", str(checkout), "fetch", "-q", "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+            check=False, capture_output=True, env=git_net_env(), timeout=option("fetch_timeout_secs", 180))
+    except subprocess.TimeoutExpired:
+        print(f"warning: fetching {branch} in {checkout} timed out", file=sys.stderr)
 
 
 def ensure_worktree(chat, restore_from=None, incoming=False):
@@ -567,6 +574,9 @@ def launch(chat, resume, restore_from=None, wait_rc=True, fork_from=None):
     """fork_from: the source chat's session id."""
     agent = agent_def(chat)
     directory = ensure_worktree(chat, restore_from)
+    if not directory.is_dir():
+        # tmux would start it in $HOME instead, at the agent's folder-trust prompt.
+        sys.exit(f"{chat['name']}'s folder {directory} is gone")
     trust_folder(agent, directory)
     name = tmux_name(chat)
     if tmux_alive(name):
@@ -620,7 +630,11 @@ def transcript(chat):
         if not (path and os.path.exists(path)) and session_of(chat):
             path = rollout_of(chat, session_of(chat)) or path
         return Path(path) if path else None
-    return PROJECTS / project_slug(chat["dir"]) / f"{chat['id']}.jsonl" if chat.get("dir") else None
+    if not chat.get("dir"):
+        return None
+    # Claude Code files a session under its resolved cwd: a symlinked dir's (~/dev/redo's) target.
+    paths = [PROJECTS / project_slug(d) / f"{chat['id']}.jsonl" for d in dict.fromkeys([os.path.realpath(chat["dir"]), chat["dir"]])]
+    return next((p for p in paths if p.exists()), paths[0])
 
 
 def sessions_dir(chat):
@@ -1128,6 +1142,21 @@ def sc_store(host):
     return data
 
 
+def live_sc_store(host):
+    """A machine's sidebar store as it is there now: this one's file, or the other's over ssh (the state
+    repo's copy lags whenever a push fails, and a move by it takes the wrong worktrees)."""
+    if host == HOST:
+        return sc_store(host)
+    data = json.loads(on_host(host, "_sc_store") or "{}")
+    data.setdefault("sections", [])
+    data.setdefault("worktrees", {})
+    return data
+
+
+def cmd__sc_store(args):
+    print(json.dumps(sc_store(HOST)))
+
+
 def on_host(host, *args):
     """Run this script's command on a machine; returns its stdout."""
     if host == HOST:
@@ -1178,13 +1207,12 @@ def cmd__snapshot_dir(args):
     snapshot_now()
 
 
-def move_group(chat, scope):
+def move_group(chat, scope, store):
     """What moves with this chat: (its section or None, [(source folder, branch, repo, [chats])]).
     scope "section": every worktree in the chat's section and every chat in them; "worktree": the chat's
     worktree and all its chats; "chat": the chat alone."""
     src = chat["host"]
     chats = [c for c in all_chats() if c["host"] == src and c["status"] != "archived" and c.get("dir")]
-    store = sc_store(src)
     known = sorted({c["dir"] for c in chats} | set(store["worktrees"]))
     if src == HOST and scope != "chat":
         # Resolving every folder takes a git call or two each: here, only the ones that can move along.
@@ -1240,7 +1268,25 @@ def move_batch(groups, src, dst, section=None, labels=None):
         out = receive_all(spec)
     else:
         out = json.loads(on_host(dst, "_receive", json.dumps(spec)))
+    # src learns where its chats went from dst itself: through the state repo alone, a failed push left
+    # them "moving" on src, and something there started them again beside dst's.
+    entries = [c["entry"] for w in out["worktrees"] for c in w.get("chats", []) if c.get("entry")]
+    try:
+        if entries and src == HOST:
+            adopt_entries(entries)
+        elif entries:
+            on_host(src, "_adopt_entries", json.dumps(entries))
+    except (SystemExit, Exception) as err:
+        move_log(f"couldn't tell {label(src)} where its chats went: {err}")
     return [(w["folder"], w.get("dir"), w.get("error")) for w in out["worktrees"]]
+
+
+def adopt_entries(entries):
+    """Another machine's registry entries for chats it took over in a move, written here as they are."""
+    with StateLock():
+        for e in entries:
+            (REGISTRY / f"{e['id']}.json").write_text(json.dumps(e, indent=2) + "\n")
+        commit_state(f"chats moved away: {', '.join(e.get('name') or e['id'] for e in entries)}")
 
 
 def each(fn, calls):
@@ -1291,6 +1337,7 @@ def receive_all(spec):
                 take_over(chat, Path(w["dir"]), commit=False)
                 if c.get("stopped"):
                     set_status(chat, "stopped")
+                c["entry"] = load(c["id"])
             except (SystemExit, Exception) as err:
                 w["error"] = str(err).strip() or type(err).__name__
         if w.get("error"):
@@ -1512,23 +1559,33 @@ def cmd_move(args):
         return
     ssh_to(dst if src == HOST else src)
     scope = args.scope or option("move_together", "section")
-    section, groups = move_group(chat, scope)
+    store = live_sc_store(src)
+    section, groups = move_group(chat, scope, store)
     if args.dry_run:
         print(json.dumps({"section": section and section["name"], "from": src, "to": dst, "worktrees": [
             {"folder": f, "branch": b, "repo": r, "chats": [c["name"] for c in cs]} for f, b, r, cs in groups]}, indent=2))
         return
-    labels = {f: sc_store(src)["worktrees"].get(f, {}).get("label") for f, *_ in groups}
+    # One move at a time: a retry beside a running move raced it, and the loser moved the section back.
+    AGENT_HOME.mkdir(parents=True, exist_ok=True)
+    lock = open(AGENT_HOME / "move.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(f"another move is still running on the {label(HOST)}; wait for it to finish")
+    labels = {f: store["worktrees"].get(f, {}).get("label") for f, *_ in groups}
+    # The section's entries as the move found them: one added on src since then keeps the section there.
+    members = [p for p, m in store["worktrees"].items() if section and m.get("section") == section["section_id"]]
     every = [c for *_, cs in groups for c in cs]
     started = time.time()
     # Tells the app each row switches machines as its worktree lands, instead of showing on both.
     app_do([{"do": "state.set", "key": "moving", "value": {"to": dst, "branches": [b for _, b, *_ in groups if b], "at": started}}])
     try:
-        finish_move(chat, src, dst, section, groups, labels, every, started)
+        finish_move(chat, src, dst, section, groups, labels, every, started, members)
     finally:
         app_do([{"do": "state.set", "key": "moving", "value": None}])
 
 
-def finish_move(chat, src, dst, section, groups, labels, every, started):
+def finish_move(chat, src, dst, section, groups, labels, every, started, members):
     # Before the move, which marks each chat "moving" as it stops it.
     running = {c["id"] for *_, cs in groups for c in cs if c["status"] == "running"}
     try:
@@ -1571,7 +1628,7 @@ def finish_move(chat, src, dst, section, groups, labels, every, started):
         set_hidden(leftovers, True)
     # The chats already run on dst; the rest needn't hold the move up (agent-box.log has the outcome).
     background("_after_move", json.dumps({"at": started, "src": src, "dst": dst, "section": section, "moved": moved, "running": sorted(running),
-                                          "chats": [c["id"] for c in every], "leftovers": leftovers}))
+                                          "chats": [c["id"] for c in every], "leftovers": leftovers, "members": members}))
     what = f"section {section['name']}" if section else chat["name"]
     print(f"moved {what} to the {label(dst)}: {len(every)} chat(s), {len(groups)} worktree(s)")
     for a, b in moved.items():
@@ -1591,7 +1648,12 @@ def after_move(spec):
     chats = [c for c in (load(i) for i in spec["chats"]) if c]
     mode = option("move_leftovers", "hide")
     if section and not option("move_keep_section", False):
-        sc_on(src, "section", "delete", section["section_id"])
+        stayed = [p for p, m in live_sc_store(src)["worktrees"].items()
+                  if m.get("section") == section["section_id"] and p not in spec.get("members", [])]
+        if stayed:
+            print(f"kept section {section['name']} on the {label(src)}: {', '.join(stayed)} didn't move")
+        else:
+            sc_on(src, "section", "delete", section["section_id"])
     if section or any(is_orchestrator(c) for c in chats):
         sync_files(src, dst, moved)
     note_moved(chats, src, dst, section, moved, set(spec["running"]))
@@ -1790,8 +1852,82 @@ def wip_key(path):
     return f"{os.path.basename(origin.removesuffix('.git'))}/{branch.replace('/', '~')}"
 
 
+def dispatcher_parent(session):
+    """The /ship-feature parent this Claude session dispatches: the stem of the newest <PARENT>.lock it
+    owns in option dispatcher_ledger. None when it owns none, or that parent's ledger is missing or its
+    latest digest (events.printed or events.paused, `LEG=stage ... | notes`) has every leg done."""
+    folder = Path(abxcfg.expand(option("dispatcher_ledger", "~/.local/state/redo/ship-feature")))
+    owned = []
+    for lock in folder.glob("*.lock") if session and folder.is_dir() else ():
+        if lock.name.endswith((".feature.lock", ".watch.lock")):
+            continue
+        try:
+            held = json.loads(lock.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(held, dict) and held.get("session") == session:
+            owned.append((held.get("at") or 0, lock.stem))
+    if not owned:
+        return None
+    parent = max(owned)[1]
+    try:
+        events = json.loads((folder / f"{parent}.json").read_text()).get("events") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    marks = [m for m in (events.get("printed"), events.get("paused")) if isinstance(m, dict) and m.get("digest")]
+    if marks:
+        legs = max(marks, key=lambda m: m.get("at") or 0)["digest"].split("|", 1)[0].strip()
+        stages = re.findall(r"(\S+)=(.*?)(?=\s+\S+=|$)", legs)
+        if stages and all(stage.strip() == "done" for _, stage in stages):
+            return None
+    return parent
+
+
+RESUMING = set()
+
+
+def resume_dispatcher(chat):
+    """After a relaunch that resumed a dispatcher chat, send it resume_dispatcher_note once its prompt is
+    up, so it re-reads its ledger and re-arms the subagents and watchers the restart killed."""
+    if not option("resume_dispatchers", True) or chat["id"] in RESUMING:
+        return
+    parent = dispatcher_parent(session_of(chat))
+    if not parent:
+        return
+    text = option("resume_dispatcher_note", "/ship-feature {parent}").replace("{parent}", parent)
+    # A chat that died again before its prompt came up stays the supervisor's to relaunch.
+    env = {**os.environ, "AGENT_BOX_OPTIONS": json.dumps({**abxcfg.options(), "send_resumes": False})}
+    RESUMING.add(chat["id"])
+
+    def send():
+        try:
+            r = run([sys.executable, __file__, "send", chat["id"], text, "--wait",
+                     str(option("send_resume_wait_secs", 90))], check=False, capture_output=True, env=env)
+            if r.returncode == 0:
+                print(f"{now()} resumed dispatcher {parent} in {chat['name']}", flush=True)
+            else:
+                print(f"{now()} couldn't resume dispatcher {parent} in {chat['name']}: {one_line(r.stderr)}", flush=True)
+        finally:
+            RESUMING.discard(chat["id"])
+
+    threading.Thread(target=send, daemon=True).start()
+
+
+RELAUNCHES = {}
+
+
+def give_up(chat, why):
+    """Stop a chat the supervisor can't keep alive, and say so once in the inbox."""
+    set_status(chat, "stopped")
+    RELAUNCHES.pop(chat["id"], None)
+    print(f"{now()} stopped {chat['name']}: {why}", flush=True)
+    inbox("post", f"{chat['name']} stopped", "--text", f"The box stopped relaunching it: {why}.",
+          "--chat", chat["id"], "--source", "supervisor", "--key", f"supervisor:{chat['id']}")
+
+
 def cmd_supervise(args):
-    """Keep every running chat on this host alive; runs forever."""
+    """Keep every running chat on this host alive; runs forever. A chat whose folder is gone, or that keeps
+    exiting (`supervise_crash_limit` relaunches within `supervise_crash_window_secs`), is stopped instead."""
     while True:
         pull_state()
         for chat in all_chats():
@@ -1801,12 +1937,33 @@ def cmd_supervise(args):
                 if session_of(chat) is None:
                     record_session(chat["id"])
                 continue
+            if not chat.get("branch") and chat.get("dir") and not os.path.isdir(chat["dir"]):
+                give_up(chat, f"its folder {chat['dir']} is gone")
+                continue
+            window = option("supervise_crash_window_secs", 600)
+            recent = [t for t in RELAUNCHES.get(chat["id"], []) if time.time() - t < window]
+            if len(recent) >= option("supervise_crash_limit", 3):
+                give_up(chat, f"it exited {len(recent)} times within {round(window / 60)} minutes of being relaunched")
+                continue
             try:
                 fresh = chat.get("branch") and not worktree_dir(chat).exists()
                 t = transcript(chat)
-                launch(chat, resume=bool(t and t.exists()), restore_from=HOST if fresh else None)
+                resume = bool(t and t.exists())
+                launch(chat, resume=resume, restore_from=HOST if fresh else None)
+                RELAUNCHES[chat["id"]] = recent + [time.time()]
+                # A stop or close while it launched (the RC link wait takes up to a minute) wins.
+                latest = load(chat["id"])
+                if latest and latest.get("status") != "running":
+                    run(["tmux", "kill-session", "-t", tmux_name(chat)], check=False)
+                    print(f"{now()} dropped the relaunch of {chat['name']}: it was {latest.get('status')} meanwhile", flush=True)
+                    continue
                 save(chat, f"chat relaunch: {chat['name']}")
                 print(f"{now()} relaunched {chat['name']}", flush=True)
+                if resume:
+                    try:
+                        resume_dispatcher(chat)
+                    except Exception as err:  # never let it stop the supervisor
+                        print(f"{now()} resume check failed for {chat['name']}: {one_line(err)}", flush=True)
             except (subprocess.CalledProcessError, SystemExit) as err:
                 print(f"{now()} relaunch failed for {chat['name']}: {err}", flush=True)
         time.sleep(args.interval if args.interval is not None else option("supervise_secs", 30))
@@ -1893,6 +2050,9 @@ def main():
         h = sub.add_parser(name)
         h.add_argument("spec")
         h.set_defaults(fn=fn)
+    h = sub.add_parser("_adopt_entries")
+    h.add_argument("entries")
+    h.set_defaults(fn=lambda a: adopt_entries(json.loads(a.entries)))
     h = sub.add_parser("_receive")
     h.add_argument("spec", help="JSON: {from, section?, worktrees: [{folder, repo, branch, label?, chats: [{id, stopped}]}]}")
     h.set_defaults(fn=cmd__receive)
@@ -1911,6 +2071,8 @@ def main():
     h.add_argument("mode", choices=["remove", "delete"])
     h.add_argument("--since", type=float, help="keep it if a move brought it here after this time")
     h.set_defaults(fn=cmd__drop_worktree)
+    h = sub.add_parser("_sc_store")
+    h.set_defaults(fn=cmd__sc_store)
     h = sub.add_parser("_paths")
     h.add_argument("paths", nargs="*")
     h.set_defaults(fn=cmd__paths)
