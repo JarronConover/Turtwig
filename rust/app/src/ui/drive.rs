@@ -338,7 +338,9 @@ pub(crate) fn dispatch(ws: &mut Workspace, name: &str, a: &Map<String, Value>, w
             let ms = a.get("ms").and_then(Value::as_u64).unwrap_or(1000);
             let steps = (ms * 120 / 1000).max(1);
             let wheel = a.get("wheel").and_then(Value::as_f64).map(|d| d as f32);
-            let modifiers = gpui::Modifiers::default();
+            let wheel_x = a.get("wheel_x").and_then(Value::as_f64).unwrap_or(0.) as f32;
+            let wheel = wheel.or_else(|| (wheel_x != 0.).then_some(0.));
+            let modifiers = gpui::Modifiers { shift: a.get("shift").and_then(Value::as_bool).unwrap_or(false), ..Default::default() };
             cx.spawn_in(window, async move |_, cx| {
                 for i in 0..=steps {
                     if i > 0 {
@@ -349,7 +351,7 @@ pub(crate) fn dispatch(ws: &mut Workspace, name: &str, a: &Map<String, Value>, w
                     let input = match wheel {
                         Some(dy) => gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
                             position,
-                            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-dy))),
+                            delta: gpui::ScrollDelta::Pixels(point(px(-wheel_x), px(-dy))),
                             modifiers,
                             touch_phase: gpui::TouchPhase::Moved,
                         }),

@@ -1973,6 +1973,122 @@ mod tests {
         }
     }
 
+    /// Draw `markdown` in a `width` frame with the scrolling table layout, a
+    /// `table_cell` max width when `cap` is set, and a `table_overlay` hook that
+    /// records every table it is called for: its id, offset and max offset.
+    fn draw_tables_with_overlay<'a>(
+        cx: &'a mut TestAppContext,
+        markdown: &'static str,
+        width: f32,
+        cap: Option<f32>,
+    ) -> (&'a mut VisualTestContext, std::sync::Arc<std::sync::Mutex<Vec<(String, f32, f32)>>>) {
+        use std::sync::{Arc, Mutex};
+
+        struct OverlayRoot {
+            markdown: &'static str,
+            width: f32,
+            cap: Option<f32>,
+            seen: Arc<Mutex<Vec<(String, f32, f32)>>>,
+        }
+
+        impl Render for OverlayRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let seen = self.seen.clone();
+                let mut table = StyleRefinement::default();
+                table.overflow.x = Some(gpui::Overflow::Scroll);
+                let mut cell = StyleRefinement::default();
+                if let Some(cap) = self.cap {
+                    cell.max_size.width = Some(px(cap).into());
+                }
+                div().w(px(self.width)).child(
+                    TextView::markdown("table-overlay", self.markdown)
+                        .style(
+                            TextViewStyle::default()
+                                .with_table(table)
+                                .with_table_cell(cell),
+                        )
+                        .table_overlay(move |_, handle, id, _, _| {
+                            if let Ok(mut seen) = seen.lock() {
+                                seen.push((
+                                    format!("{id:?}"),
+                                    f32::from(handle.offset().x),
+                                    f32::from(handle.max_offset().x),
+                                ));
+                            }
+                            div()
+                                .debug_selector(|| "table-overlay".into())
+                                .absolute()
+                                .inset_0()
+                        }),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let seen = seen.clone();
+            move |_, _| OverlayRoot { markdown, width, cap, seen }
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (cx, seen)
+    }
+
+    const WIDE_TABLE: &str = "| Name | Description | Notes |\n|---|---|---|\n\
+        | A long enough name here | A description that runs on and on and on | Notes that also run long |";
+
+    #[gpui::test]
+    fn table_overlay_covers_the_scrolling_table_and_gets_its_handle(cx: &mut TestAppContext) {
+        let two = "| Key | Value |\n|---|---|\n| a | b |\n\nText between.\n\n| Key | Value |\n|---|---|\n| c | d |";
+        {
+            let (cx, seen) = draw_tables_with_overlay(cx, two, 200., None);
+            let ids: std::collections::BTreeSet<String> =
+                seen.lock().unwrap().iter().map(|(id, _, _)| id.clone()).collect();
+            assert_eq!(ids.len(), 2, "one id per table, got {ids:?}");
+            assert!(cx.debug_bounds("table-overlay").is_some(), "the overlay is painted");
+        }
+
+        let (cx, seen) = draw_tables_with_overlay(cx, WIDE_TABLE, 200., None);
+        let overlay = cx.debug_bounds("table-overlay").expect("overlay painted");
+        assert_eq!(overlay.size.width, px(200.), "the overlay spans the table frame");
+        let (_, offset, max) = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(offset, 0.);
+        assert!(max > 0., "the wide table has room to scroll, max offset {max}");
+
+        // A sideways wheel over the table scrolls it; the hook then sees the new offset.
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: overlay.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(-30.), px(0.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (_, offset, _) = seen.lock().unwrap().last().cloned().unwrap();
+        assert!(offset < 0., "the table scrolled, offset {offset}");
+    }
+
+    #[gpui::test]
+    fn table_cell_max_width_caps_the_columns_of_a_scrolling_table(cx: &mut TestAppContext) {
+        let uncapped = {
+            let (_, seen) = draw_tables_with_overlay(cx, WIDE_TABLE, 200., None);
+            let (_, _, uncapped) = seen.lock().unwrap().last().cloned().unwrap();
+            uncapped
+        };
+        let (_, seen) = draw_tables_with_overlay(cx, WIDE_TABLE, 200., Some(120.));
+        let (_, _, capped) = seen.lock().unwrap().last().cloned().unwrap();
+        assert!(uncapped > 0. && capped > 0., "both scroll: {uncapped} {capped}");
+        assert!(
+            capped < uncapped,
+            "capped columns make a narrower track: {capped} < {uncapped}"
+        );
+        // Three columns at the cap at most, plus the frame border.
+        assert!(capped <= 3. * 120. + 2. - 200., "no column exceeds the cap: {capped}");
+    }
+
     #[test]
     fn plugin_accepts_text_view_plugins_beyond_markdown() {
         let view = TextView::markdown("plugin-test", "").plugin(DummyTextViewPlugin);
