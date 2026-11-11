@@ -2672,8 +2672,9 @@
     "paste_attach": true, "drop_on_transcript": true,
     // Where this Mac keeps a repo whose worktree is on another machine (for "/" skills): {project}, {repo}.
     "local_repo_path": "~/dev/{project}",
-    // Which tools start background shells and subagents (the background chips), and which stop them.
-    "background_tools": { "shell": ["Bash"], "agent": ["Agent", "Task"], "kill": ["TaskStop", "KillShell", "KillBash"] },
+    // Which tools start background shells and subagents (the background chips), which stop them, and
+    // which message a teammate that went idle (its chip comes back until it's idle again).
+    "background_tools": { "shell": ["Bash"], "agent": ["Agent", "Task"], "kill": ["TaskStop", "KillShell", "KillBash"], "message": ["SendMessage"] },
     "last_message_chars": 280,
     "enter_sends": true,
     "placeholder": "Message the agent…",
