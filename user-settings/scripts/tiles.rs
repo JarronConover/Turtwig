@@ -26,6 +26,10 @@ fn assignment() -> BTreeMap<String, i64> {
             open.push(format!("term:{id}"));
         }
     }
+    // The designer is a tile too while it's open (state.designer_open).
+    if ctx["state"]["designer_open"].as_bool() == Some(true) {
+        open.push("term:designer".to_string());
+    }
     let saved = ctx["state"]["tile_slots"].clone();
     let mut m: BTreeMap<String, i64> = BTreeMap::new();
     for id in &open {
@@ -104,6 +108,30 @@ fn init() {
         let m = assignment();
         save(&m);
     });
-    ab::on("start", |_, _| ab::run(json!("tiles.pin_all")));
+    ab::action("tiles.open_designer", |_, _| {
+        ab::set("designer_open", json!(true));
+        ab::run(json!("tiles.pin_all"));
+    });
+    ab::action("tiles.close_designer", |_, _| {
+        ab::set("designer_open", json!(false));
+        let mut m = assignment();
+        m.remove("term:designer");
+        save(&m);
+        if ab::context()["state"]["focus_term"].as_str() == Some("designer") {
+            ab::set("focus_term", Value::Null);
+        }
+    });
+    ab::on("start", |_, _| {
+        ab::run(json!("tiles.pin_all"));
+        // Pin the designer's cell whenever it opens (⌘⇧D, the palette button or the New tile menu).
+        ab::every(700, || {
+            let ctx = ab::context();
+            let open = ctx["state"]["designer_open"].as_bool() == Some(true);
+            let placed = ctx["state"]["tile_slots"]["term:designer"].is_i64();
+            if open && !placed {
+                ab::run(json!("tiles.pin_all"));
+            }
+        });
+    });
     ab::on("chat.added", |_, _| ab::run(json!("tiles.pin_all")));
 }
