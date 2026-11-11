@@ -321,6 +321,8 @@ impl<V: View> IntoElement for ViewElement<V> {
 }
 
 struct ViewElementState {
+    /// The frame that recorded the ranges below: they index into the frame drawn just before it only.
+    frame: u64,
     prepaint_range: Range<PrepaintStateIndex>,
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
@@ -544,6 +546,7 @@ fn prepaint_view(
                     && element_state.cache_key.text_style == text_style
                     && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
+                    && element_state.frame + 1 == window.frames_drawn
                 {
                     let prepaint_start = window.prepaint_index();
                     window.reuse_prepaint(element_state.prepaint_range.clone());
@@ -551,6 +554,7 @@ fn prepaint_view(
                         .extend_accessed(&element_state.accessed_entities);
                     let prepaint_end = window.prepaint_index();
                     element_state.prepaint_range = prepaint_start..prepaint_end;
+                    element_state.frame = window.frames_drawn;
 
                     return (None, element_state);
                 }
@@ -571,6 +575,7 @@ fn prepaint_view(
                 (
                     Some(element),
                     ViewElementState {
+                        frame: window.frames_drawn,
                         accessed_entities,
                         prepaint_range: prepaint_start..prepaint_end,
                         paint_range: PaintIndex::default()..PaintIndex::default(),

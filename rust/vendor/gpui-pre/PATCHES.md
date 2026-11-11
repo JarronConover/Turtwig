@@ -11,6 +11,8 @@ Copied from crates.io (without its examples, docs and tests) and wired in by `[p
   for from one a view inside it asked for.
 - `src/view.rs`: `ViewElement::reuse_nested()`: a cached view drawn again reuses the cached views inside
   it that weren't notified, instead of drawing them all again (upstream marks the whole subtree as
-  refreshing). The workspace's regions decide themselves when to draw again.
+  refreshing). The workspace's regions decide themselves when to draw again. A nested view is reused only
+  when its recorded ranges are from the frame just before (`Window::frames_drawn`): a frame that reused
+  its parent whole left them pointing into an older frame.
 
 To move to a newer gpui-pre: copy it here and redo these, or drop the patch once upstream has an equivalent.
