@@ -394,10 +394,56 @@ impl Workspace {
             Some(button) => view.code_block_actions(move |block, _, _| button(block)),
             None => view,
         };
+        let view = match self.table_scroll_overlay() {
+            Some(overlay) => view.with_base(move |v| v.table_overlay(overlay)),
+            None => view,
+        };
         match md.and_then(|md| self.markdown_style_of(md, theme)) {
             Some(st) => view.style(st),
             None => view,
         }
+    }
+
+    /** `chat.table_scroll`: a wide table scrolls sideways on its own, like a code block (false: it clips or
+    scrolls as `chat.markdown.table` says). `shift`: Shift + wheel scrolls it (`speed` per step); `scrollbar`:
+    hover | always | scrolling | never, else `chat.code_scroll.scrollbar`. The element lies over each table. */
+    fn table_scroll_overlay(&self) -> Option<impl Fn(&gpui_kit::base::text::TableData, &ScrollHandle, ElementId, &mut Window, &mut App) -> AnyElement + Send + Sync + 'static> {
+        let cfg = self.settings.chat.get("table_scroll").cloned().unwrap_or(Value::Null);
+        if cfg == Value::Bool(false) {
+            return None;
+        }
+        let shift = cfg.get("shift").and_then(Value::as_bool) != Some(false);
+        let speed = cfg.get("speed").and_then(Value::as_f64).unwrap_or(1.) as f32;
+        let bar = cfg
+            .get("scrollbar")
+            .or_else(|| self.settings.chat.get("code_scroll").and_then(|c| c.get("scrollbar")))
+            .and_then(Value::as_str)
+            .unwrap_or("hover")
+            .to_string();
+        Some(move |_: &gpui_kit::base::text::TableData, handle: &ScrollHandle, id: ElementId, window: &mut Window, cx: &mut App| {
+            // "hover" shows the bar while the pointer is anywhere over the table (and while scrolling).
+            let hovered = window.use_keyed_state(id.clone(), cx, |_, _| false);
+            let mode = match bar.as_str() {
+                "always" => Some(gpui_kit::base::ScrollbarMode::Always),
+                "scrolling" => Some(gpui_kit::base::ScrollbarMode::Scrolling),
+                "never" => None,
+                _ if *hovered.read(cx) => Some(gpui_kit::base::ScrollbarMode::Always),
+                _ => Some(gpui_kit::base::ScrollbarMode::Scrolling),
+            };
+            let mut layer = div().id(id).absolute().inset_0().on_hover(move |on, window, cx| {
+                if *hovered.read(cx) != *on {
+                    hovered.update(cx, |h, _| *h = *on);
+                    window.refresh();
+                }
+            });
+            if shift {
+                layer = layer.child(shift_scroll_layer(Some(handle.clone()), speed));
+            }
+            if let Some(mode) = mode {
+                layer = layer.child(gpui_kit::component::scroll::Scrollbar::horizontal(handle).mode(mode));
+            }
+            layer.into_any_element()
+        })
     }
 
     /** `chat.code_copy`: the corner of each code block, its language and a button copying the code (`icon`,
@@ -474,9 +520,14 @@ impl Workspace {
             None if dark => HighlightTheme::default_dark(),
             None => HighlightTheme::default_light(),
         };
+        let mut table = refine("table");
+        if self.table_scroll_overlay().is_some() {
+            // The sideways-scrolling table layout, whatever `table.overflow_x` says (`chat.table_scroll`).
+            table.overflow.x = Some(Overflow::Scroll);
+        }
         let mut st = gpui_kit::component::text::TextViewStyle {
             code_block: refine("code_block"),
-            table: refine("table"),
+            table,
             table_head: refine("table_head"),
             table_cell: refine("table_cell"),
             is_dark: dark,

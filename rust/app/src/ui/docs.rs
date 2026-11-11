@@ -69,7 +69,7 @@ full at the end of this file. Change anything by overriding it in your settings 
 | `keys` | `[{"key": "cmd-k", "do": <action>, "if": <jq>}]`. Key names: `cmd`, `ctrl`, `alt`, `shift` + `-` + key (`cmd-shift-p`, `ctrl-\``, `cmd-\\`). |
 | `commands` | Command palette entries: `[{"label", "do", "if"}]`. Worktrees are added automatically. |
 | `motion` | How things move: `move` (glide to new positions), `enter` (how new nodes come in), `style` (colors and sizes ease), `enabled`. See Motion. |
-| `chat` | Look of the built-in transcript, composer, and waiting card: style objects per part. `permission_options`: an SDK chat's permission card (allow, always allow, deny). |
+| `chat` | Look of the built-in transcript, composer, and waiting card: style objects per part. `permission_options`: an SDK chat's permission card (allow, always allow, deny). `table_scroll`: a wide markdown table scrolls sideways like a code block (`shift`, `speed`, `scrollbar`; false: as `markdown.table` says). |
 | `terminal` | Terminal font, size, padding, colors. |
 | `connection` | The default host's connection: `ssh_host`, `daemon` path, `retry_seconds`, `ssh_options`, `watch_ms`, `env_push_seconds`, `env_push_command` (null: `bin_dir`'s env-push). `local` is this Mac's daemon (`enabled`, `daemon`). |
 | `input` | `press_dedupe_ms` (50): how long one press counts as the same press for every node under it. |

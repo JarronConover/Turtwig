@@ -2773,6 +2773,10 @@
     // The message box while files are dragged over it.
     "composer_drop": { "border_color": "@accent", "background": "#488efc26" },
     "code_scroll": { "shift": true, "speed": 1, "shift_holds_transcript": true, "scrollbar": "hover" },
+    // A wide table scrolls sideways on its own, like a code block (false: it clips or scrolls as `markdown.table`
+    // says): shift (Shift + wheel scrolls it), speed, scrollbar (hover | always | scrolling | never; code_scroll's
+    // when unset). Columns keep their natural width up to `markdown.table_cell.max_width`, then their text wraps.
+    "table_scroll": { "shift": true, "speed": 1 },
     "list": { "gap": 22, "padding": [20, 28], "width": "full", "max_width": 780, "self": "center" },
     // New messages: "at_bottom" keeps you at the newest while you're there (scroll up and it stays put),
     // "always" jumps to each one, "never" doesn't move. Scrolled up, a chip offers to jump down (false hides it).
