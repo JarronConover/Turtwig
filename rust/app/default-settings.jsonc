@@ -2516,6 +2516,9 @@
     "pending": { "show": true, "quiet_secs": 60 },
     // Tool step summaries are cut to this many characters.
     "summary_chars": 140,
+    // A single line break inside a message shows as a line break (GitHub's "breaks" mode), so lists
+    // written without Markdown markers keep one item per line; false: it reflows to a space (CommonMark).
+    "soft_breaks_as_newlines": true,
     // Counted labels may have KEY_one / KEY_other forms (e.g. "steps_one"); {s} is `plural` unless n is 1.
     "labels": {
       "plural": "s",
@@ -2641,6 +2644,8 @@
     // ---- Waiting chats ----
     // Choices when a waiting chat gives none (a permission prompt); every question shows when there are several.
     "waiting_options": ["Yes", "Yes, don't ask again", "No"], "waiting_all_questions": true,
+    // A permission prompt shows the command (or file, URL, pattern, plan) it asks about, up to this many lines.
+    "waiting_detail_lines": 12,
     // A card of several questions sends its answers one key at a time, this far apart (keys sent at once
     // reach the agent as a paste, which its question menu ignores).
     "waiting_key_gap_ms": 300,
@@ -2667,8 +2672,9 @@
     "paste_attach": true, "drop_on_transcript": true,
     // Where this Mac keeps a repo whose worktree is on another machine (for "/" skills): {project}, {repo}.
     "local_repo_path": "~/dev/{project}",
-    // Which tools start background shells and subagents (the background chips), and which stop them.
-    "background_tools": { "shell": ["Bash"], "agent": ["Agent", "Task"], "kill": ["TaskStop", "KillShell", "KillBash"] },
+    // Which tools start background shells and subagents (the background chips), which stop them, and
+    // which message a teammate that went idle (its chip comes back until it's idle again).
+    "background_tools": { "shell": ["Bash"], "agent": ["Agent", "Task"], "kill": ["TaskStop", "KillShell", "KillBash"], "message": ["SendMessage"] },
     "last_message_chars": 280,
     "enter_sends": true,
     "placeholder": "Message the agent…",
@@ -2791,6 +2797,8 @@
     "waiting_option": { "height": 26, "padding": [0, 10], "radius": 13, "border": 1, "border_color": "@line", "background": "@pill", "hover": { "background": "@pill_hover" }, "font_size": 12.5, "align": "center" },
     // The row of answer buttons in the waiting card.
     "waiting_row": { "gap": 6, "wrap": true },
+    // What a permission prompt's tool call would run, under its question.
+    "waiting_detail": { "font_family": "@font_mono", "font_size": 12, "radius": 6, "background": "@code_bg", "padding": [6, 8], "color": "@age" },
     // An option picked on a card of several questions, over waiting_option.
     "waiting_option_picked": { "border_color": "@accent", "background": "@pill_hover" }
   },
@@ -2898,7 +2906,7 @@
     "starting_chat": "Starting a chat…", "start_failed": "Couldn't start the chat: {error}", "making_worktree": "Making a worktree for {branch}…",
     "working": "Working…", "done": "Done", "failed": "Failed", "copied": "Copied", "nothing_to_undo": "Nothing to undo", "no_window": "No window to capture",
     "sending_after_upload": "Sending when the upload finishes", "stop_elsewhere": "This chat is running in super.engineering: stop it there, or take it over first",
-    "rename_branch_failed": "Couldn't rename the branch: {error}", "new_worktree_failed": "Couldn't make the worktree: {error}", "no_remote": "This project has no origin remote",
+    "rename_branch_failed": "Couldn't rename the branch: {error}", "new_worktree_failed": "Couldn't make the worktree: {error}", "action_failed": "That didn't work: {error}", "no_remote": "This project has no origin remote",
     "no_chat": "No chat here yet.", "new_chat_name": "New chat", "terminal_n": "Terminal {n}", "background_shell": "Background shell", "subagent": "Subagent",
     "waiting": "The agent is waiting for you", "waiting_cancel": "Cancel", "drop_to_attach": "Drop to attach to {chat}", "drag_move_to": "Move to {name}",
     "the_designer": "the designer", "this_chat": "this chat", "a_file": "a file", "n_files": "{n} files",
@@ -3077,6 +3085,10 @@
     "events_poll_ms": 250, "events_batch": 500,
     "inbox_post_waiting": true,          // a chat that starts waiting on you posts an inbox item
     "inbox_host": "box",                 // where inbox.post and bin/inbox post (this machine while it's down); every machine's items show as one list
+    // The phone app (`agent-boxd web`, web/phone): its loopback port, reached through Coder's port forwarding; how
+    // often it sends the model, how much tool text it sends, how long an inbox item stays unread before it pushes, and
+    // the push `sub` (null: mailto: the git email).
+    "phone_port": 8792, "phone_tailnet_port": 8793, "phone_tailnet_user": null, "phone_model_ms": 1000, "phone_text_max": 1500, "phone_push_delay_secs": 15, "phone_push_subject": null,
     "model_poll_ms": 2000, "model_debounce_ms": 250,
     "transcripts_poll_ms": 300,
     "warm_index_chats": 60,              // newest chats line-indexed at startup
@@ -3115,6 +3127,11 @@
     "terminal_mouse": false,             // tmux mouse mode on terminal shells (wheel scrolls tmux history)
     "terminal_history_limit": null,
     "chat_tmux_cols": 220, "chat_tmux_rows": 60, "rc_url_wait_secs": 45, "chat_send_pause_secs": 0.5, "supervise_secs": 30,
+    // When the supervisor relaunches a chat by resuming it and the chat's Claude session owns a
+    // /ship-feature lock in dispatcher_ledger (its newest <PARENT>.lock), it sends resume_dispatcher_note
+    // ({parent}) once the prompt is up, unless that parent's ledger digest has every leg done.
+    "resume_dispatchers": true, "resume_dispatcher_note": "/ship-feature {parent}",
+    "dispatcher_ledger": "~/.local/state/redo/ship-feature",
     "sync_transcript_max_mb": 95, "sync_bundle_warn_mb": 50, "sync_lock_wait_secs": 600,
     // How long scripts keep one ssh connection per machine open for the next call (0: a new one each
     // time; through Coder each takes seconds). An app not heard from in config_source_days stops counting
@@ -3138,10 +3155,13 @@
     // (stack-start allowed), foreign_sessions (report super.engineering's running sessions), build_unwatched,
     // env, agent_env, claude_settings (merged into ~/.claude/settings.json), agent_bin_dirs, boot ({kill_patterns,
     // packages, install, claude_onboarding, git_insteadof, bashrc_hook, tmux_status_off, services: [{name, cmd,
-    // build}]}). Entries merge over the built-in box and mac; null removes one.
+    // build}]}), repos (this host's overrides of `repos` below, per repo and key; null removes one). Entries merge
+    // over the built-in box and mac; null removes one.
     "hosts": {
       "box": { "label": "box", "detect": { "env": "CODER_AGENT_URL" }, "agent_box_dir": "~/agent-box", "sc_store": "sc.json",
-               "supervise": true, "relay_app_actions": true, "sync_transcripts": "all", "stacks": false },
+               "supervise": true, "relay_app_actions": true, "sync_transcripts": "all", "stacks": false,
+               // No stacks here: plain git worktrees for redo (wt would hold a slot per worktree).
+               "repos": { "redo": { "worktree_tool": null, "copy_files": ["conf.sh", ".secrets.sh", ".bazelrc.user"] } } },
       "mac": { "label": "Mac", "detect": { "os": "darwin" }, "ssh": null, "agent_box_dir": "~/dev/turtwig", "sc_store": "sc-mac.json",
                "supervise": false, "relay_app_actions": false, "sync_transcripts": "registry", "stacks": true, "foreign_sessions": true }
     },
@@ -3153,7 +3173,7 @@
     // folder names for it), hue, forge ("gitlab" | "github" | "command" with forge_cmd | "none"; default from the
     // origin's host), forge_project (default: origin's path), worktree_tool ({bin, bin_paths, create, remove,
     // delete, list, start: argv templates with {bin} {branch} {path} {name} {primary} {worktrees_base} {force};
-    // env}; none: git worktree). A repo not listed is keyed by its folder name with a hue from it.
+    // env}; none: git worktree, then copy_files copied in from the primary). A repo not listed is keyed by its folder name with a hue from it.
     "repos": {
       "redo": { "primary": "~/dev/redo", "worktrees": "~/dev/redo-worktrees/{branch_slug}", "hue": 210, "forge_project": "redo/redoapp/product/redo",
                 "worktree_tool": { "bin": "wt", "bin_paths": ["~/redo-monorepo-worktrees/bin/wt", "~/dev/redo-monorepo-worktrees/bin/wt"],
@@ -3196,14 +3216,16 @@
         { "path": "~/.agent-box/uploads/" },
         { "path": "~/.config/redo/cursor-environments.json" },
         { "path": "~/.config/redo/cursor-typecheck-agents.json" },
-        { "path": "~/.claude/hooks/block-squash.py", "replace": true }
+        { "path": "~/.claude/hooks/block-squash.py", "replace": true },
+        { "path": "~/.agent-box/sidebar-order.json" }
       ],
       "memory": true, "memory_deletes": true, "max_deletes": 25, "skills_link": true,
       "hooks_match": { "matcher": "mcp__.+__save_issue", "command": "block-squash" }
     },
     // Logs log_tail may read.
     "logs": { "boxd": "~/.agent-box/boxd.log", "agent-box": "~/.agent-box/log/agent-box.log", "supervisor": "~/.agent-box/log/supervisor.log",
-              "boxd-build": "~/.agent-box/log/boxd-build.log", "dashboard": "~/.agent-box/log/dashboard.log", "ttyd": "~/.agent-box/log/ttyd.log" },
+              "boxd-build": "~/.agent-box/log/boxd-build.log", "dashboard": "~/.agent-box/log/dashboard.log", "ttyd": "~/.agent-box/log/ttyd.log",
+              "phone": "~/.agent-box/log/phone.log", "ts": "~/.agent-box/log/ts.log" },
     "log_tail_lines": 200, "hook_events_limit": 1000, "subscribe_replay_max": 1000,
     "app_files": ["inspect.json", "activity.log", "problems.txt", "snapshot.png"],
     "exec_allowed": true,                // the exec call (any shell command on this host)

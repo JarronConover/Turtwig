@@ -39,10 +39,12 @@ pub struct Options {
     pub labels: Value,
     pub tools: Value,
     pub tool_names: Value,
-    /** `chat.background_tools`: which tools start background shells, subagents, and stop them. */
+    /** `chat.background_tools`: which tools start background shells, subagents, and stop them, and which
+    message a teammate (giving it work again). */
     pub shell_tools: Vec<String>,
     pub agent_tools: Vec<String>,
     pub kill_tools: Vec<String>,
+    pub message_tools: Vec<String>,
 }
 
 impl Default for Options {
@@ -67,6 +69,7 @@ impl Default for Options {
             shell_tools: vec!["Bash".into()],
             agent_tools: vec!["Agent".into(), "Task".into()],
             kill_tools: vec!["TaskStop".into(), "KillShell".into(), "KillBash".into()],
+            message_tools: vec!["SendMessage".into()],
         }
     }
 }
@@ -106,6 +109,7 @@ pub fn set_options(chat: &Value) {
         shell_tools: list(&chat["background_tools"]["shell"]).unwrap_or(d.shell_tools.clone()),
         agent_tools: list(&chat["background_tools"]["agent"]).unwrap_or(d.agent_tools.clone()),
         kill_tools: list(&chat["background_tools"]["kill"]).unwrap_or(d.kill_tools.clone()),
+        message_tools: list(&chat["background_tools"]["message"]).unwrap_or(d.message_tools.clone()),
     };
     OPTIONS.with(|c| *c.borrow_mut() = Rc::new(o));
 }
@@ -256,6 +260,8 @@ pub struct Transcript {
     echoes: Vec<(String, usize)>,
     /** Background shells and agents that have finished: their tool_use ids and task ids. */
     finished: HashSet<String>,
+    /** Teammates messaged in these lines: at work again, whatever an older page says. */
+    woken: HashSet<String>,
     /** A subagent's own transcript: every line is a sidechain, so they're kept. */
     keep_sidechain: bool,
     /** The newest prompt: its uuid, its parent's, and where it shows. A next prompt with the same parent
@@ -516,7 +522,9 @@ impl Transcript {
         self.items = older.items;
         self.orphans = older.orphans;
         // Background work that finished within the older lines (its notice can sit right after the call).
-        self.finished.extend(older.finished);
+        let woken = &self.woken;
+        self.finished.extend(older.finished.into_iter().filter(|f| !woken.contains(f)));
+        self.woken.extend(older.woken);
         self.start = from;
         self.revision += 1;
     }
@@ -630,6 +638,11 @@ impl Transcript {
                             let id = b["id"].as_str().unwrap_or("").to_string();
                             let name = b["name"].as_str().unwrap_or("tool").to_string();
                             let input = b["input"].clone();
+                            // A message to a teammate that went idle gives it work again.
+                            if let Some(to) = input.get("to").and_then(Value::as_str).filter(|_| options().message_tools.contains(&name)) {
+                                self.finished.remove(to);
+                                self.woken.insert(to.to_string());
+                            }
                             if options().kill_tools.contains(&name) {
                                 for k in ["task_id", "shell_id", "bash_id", "id"] {
                                     if let Some(v) = input.get(k).and_then(Value::as_str) {
@@ -993,8 +1006,29 @@ mod background_tests {
         ]);
         let bg = t.background();
         assert_eq!((bg.len(), bg[0].task_id.as_deref()), (1, Some("alv-1-674a")));
-        t.append(2, &[json!({"type": "user", "message": {"content": "Another Claude session sent a message: <teammate-message teammate_id=\"lv-1\" color=\"pink\">\n{\"type\":\"idle_notification\",\"from\":\"lv-1\",\"result\":\"done\"}\n</teammate-message>"}})]);
+        let idle = json!({"type": "user", "message": {"content": "Another Claude session sent a message: <teammate-message teammate_id=\"lv-1\" color=\"pink\">\n{\"type\":\"idle_notification\",\"from\":\"lv-1\",\"result\":\"done\"}\n</teammate-message>"}});
+        t.append(2, &[idle.clone()]);
         assert!(t.background().is_empty());
+        t.append(3, &[json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t2", "name": "SendMessage", "input": {"to": "lv-1", "message": "one more"}}
+        ]}})]);
+        assert_eq!(t.background().len(), 1);
+        t.append(4, &[idle]);
+        assert!(t.background().is_empty());
+    }
+
+    #[test]
+    fn a_teammate_messaged_after_an_older_idle_runs() {
+        let spawn = json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Agent", "input": {"description": "Verify", "name": "lv-1", "run_in_background": "true", "prompt": "x"}}
+        ]}});
+        let spawned = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Spawned successfully.\nagent_id: alv-1-674a\nname: lv-1\nThe agent is now running and will receive instructions via mailbox."}]}});
+        let idle = json!({"type": "user", "message": {"content": "<teammate-message teammate_id=\"lv-1\">\n{\"type\":\"idle_notification\",\"from\":\"lv-1\"}\n</teammate-message>"}});
+        let wake = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t2", "name": "SendMessage", "input": {"to": "lv-1", "message": "more"}}]}});
+        let mut t = Transcript::default();
+        t.append(3, &[wake]);
+        t.prepend(0, &[spawn, spawned, idle]);
+        assert_eq!(t.background().len(), 1);
     }
 }
 
