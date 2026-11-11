@@ -7,4 +7,9 @@ Copied from crates.io and wired in by `[patch.crates-io]` in `rust/Cargo.toml`. 
 - `src/input/base/kind.rs`, `state.rs`, `element.rs`, `editor/decorations.rs`: a textarea paints styles its
   owner sets with `set_text_decorations` (the message box's live markdown); clipped to the text at paint.
 
+- `src/text/text_view.rs`, `state.rs`, `node.rs`, `src/scrollable_mask.rs`: `TextView::table_overlay` lays an
+  element (Turtwig: a scrollbar and a Shift + wheel layer) over each horizontally scrolling markdown table, with
+  the table's scroll handle; and in that layout a definite `max_width` on `table_cell` caps every column at it
+  (natural width up to the cap, wrapping beyond), instead of the adaptive floors.
+
 To move to a newer gpui-base: copy it here and redo these, or drop the patch once upstream has both.

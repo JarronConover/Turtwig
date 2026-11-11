@@ -17,7 +17,7 @@ use markdown::mdast;
 
 use crate::{
     GlobalState, ScrollableMask, Scrollbar, StyledExt, h_flex,
-    scrollable_mask::horizontal_scroll_area,
+    scrollable_mask::horizontal_scroll_area_with_overlay,
     text::{
         CodeBlockActionsFn, CodeBlockHighlighterFn, LinkClickHandlerFn, MarkdownExtensions,
         MarkdownNode, TableActionsFn,
@@ -2328,6 +2328,7 @@ pub(crate) struct NodeContext {
     pub(crate) code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     pub(crate) code_block_highlighter: Option<Arc<CodeBlockHighlighterFn>>,
     pub(crate) table_actions: Option<Arc<TableActionsFn>>,
+    pub(crate) table_overlay: Option<Arc<super::text_view::TableOverlayFn>>,
     pub(crate) image_source: Option<Arc<super::text_view::ImageSourceFn>>,
     pub(crate) link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     pub(crate) markdown_extensions: Arc<MarkdownExtensions>,
@@ -3564,6 +3565,14 @@ impl BlockNode {
         let scroll = matches!(style.table().overflow.x, Some(Overflow::Scroll));
         let nowrap = style.table_cell().text.white_space == Some(WhiteSpace::Nowrap);
         let rem_size = window.rem_size();
+        // In the scroll layout a definite `max_width` on `style.table_cell` caps every column: a
+        // column keeps its natural width up to the cap and wraps beyond it, instead of the floors.
+        let cap = match style.table_cell().max_size.width {
+            Some(gpui::Length::Definite(DefiniteLength::Absolute(length))) if scroll => {
+                Some(f32::from(length.to_pixels(rem_size)))
+            }
+            _ => None,
+        };
         let wrap_min_px = f32::from(rems(4.).to_pixels(rem_size));
         // Widths were measured with the default cell padding.
         let padding_delta = table_cell_padding_x(style, rem_size) - CELL_PAD_PX;
@@ -3576,8 +3585,11 @@ impl BlockNode {
             .iter()
             .enumerate()
             .map(|(ix, &w)| {
-                let w = w + padding_delta;
-                let floor = if scroll && nowrap {
+                let w = match cap {
+                    Some(cap) => (w + padding_delta).min(cap),
+                    None => w + padding_delta,
+                };
+                let floor = if scroll && (nowrap || cap.is_some()) {
                     w
                 } else if scroll {
                     (w / CELL_WRAP_MAX_LINES)
@@ -3632,7 +3644,16 @@ impl BlockNode {
             // gesture is locked to its starting axis and a horizontal swipe
             // is consumed before an ancestor scroller (`gpui::list` under
             // `TextView::scrollable`) can take its vertical component.
-            horizontal_scroll_area(
+            let overlay = node_cx.table_overlay.as_ref().map(|overlay| {
+                overlay(
+                    &table.cached_table_data(),
+                    &scroll_handle,
+                    block_element_id("table-overlay", table.span, options.ix),
+                    window,
+                    cx,
+                )
+            });
+            horizontal_scroll_area_with_overlay(
                 block_element_id("table", table.span, options.ix),
                 &scroll_handle,
                 &frame,
@@ -3642,6 +3663,7 @@ impl BlockNode {
                 // `w(min_total_w)` keeps the floors once they are reached,
                 // letting the track exceed the viewport and scroll.
                 div().min_w_full().w(px(min_total_w)).children(rows),
+                overlay,
             )
             .into_any_element()
         } else {

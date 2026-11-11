@@ -91,6 +91,15 @@ impl TextView {
         self.text_style = Some(style);
         self
     }
+    /// Maps the Base text view underneath, for Base hooks this facade has no
+    /// method for (`table_overlay`, say).
+    pub fn with_base(
+        mut self,
+        f: impl FnOnce(gpui_base::TextView) -> gpui_base::TextView,
+    ) -> Self {
+        self.inner = f(self.inner);
+        self
+    }
     /// Sets whether the text can be selected with the mouse.
     pub fn selectable(mut self, value: bool) -> Self {
         self.inner = self.inner.selectable(value);

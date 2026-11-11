@@ -4,8 +4,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ContentMask, Element, ElementId, Entity, Global,
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
-    LayoutId, MouseButton, ParentElement, Pixels, Refineable as _, SharedString, StyleRefinement,
-    Styled, Window, div, point, px,
+    LayoutId, MouseButton, ParentElement, Pixels, Refineable as _, ScrollHandle, SharedString,
+    StyleRefinement, Styled, Window, div, point, px,
 };
 
 use crate::StyledExt;
@@ -94,6 +94,11 @@ impl TextViewDefaults {
 pub(crate) type TableActionsFn =
     dyn Fn(&TableData, &mut Window, &mut App) -> AnyElement + Send + Sync;
 
+/// Type for the table overlay generator function: the table, its scroll handle, an id unique to
+/// the table, and the window; the element it returns is laid over the scrolling table frame.
+pub(crate) type TableOverlayFn =
+    dyn Fn(&TableData, &ScrollHandle, ElementId, &mut Window, &mut App) -> AnyElement + Send + Sync;
+
 pub(crate) type ImageSourceFn = dyn Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync;
 
 pub(crate) type LinkClickHandlerFn =
@@ -154,6 +159,7 @@ pub struct TextView {
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     code_block_highlighter: Option<Arc<CodeBlockHighlighterFn>>,
     table_actions: Option<Arc<TableActionsFn>>,
+    table_overlay: Option<Arc<TableOverlayFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     image_source: Option<Arc<ImageSourceFn>>,
     reveal_handler: Option<Rc<RevealHandlerFn>>,
@@ -201,6 +207,7 @@ impl TextView {
             code_block_actions: None,
             code_block_highlighter: None,
             table_actions: None,
+            table_overlay: None,
             link_click_handler: None,
             image_source: None,
             reveal_handler: None,
@@ -225,6 +232,7 @@ impl TextView {
             code_block_actions: None,
             code_block_highlighter: None,
             table_actions: None,
+            table_overlay: None,
             link_click_handler: None,
             image_source: None,
             reveal_handler: None,
@@ -249,6 +257,7 @@ impl TextView {
             code_block_actions: None,
             code_block_highlighter: None,
             table_actions: None,
+            table_overlay: None,
             link_click_handler: None,
             image_source: None,
             reveal_handler: None,
@@ -386,6 +395,25 @@ impl TextView {
     {
         self.table_actions = Some(Arc::new(move |table, window, cx| {
             f(table, window, cx).into_any_element()
+        }));
+        self
+    }
+
+    /// Set an element laid over each horizontally scrolling Markdown table (the
+    /// `style.table` overflow-x: scroll layout), e.g. a scrollbar for its handle.
+    ///
+    /// The closure receives the [`TableData`], the table's [`ScrollHandle`] and
+    /// an [`ElementId`] unique to the table, and returns the element.
+    pub fn table_overlay<F, E>(mut self, f: F) -> Self
+    where
+        F: Fn(&TableData, &ScrollHandle, ElementId, &mut Window, &mut App) -> E
+            + Send
+            + Sync
+            + 'static,
+        E: IntoElement,
+    {
+        self.table_overlay = Some(Arc::new(move |table, handle, id, window, cx| {
+            f(table, handle, id, window, cx).into_any_element()
         }));
         self
     }
@@ -684,6 +712,7 @@ impl Element for TextView {
             state.code_block_actions = self.code_block_actions.clone();
             state.code_block_highlighter = code_block_highlighter;
             state.table_actions = self.table_actions.clone();
+            state.table_overlay = self.table_overlay.clone();
             state.link_click_handler = self.link_click_handler.clone();
             state.image_source = self.image_source.clone();
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);

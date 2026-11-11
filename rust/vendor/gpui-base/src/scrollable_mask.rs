@@ -2,7 +2,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    App, Axis, BorderStyle, Bounds, ContentMask, Edges, Element, ElementId, GlobalElementId,
+    AnyElement, App, Axis, BorderStyle, Bounds, ContentMask, Edges, Element, ElementId,
+    GlobalElementId,
     Hitbox, Hsla, InteractiveElement as _, IntoElement, IsZero as _, LayoutId, OngoingScroll,
     PaintQuad, ParentElement as _, Point, Position, ScrollHandle, ScrollWheelEvent,
     StatefulInteractiveElement as _, Style, StyleRefinement, Styled as _, Window, div, px,
@@ -26,11 +27,24 @@ fn caller_id() -> ElementId {
 /// scrolling when there is no vertical overflow. This wrapper keeps the visual
 /// clipping and scroll offset, while delegating wheel input to [`ScrollableMask`]
 /// so vertical wheel events can continue bubbling to the parent scroller.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn horizontal_scroll_area(
     id: impl Into<ElementId>,
     scroll_handle: &ScrollHandle,
     style: &StyleRefinement,
     child: impl IntoElement,
+) -> impl IntoElement {
+    horizontal_scroll_area_with_overlay(id, scroll_handle, style, child, None)
+}
+
+/// [`horizontal_scroll_area`] with an element laid over the viewport as a last
+/// sibling (a scrollbar, say), so it never moves with the scroll offset.
+pub(crate) fn horizontal_scroll_area_with_overlay(
+    id: impl Into<ElementId>,
+    scroll_handle: &ScrollHandle,
+    style: &StyleRefinement,
+    child: impl IntoElement,
+    overlay: Option<AnyElement>,
 ) -> impl IntoElement {
     let id = id.into();
 
@@ -66,6 +80,7 @@ pub(crate) fn horizontal_scroll_area(
         )
         .child(ScrollableMask::new(Axis::Horizontal, scroll_handle).id(id))
         .child(frame)
+        .children(overlay)
 }
 
 /// Keeps a rounded scroll viewport's corners clean at every scroll offset.
