@@ -1202,8 +1202,23 @@ pub(crate) fn dispatch(ws: &mut crate::workspace::Workspace, name: &str, a: &Map
     true
 }
 
-/** What inspect.json shows about this module's views: every open terminal, by view key (`PATH` or `PATH#ID`). */
+/** What inspect.json shows about this module's views: every open terminal, by view key (`PATH` for a
+worktree's first shell, `PATH#ID` for a tab or tile, `screen:CHAT` for an agent's screen), each with its
+`path` and `id`. */
 pub(crate) fn inspect(ws: &crate::workspace::Workspace, cx: &App) -> Value {
     let n = ws.settings.num("inspect.terminal_lines", 40.).max(0.) as usize;
-    Value::Object(ws.terminals.iter().map(|(k, t)| (k.clone(), t.read(cx).describe(n))).collect())
+    let entry = |k: &str, t: &Entity<TerminalView>| {
+        let mut v = t.read(cx).describe(n);
+        let (path, id) = match (k.strip_prefix("screen:"), k.split_once('#')) {
+            (Some(chat), _) => (chat.to_string(), Value::Null),
+            (None, Some((p, id))) => (p.to_string(), Value::String(id.to_string())),
+            (None, None) => (k.to_string(), Value::String("1".into())),
+        };
+        if let Value::Object(o) = &mut v {
+            o.insert("path".into(), Value::String(path));
+            o.insert("id".into(), id);
+        }
+        v
+    };
+    Value::Object(ws.terminals.iter().map(|(k, t)| (k.clone(), entry(k, t))).collect())
 }

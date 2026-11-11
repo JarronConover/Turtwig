@@ -62,7 +62,7 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("composer", "The built-in message box for a chat. `props.chat`, `props.placeholder`."),
     ("screen", "A chat's live terminal while its agent shows a screen of its own (`.chat.screen`, a menu like Claude Code's /artifacts): typing goes to the agent. `props.chat`."),
     ("waiting", "The built-in card for a chat waiting on a permission or question, with its answer buttons. `props.chat`."),
-    ("terminal", "The built-in terminal for a worktree. `props.path` (default the selected worktree). Look: settings `terminal`."),
+    ("terminal", "The built-in terminal for a worktree. `props.path` (default the selected worktree) shows its active tab; `props.id` shows one tab's own shell, started on first show if it doesn't exist (`props.cwd`, `props.command`: its folder and program, else the worktree's folder and a login shell), so several nodes can each have a shell; clicking one focuses it. Look: settings `terminal`."),
     ("attachments", "Preview chips for files attached to a chat but not sent yet (spinner while uploading, × to remove). `props.chat` (default the selected chat), `props.size`. Look: settings `chat.attachments`, `chat.attachment`."),
     ("diff", "The built-in diff of a worktree: a file list beside the changes. `props.path` (default the selected worktree), `props.base` (default `state.diff_base`: uncommitted | branch). Click a file to jump, a file header to collapse, a line number to open it in the editor. Look: settings `diff`."),
     ("resize_handle", "A drag handle that sets a numeric state value. `props.state` (key), `props.axis` x|y, `props.min` (80), `props.max` (2000), `props.default` (300, the size while the state is unset), `props.invert` (bool, for handles on the far edge). `on.double_click` works on it (e.g. a state.set back to a size)."),
@@ -425,7 +425,12 @@ impl Workspace {
                     self.pending_actions.extend(queued);
                     cx.notify();
                 }
-                let term = path.and_then(|p| self.active_terminal(&p, cx));
+                // `id`: one tab's own shell (made on first show, `cwd` / `command` as given), not the active one.
+                let prop = |k: &str| props.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+                let term = path.and_then(|p| match prop("id") {
+                    Some(id) => self.terminal_tab(&p, &id, prop("cwd"), prop("command"), cx),
+                    None => self.active_terminal(&p, cx),
+                });
                 if let Some(t) = &term {
                     t.update(cx, |t, cx| t.set_overrides(&props, &theme, cx));
                 }

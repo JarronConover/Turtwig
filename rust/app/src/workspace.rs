@@ -332,7 +332,7 @@ pub struct Workspace {
     /** Words "Ignore spelling" took out of the marks until Turtwig quits. */
     spell_ignored: HashSet<String>,
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
-    term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
+    pub(crate) term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
     pub(crate) expanded_tools: HashSet<String>,
     pub(crate) thumbs: crate::ui::thumbs::Thumbs,
     /** The image shown full size over the window (`image.view`): what it is (a path or chat:index) and its source. */
@@ -2360,24 +2360,40 @@ impl Workspace {
         if id == "1" { path.to_string() } else { format!("{path}#{id}") }
     }
 
-    /** The view for a worktree's active terminal tab, made on first show. */
+    /** The view for a worktree's active terminal tab, made on first show (the first shell only once the
+    worktree opened it). */
     pub(crate) fn active_terminal(&mut self, path: &str, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
         let id = self.term_active(path);
-        let key = Self::term_key(path, &id);
+        if id == "1" {
+            return self.terminals.get(path).cloned();
+        }
+        self.worktree(path)?;
+        self.terminal_tab(path, &id, None, None, cx)
+    }
+
+    /** The view for one terminal tab (a `terminal` node's `id`), made on first show: the tab's own command,
+    folder and machine (`terminal.new`), else `cwd` and `command` given here, else a login shell in the
+    worktree's folder (a path that is no worktree: in it, on the default host). Each id is its own shell. */
+    pub(crate) fn terminal_tab(&mut self, path: &str, id: &str, cwd: Option<String>, command: Option<String>, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
+        let key = Self::term_key(path, id);
         if let Some(t) = self.terminals.get(&key) {
             return Some(t.clone());
         }
-        let w = self.worktree(path)?.clone();
-        if !self.connected || id == "1" {
+        if !self.connected {
             return None;
         }
-        let tab = self.term_tabs(path).into_iter().find(|t| t["id"].as_str() == Some(id.as_str()))?;
-        let command = tab.get("command").and_then(Value::as_str).map(str::to_string);
-        // A tab may name its own folder and machine (`terminal.new {cwd, host}`).
-        let host = tab.get("host").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| w.host.clone());
-        let cwd = tab.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| w.path.clone());
+        let (w_host, w_path) = match self.worktree(path) {
+            Some(w) => (w.host.clone(), w.path.clone()),
+            None => (self.default_host(), path.to_string()),
+        };
+        let tab = self.term_tabs(path).into_iter().find(|t| t["id"].as_str() == Some(id));
+        let given = |k: &str| tab.as_ref().and_then(|t| t.get(k)).and_then(Value::as_str).map(str::to_string);
+        let host = given("host").unwrap_or(w_host);
+        let cwd = given("cwd").or(cwd).unwrap_or(w_path);
+        let command = given("command").or(command);
         let (remote, ts) = (self.remote_for_host(&host), self.settings.terminal.clone());
-        let view = cx.new(|cx| TerminalView::shell(remote, host, None, Some(cwd), Some(id.clone()), command, &ts, cx));
+        let name = (id != "1").then(|| id.to_string());
+        let view = cx.new(|cx| TerminalView::shell(remote, host, None, Some(cwd), name, command, &ts, cx));
         self.terminals.insert(key, view.clone());
         Some(view)
     }

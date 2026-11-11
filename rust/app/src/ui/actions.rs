@@ -47,7 +47,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("section.assign", "{path, section}: move a worktree into a section (null = out of it)"),
     ("worktree.delete", "{path}"),
     ("terminal.new", "{path?, id?, label?, command?, cwd?, host?}: a terminal tab under the worktree (a fresh shell, or `command`), in the worktree's folder on its machine unless cwd / host say otherwise"),
-    ("terminal.select / terminal.close", "{path?, id}: show or close a terminal tab (the last one can't be closed); `.selected.terminals` lists them"),
+    ("terminal.select / terminal.close", "{path?, id}: show or close a terminal tab (the last one can't be closed); `.selected.terminals` lists them. Close also ends the shell of a `terminal` node drawn with that `id` (a tile) whether or not it's a tab"),
     ("shell.open", "{task, output, label?, path?}: a terminal tab following a background shell's output file"),
     ("subagent.open", "{chat, agent, label?}: open a subagent's conversation (read-only) as a tab next to its chat; `.selected.background` lists running ones"),
     ("usage.refresh", "{host?}: fetch token usage from every machine (or one), the plans' limits, and models.dev rates now (`.usage` holds them; they also refresh every usage.refresh_secs)"),
@@ -724,13 +724,17 @@ impl Workspace {
             "terminal.close" => {
                 if let (Some(path), Some(id)) = (s("path").or_else(|| self.selected.clone()), s("id")) {
                     let mut tabs = self.term_tabs(&path);
+                    let at = tabs.iter().position(|t| t["id"].as_str() == Some(id.as_str()));
+                    // A shell drawn by a `terminal` node with this id (a tile) ends too, tab or not.
+                    if at.is_none() || tabs.len() > 1 {
+                        if let Some(t) = self.terminals.remove(&Workspace::term_key(&path, &id)) {
+                            t.read(cx).kill();
+                            self.term_by_id.retain(|_, v| v.entity_id() != t.entity_id());
+                        }
+                    }
                     if tabs.len() > 1 {
-                        let at = tabs.iter().position(|t| t["id"].as_str() == Some(id.as_str()));
                         if let Some(i) = at {
                             tabs.remove(i);
-                            if let Some(t) = self.terminals.remove(&Workspace::term_key(&path, &id)) {
-                                t.read(cx).kill();
-                            }
                             if self.term_active(&path) == id {
                                 let next = tabs[i.min(tabs.len() - 1)]["id"].as_str().unwrap_or("1").to_string();
                                 self.set_state(format!("term_active:{path}"), Value::String(next));
