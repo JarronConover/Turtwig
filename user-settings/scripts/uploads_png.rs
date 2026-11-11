@@ -36,6 +36,11 @@ fn names_in(dir: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+thread_local! {
+    // Files already converted (or being converted) this run, so a burst of watch events converts once.
+    static DONE: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
 fn convert_missing() {
     let src_dir = uploads_dir();
     let dst_dir = mirror_dir();
@@ -51,6 +56,9 @@ fn convert_missing() {
         let stem = name[..name.rfind('.').unwrap_or(name.len())].to_string();
         let png = format!("{stem}.png");
         if have.iter().any(|n| n == &png) {
+            continue;
+        }
+        if !DONE.with(|d| d.borrow_mut().insert(png.clone())) {
             continue;
         }
         let src = format!("{src_dir}/{name}");
