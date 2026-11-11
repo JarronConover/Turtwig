@@ -1,0 +1,13 @@
+{
+  "name": "Turtwig",
+  "short_name": "Turtwig",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#1b1b1c",
+  "theme_color": "#1b1b1c",
+  "icons": [
+    { "src": "/icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

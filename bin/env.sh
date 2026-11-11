@@ -54,6 +54,9 @@ ensure_branch_clone() {
       git -C "$dir" remote remove origin 2> /dev/null
       git -C "$dir" remote add origin "$AGENT_BOX_REPO_URL"
     fi
+    # Only this branch: fetching the session snapshot branches too grew the box's repo to 2GB, and
+    # git's background repacks of it ran out of memory.
+    [ -n "$AGENT_BOX_REPO_URL" ] && git -C "$dir" config remote.origin.fetch "+refs/heads/$branch:refs/remotes/origin/$branch"
     return 0
   fi
   mkdir -p "$(dirname "$dir")"
@@ -61,7 +64,7 @@ ensure_branch_clone() {
     git clone -q --single-branch --branch "$branch" "$AGENT_BOX_REPO_URL" "$dir"
   else
     git init -q "$dir"
-    [ -n "$AGENT_BOX_REPO_URL" ] && git -C "$dir" remote add origin "$AGENT_BOX_REPO_URL"
+    [ -n "$AGENT_BOX_REPO_URL" ] && git -C "$dir" remote add -t "$branch" origin "$AGENT_BOX_REPO_URL"
     git -C "$dir" checkout -q --orphan "$branch"
   fi
 }
