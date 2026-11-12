@@ -84,6 +84,227 @@
 
     // One agent as a live mini terminal: header (drag to move, click to go full screen), its transcript,
     // a question card when it waits on you, and its own message box.
+    "NewTileMenu": {
+      "about": "The New tile picker: a roomy popover of tile types (Terminal, Notes, Designer, and Redo agents inline). Open while state.new_tile_menu == props.place. props: place, top, left.",
+      "type": "box",
+      "style": { "position": "absolute", "top": 0, "left": 0, "width": 0, "height": 0 },
+      "children": [
+        {
+          "if": ".state.new_tile_menu == .props.place",
+          "type": "box", "layer": "top",
+          "style": { "position": "absolute", "left": -4000, "top": -4000, "width": 9000, "height": 9000 },
+          "on": { "click": { "do": "state.set", "key": "new_tile_menu", "value": null } }
+        },
+        {
+          "if": ".state.new_tile_menu == .props.place",
+          "id": "new-tile-panel",
+          "type": "column", "layer": "top",
+          "style": {
+            "position": "absolute", "top": "{{ .props.top // 0 }}", "left": "{{ .props.left // 0 }}", "width": 340, "max_height": 560,
+            "padding": 8, "gap": 2, "radius": 14, "border": 1, "border_color": "@line", "background": "@card", "shadow": "xl",
+            "font_family": "@font_ui"
+          },
+          "animate": { "from": { "opacity": 0, "y": -6 }, "duration": 140 },
+          "children": [
+            { "type": "text", "id": "new-tile-heading", "props": { "text": "New tile" }, "style": { "padding": [6, 10, 8, 10], "font_size": 12, "font_weight": "semibold", "color": "@text_faint" } },
+            {
+              "for": "[{id: \"orchestrator\", icon: \"workflow\", title: \"Orchestrator\", sub: (if (.state.orchestrator_chat // \"\") as $o | [.chats[] | select(.id == $o and .open)] | length > 0 then \"Already running\" else \"An agent that keeps your agents moving\" end), off: ((.state.orchestrator_chat // \"\") as $o | [.chats[] | select(.id == $o and .open)] | length > 0)}, {id: \"terminal\", icon: \"square-terminal\", title: \"Terminal\", sub: \"A shell in ~/redo\", do: \"tiles.new_terminal\"}, {id: \"notes\", icon: \"notebook-pen\", title: \"Notes\", sub: \"A checklist page\", do: \"notes.new\"}, {id: \"designer\", icon: \"palette\", title: \"Designer\", sub: (if .state.designer_open then \"Already open\" else \"Redesign the app live\" end), do: \"tiles.open_designer\", off: (.state.designer_open == true)}]",
+              "as": "o", "key": ".o.id",
+              "id": "new-tile-option",
+              "type": "row",
+              "style": {
+                "height": 56, "padding": [0, 10], "gap": 12, "align": "center", "radius": 10, "cursor": "{{ if .o.off then \"default\" else \"pointer\" end }}",
+                "opacity": "{{ if .o.off then 0.45 else 1 end }}", "hover": { "background": "{{ if .o.off then \"transparent\" else \"@hover\" end }}" }
+              },
+              "on": { "click": { "do": "if", "cond": "{{ .o.off | not }}", "then": [
+                { "do": "state.set", "key": "new_tile_menu", "value": null },
+                { "do": "if", "cond": "{{ .o.id == \"orchestrator\" }}", "then": "orchestrator.open" },
+                { "do": "if", "cond": "{{ .o.id == \"terminal\" }}", "then": "tiles.new_terminal" },
+                { "do": "if", "cond": "{{ .o.id == \"notes\" }}", "then": "notes.new" },
+                { "do": "if", "cond": "{{ .o.id == \"designer\" }}", "then": "tiles.open_designer" }
+              ] } },
+              "children": [
+                {
+                  "type": "box",
+                  "style": { "width": 36, "height": 36, "radius": 9, "shrink": 0, "align": "center", "justify": "center", "background": "@pill", "border": 1, "border_color": "@line" },
+                  "children": [{ "type": "icon", "props": { "name": "{{ .o.icon }}", "size": 17, "color": "@text" } }]
+                },
+                {
+                  "type": "column", "style": { "grow": 1, "min_width": 0, "gap": 2 },
+                  "children": [
+                    { "type": "text", "props": { "text": "{{ .o.title }}" }, "style": { "font_size": 14, "font_weight": "semibold", "color": "@text" } },
+                    { "type": "text", "props": { "text": "{{ .o.sub }}" }, "style": { "font_size": 12, "color": "@text_muted", "truncate": true } }
+                  ]
+                }
+              ]
+            },
+            { "type": "divider", "style": { "margin": [6, 8] } },
+            {
+              "type": "row",
+              "style": { "padding": [4, 10, 6, 10], "gap": 8, "align": "center" },
+              "children": [
+                { "type": "icon", "props": { "name": "bot", "size": 13, "color": "@text_faint" } },
+                { "type": "text", "props": { "text": "Redo agent" }, "style": { "font_size": 12, "font_weight": "semibold", "color": "@text_faint" } }
+              ]
+            },
+            {
+              "type": "scroll",
+              "props": { "scrollbar": "scrolling" },
+              "style": { "max_height": 260, "gap": 2 },
+              "children": [
+                {
+                  "if": "([(.data.redo_agents.agents // [])[] | select(.shown)] | length) == 0",
+                  "type": "text", "props": { "text": "No Redo agents in your sidebar list yet." },
+                  "style": { "padding": [6, 10], "font_size": 12.5, "color": "@text_faint" }
+                },
+                {
+                  "for": "[(.data.redo_agents.agents // [])[] | select(.shown)] | sort_by(.name)",
+                  "as": "a", "key": ".a.id",
+                  "type": "row",
+                  "style": { "height": 40, "padding": [0, 10], "gap": 10, "align": "center", "radius": 8, "cursor": "pointer", "hover": { "background": "@hover" } },
+                  "tooltip": "Chat with {{ .a.name }} in a tile",
+                  "on": { "click": [{ "do": "state.set", "key": "new_tile_menu", "value": null }, { "do": "redo_chat.open", "slug": "{{ .a.slug }}", "name": "{{ .a.name }}", "agent_id": "{{ .a.id }}" }] },
+                  "children": [
+                    { "type": "box", "style": { "width": 8, "height": 8, "radius": 4, "shrink": 0, "background": "{{ if .a.running > 0 then \"@success\" elif .a.attention > 0 then \"@warning\" else \"@text_faint\" end }}" } },
+                    { "type": "text", "props": { "text": "{{ .a.name }}" }, "style": { "font_size": 13.5, "grow": 1, "min_width": 0, "truncate": true, "color": "@text" } },
+                    { "if": ".a.running > 0", "type": "text", "props": { "text": "running" }, "style": { "font_size": 11.5, "color": "@success" } }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "NotesTile": {
+      "about": "A one-page note like Apple Notes: a title and a checklist. props: n (a notes tile from state.term_tiles). Page data in state (see scripts/notes.rs).",
+      "type": "column",
+      "style": { "width": "full", "height": "full", "min_height": 0, "min_width": 0, "radius": 10, "border": 1, "border_color": "@line", "overflow": "hidden", "background": "@card" },
+      "children": [
+        {
+          "id": "notes-tile-head",
+          "type": "row",
+          "style": {
+            "height": 36, "shrink": 0, "padding": [0, 6, 0, 10], "gap": 8, "align": "center", "cursor": "grab", "border_bottom": 1, "border_color": "@line",
+            "radius": { "top_left": 9, "top_right": 9, "bottom_left": 0, "bottom_right": 0 },
+            "background": "{{ (\"term:\" + .props.n.id) as $id | .theme.tile_tints as $t | (.state[\"tile_color:\" + $id] // ([(.state.tile_slots // {}) | to_entries | sort_by(.value) | .[].key] | index($id) // 0)) as $r | $t[$r % ($t | length)] }}"
+          },
+          "drag": { "kind": "tile", "value": "term:{{ .props.n.id }}", "label": "{{ .state[\"note_title:\" + .props.n.id] // \"Notes\" | if . == \"\" then \"Notes\" else . end }}" },
+          "tooltip": "Notes · drag to move · double-click for full screen",
+          "on": { "double_click": [{ "do": "state.set", "key": "focus_term", "value": "{{ .props.n.id }}" }, { "do": "state.set", "key": "tile_focus", "value": true }] },
+          "children": [
+            { "type": "icon", "props": { "name": "notebook-pen", "size": 14, "color": "#ffffffd0" } },
+            { "type": "text", "props": { "text": "Notes" }, "style": { "font_size": 13, "font_weight": "semibold" } },
+            {
+              "type": "text",
+              "props": { "text": "{{ (.state[\"notes:\" + .props.n.id] // []) as $l | ([$l[] | select(.done)] | length | tostring) + \"/\" + ($l | length | tostring) + \" done\" }}" },
+              "style": { "font_size": 11.5, "color": "#ffffff80" }
+            },
+            { "type": "TileColorDot", "id": "notes-color-dot", "props": { "tile": "term:{{ .props.n.id }}" } },
+            { "type": "spacer" },
+            { "if": "[(.state[\"notes:\" + .props.n.id] // [])[] | select(.done)] | length > 0", "type": "IconButton", "props": { "icon": "list-x", "size": 22, "icon_size": 12, "tooltip": "Clear checked items", "do": { "do": "notes.clear_done", "tile": "{{ .props.n.id }}" } } },
+            { "type": "IconButton", "props": { "icon": "maximize-2", "size": 22, "icon_size": 12, "tooltip": "Full screen", "do": [{ "do": "state.set", "key": "focus_term", "value": "{{ .props.n.id }}" }, { "do": "state.set", "key": "tile_focus", "value": true }] } },
+            { "type": "IconButton", "props": { "icon": "x", "size": 22, "icon_size": 12, "tooltip": "Close and delete this note", "do": { "do": "confirm", "title": "Delete this note?", "text": "Closing a Notes tile deletes what's on it.", "confirm": "Delete", "then": { "do": "notes.close", "tile": "{{ .props.n.id }}" } } } }
+          ]
+        },
+        {
+          "type": "scroll",
+          // The bar shows only while the page actually scrolls (never on a note that fits).
+          "props": { "scrollbar": "scrolling" },
+          "style": { "grow": 1, "min_height": 0, "padding": [14, 18, 18, 18], "gap": 2 },
+          "children": [
+            {
+              "type": "input",
+              "props": {
+                "state": "note_title:{{ .props.n.id }}", "placeholder": "Title", "appearance": false,
+                "field": { "font_size": 22, "font_weight": "bold", "color": "@text", "background": "transparent", "padding": [0, 0] }
+              },
+              "id": "note-title",
+              "style": { "width": "full", "margin": [0, 0, 6, 0] },
+              "on": {
+                "submit": { "do": "notes.from_title", "tile": "{{ .props.n.id }}" },
+                "key": { "down": { "do": "notes.from_title", "tile": "{{ .props.n.id }}" } }
+              }
+            },
+            {
+              "type": "text",
+              "props": { "text": "{{ .now | strftime(\"%B %-d, %Y\") }}" },
+              "style": { "font_size": 11.5, "color": "@text_faint", "margin": [0, 0, 10, 0] }
+            },
+            {
+              "for": ".props.n.id as $t | [(.state[\"notes:\" + $t] // [])[] | . + {tile: $t}]",
+              "as": "it", "key": ".it.id",
+              "id": "note-item",
+              "type": "row",
+              "style": { "position": "relative", "gap": 10, "align": "center", "padding": [5, 0, 5, "{{ (.it.indent // 0) * 26 }}"], "border_bottom": 1, "border_color": "#ffffff0d" },
+              "children": [
+                // Focus catcher for ⇧Tab (the app moves focus backward onto it): moves the line out a level.
+                {
+                  "type": "box", "focusable": true, "motion": false,
+                  "style": { "position": "absolute", "left": 0, "top": 0, "width": 1, "height": 1, "opacity": 0 },
+                  "on": { "focus": { "do": "notes.indent", "tile": "{{ .it.tile }}", "item": "{{ .it.id }}", "delta": -1 } }
+                },
+                {
+                  "type": "box",
+                  "tooltip": "{{ if .it.done then \"Uncheck\" else \"Check\" end }}",
+                  "style": {
+                    "width": 18, "height": 18, "radius": 9, "shrink": 0, "align": "center", "justify": "center", "cursor": "pointer",
+                    "border": 1.5, "border_color": "{{ if .it.done then \"#e2b33c\" else \"#6c6c70\" end }}",
+                    "background": "{{ if .it.done then \"#e2b33c\" else \"transparent\" end }}",
+                    "hover": { "border_color": "#e2b33c" }
+                  },
+                  "transition": { "background": 140 },
+                  "on": { "click": { "do": "notes.toggle", "tile": "{{ .it.tile }}", "item": "{{ .it.id }}" } },
+                  "children": [{ "if": ".it.done", "type": "icon", "props": { "name": "check", "size": 12, "color": "#1d1d1f" } }]
+                },
+                {
+                  "type": "input",
+                  "props": {
+                    "state": "ni:{{ .it.tile }}:{{ .it.id }}", "placeholder": "", "appearance": false,
+                    "autofocus": "{{ .state.note_focus == (.it.tile + \":\" + .it.id) }}",
+                    "field": { "font_size": 14, "color": "{{ if .it.done then \"@text_faint\" else \"@text\" end }}", "background": "transparent", "padding": [0, 0] }
+                  },
+                  "id": "note-input",
+                  "style": { "grow": 1, "min_width": 0, "opacity": "{{ if .it.done then 0.7 else 1 end }}" },
+                  // Enter: new line · ↑/↓: move between lines · Tab / ⇧Tab: sub-item / back out.
+                  "on": {
+                    "submit": { "do": "notes.add", "tile": "{{ .it.tile }}", "after": "{{ .it.id }}" },
+                    "key": {
+                      "up": { "do": "notes.move", "tile": "{{ .it.tile }}", "item": "{{ .it.id }}", "dir": -1 },
+                      "down": { "do": "notes.move", "tile": "{{ .it.tile }}", "item": "{{ .it.id }}", "dir": 1 },
+                      "tab": { "do": "notes.indent", "tile": "{{ .it.tile }}", "item": "{{ .it.id }}", "delta": 1 },
+                      "shift-tab": { "do": "notes.indent", "tile": "{{ .it.tile }}", "item": "{{ .it.id }}", "delta": -1 }
+                    }
+                  }
+                },
+                // Focus catcher for Tab (the app moves focus forward onto it): makes the line a sub-item.
+                {
+                  "type": "box", "focusable": true, "motion": false,
+                  "style": { "position": "absolute", "right": 0, "top": 0, "width": 1, "height": 1, "opacity": 0 },
+                  "on": { "focus": { "do": "notes.indent", "tile": "{{ .it.tile }}", "item": "{{ .it.id }}", "delta": 1 } }
+                },
+                {
+                  "type": "box",
+                  "tooltip": "Delete line",
+                  "style": { "width": 18, "height": 18, "shrink": 0, "radius": 4, "align": "center", "justify": "center", "cursor": "pointer", "opacity": 0.35, "hover": { "opacity": 1, "background": "@hover" } },
+                  "on": { "click": { "do": "notes.remove", "tile": "{{ .it.tile }}", "item": "{{ .it.id }}" } },
+                  "children": [{ "type": "icon", "props": { "name": "x", "size": 11, "color": "@text_muted" } }]
+                }
+              ]
+            },
+            {
+              "type": "row",
+              "style": { "gap": 10, "align": "center", "padding": [8, 0], "cursor": "pointer", "color": "@text_faint", "hover": { "color": "@text" } },
+              "on": { "click": { "do": "notes.add", "tile": "{{ .props.n.id }}" } },
+              "children": [
+                { "type": "icon", "props": { "name": "plus", "size": 14 } },
+                { "type": "text", "props": { "text": "Add item" }, "style": { "font_size": 13.5 } }
+              ]
+            }
+          ]
+        }
+      ]
+    },
     "DesignerTile": {
       "about": "The designer as a grid tile (open while state.designer_open). Its chat is the built-in DesignerPanel, without its own header.",
       "type": "column",
@@ -180,6 +401,9 @@
               "as": "m", "key": ".m.k",
               "type": "column",
               "style": { "gap": 4 },
+              // No enter animation: the virtual list rebuilds rows as they scroll into view, and a fade
+              // replayed on every rebuild read as flicker.
+              "motion": false,
               "children": [
                 {
                   "if": ".m.role == \"user\"",
@@ -210,6 +434,18 @@
                     { "type": "markdown", "props": { "text": "{{ .m.text }}", "selectable": true }, "style": { "font_size": 13.5 } }
                   ]
                 }
+              ]
+            },
+            // Waiting on the agent: a small spinner under the conversation until its reply lands.
+            {
+              "if": "(.data.redo_chat[.props.r.id] // {}) as $d | ($d.sending // false) or ($d.busy // false)",
+              "id": "redo-thinking",
+              "type": "row",
+              "motion": false,
+              "style": { "gap": 8, "align": "center", "padding": [4, 2] },
+              "children": [
+                { "type": "spinner", "props": { "size": "xsmall", "color": "@text_muted" } },
+                { "type": "text", "props": { "text": "{{ if .data.redo_chat[.props.r.id].sending then \"Sending…\" else .props.r.label + \" is working…\" end }}" }, "style": { "font_size": 12.5, "color": "@text_muted" } }
               ]
             }
           ]
@@ -381,6 +617,53 @@
             { "type": "IconButton", "props": { "icon": "x", "size": 22, "icon_size": 12, "tooltip": "Close (stops the agent)", "do": { "do": "chat.close", "chat": "{{ .props.c.id }}" } } }
           ]
         },
+        // The orchestrator's own tile (scripts/orchestrator.rs): status, pause / look-now, and what it
+        // flagged for you or finished.
+        {
+          "if": ".props.c.id == .state.orchestrator_chat",
+          "type": "column",
+          "style": { "shrink": 0, "padding": [8, 10], "gap": 6, "border_bottom": 1, "border_color": "@line", "background": "#ffffff06" },
+          "children": [
+            {
+              "type": "row",
+              "style": { "gap": 8, "align": "center" },
+              "children": [
+                { "type": "icon", "props": { "name": "workflow", "size": 14, "color": "@accent_bright" } },
+                {
+                  "type": "text",
+                  "props": { "text": "{{ if .state.orchestrator_paused then \"Paused\" elif (.data.orchestrator.status // \"idle\") == \"thinking\" then \"Reviewing tiles…\" elif (.data.orchestrator.status // \"\") == \"starting\" then \"Starting…\" elif (.data.orchestrator.queued // 0) > 0 then (.data.orchestrator.queued | tostring) + \" tile update(s) queued\" else (.state.orchestrator_chat as $o | \"Watching \" + ([.chats[] | select(.open and .id != $o)] | length | tostring) + \" agents\") end }}" },
+                  "style": { "font_size": 12.5, "color": "@text_muted", "grow": 1, "min_width": 0, "truncate": true }
+                },
+                { "type": "IconButton", "props": { "icon": "scan-search", "size": 22, "icon_size": 12, "tooltip": "Review every tile now", "do": "orchestrator.sweep" } },
+                { "type": "IconButton", "props": { "icon": "{{ if .state.orchestrator_paused then \"play\" else \"pause\" end }}", "size": 22, "icon_size": 12, "tooltip": "{{ if .state.orchestrator_paused then \"Resume orchestrating\" else \"Pause orchestrating\" end }}", "do": "orchestrator.pause" } }
+              ]
+            },
+            {
+              "for": "(.data.orchestrator.flags // [])",
+              "as": "f", "key": ".f.chat",
+              "type": "row",
+              "style": { "gap": 8, "align": "center", "padding": [6, 8], "radius": 7, "border": 1, "border_color": "@warning", "background": "@waiting_bg", "cursor": "pointer" },
+              "tooltip": "Needs you: open {{ .f.name }}",
+              "on": { "click": [{ "do": "chat.show", "chat": "{{ .f.chat }}" }, { "do": "state.set", "key": "tile_focus", "value": true }] },
+              "children": [
+                { "type": "icon", "props": { "name": "hand", "size": 12, "color": "@warning" } },
+                { "type": "text", "props": { "text": "{{ .f.name }}: {{ .f.why }}" }, "style": { "font_size": 12, "grow": 1, "min_width": 0, "truncate": 2 } },
+                { "type": "IconButton", "props": { "icon": "x", "size": 18, "icon_size": 10, "tooltip": "Dismiss", "do": { "do": "orchestrator.dismiss", "chat": "{{ .f.chat }}" } } }
+              ]
+            },
+            {
+              "for": "(.data.orchestrator.done // []) | .[-3:]",
+              "as": "f", "key": ".f.chat",
+              "type": "row",
+              "style": { "gap": 8, "align": "center", "padding": [2, 8] },
+              "children": [
+                { "type": "icon", "props": { "name": "circle-check", "size": 12, "color": "@success" } },
+                { "type": "text", "props": { "text": "{{ .f.name }}: {{ .f.why }}" }, "style": { "font_size": 12, "color": "@text_muted", "grow": 1, "min_width": 0, "truncate": true } },
+                { "type": "IconButton", "props": { "icon": "x", "size": 18, "icon_size": 10, "tooltip": "Dismiss", "do": { "do": "orchestrator.dismiss", "chat": "{{ .f.chat }}" } } }
+              ]
+            }
+          ]
+        },
         // Its own cached region: a tile redraws only when its own chat changes, not on every other tile's update.
         { "type": "transcript", "region": true, "props": { "chat": "{{ .props.c.id }}", "empty": "No messages yet." }, "style": { "grow": 1, "min_height": 0 } },
         { "type": "waiting", "props": { "chat": "{{ .props.c.id }}" }, "style": { "padding": [0, 8, 6, 8] } },
@@ -544,6 +827,22 @@
           ]
         },
         { "if": ".selected.worktree.mr", "type": "Pill", "props": { "text": "!{{ .selected.worktree.mr.number }}", "icon": "git-pull-request", "tooltip": "Open the merge request", "do": { "do": "open", "url": "{{ .selected.worktree.mr.url }}" } } },
+        // Scroll lock: while on, the wheel scrolls the whole tile page instead of the tile under
+        // the pointer.
+        {
+          "id": "scroll-lock",
+          "type": "box",
+          "tooltip": "{{ if .state.scroll_lock then \"Scroll lock on: the wheel scrolls the tile page\" else \"Scroll lock off: the wheel scrolls the tile under the pointer\" end }}",
+          "style": {
+            "width": 28, "height": 28, "radius": 7, "shrink": 0, "align": "center", "justify": "center", "cursor": "pointer",
+            "background": "{{ if .state.scroll_lock then \"@accent_deep\" else \"transparent\" end }}",
+            "border": 1, "border_color": "{{ if .state.scroll_lock then \"@accent\" else \"transparent\" end }}",
+            "hover": { "background": "{{ if .state.scroll_lock then \"@accent_deep\" else \"@hover\" end }}" }
+          },
+          "transition": { "background": 140, "border_color": 140 },
+          "on": { "click": { "do": "state.toggle", "key": "scroll_lock", "default": false } },
+          "children": [{ "type": "icon", "props": { "name": "{{ if .state.scroll_lock then \"lock\" else \"lock-open\" end }}", "size": 14, "color": "{{ if .state.scroll_lock then \"@accent_bright\" else \"@text_muted\" end }}" } }]
+        },
         { "type": "InboxButton", "id": "inbox" }
       ]
     },
@@ -674,6 +973,10 @@
 
   // ⌘N starts an agent in redo (~/redo) wherever you are; the chat card's own "+" still uses its worktree.
   "keys": [
+    // ⌘] / ⌘[ in a Notes checklist line (Apple Notes' indent keys): make it a sub-item of the line above,
+    // or move it back out. (Tab itself never reaches settings: the app uses it to move focus.)
+    { "key": "cmd-]", "if": ".app.focus_area == \"input\"", "do": { "do": "notes.tab", "delta": 1 } },
+    { "key": "cmd-[", "if": ".app.focus_area == \"input\"", "do": { "do": "notes.tab", "delta": -1 } },
     // Esc leaves a full-screen agent for the tile grid (when you aren't typing).
     { "key": "escape", "if": ".state.tile_focus == true and .app.focus_area != \"composer\" and (.app.confirm | not)", "do": [{ "do": "state.set", "key": "tile_focus", "value": false }, { "do": "state.set", "key": "focus_term", "value": null }] },
     // ⌘Esc focuses the message box, or leaves it when it already has focus (as in VS Code).
@@ -745,6 +1048,19 @@
     // its own header, so the panel's is hidden.
     { "id": "designer", "set": { "if": "false" } },
     { "id": "designer-header", "set": { "if": "false" } },
+    // Scroll lock on: a clear layer over the whole window takes every wheel and scrolls only the tile
+    // page (scripts/tiles.rs tiles.wheel); nothing else scrolls. Clicks, typing and drags pass through it.
+    // Lock off: no layer; the wheel scrolls whatever is under the pointer and the tile page never moves.
+    {
+      "insert": {
+        "id": "scroll-lock-layer",
+        "if": ".state.scroll_lock == true and .state.tile_focus != true and .state.new_tile_menu == null",
+        "type": "box", "layer": "above", "occlude": false,
+        "style": { "position": "absolute", "left": 0, "top": 0, "right": 0, "bottom": 0 },
+        "on": { "scroll": { "do": "tiles.wheel", "dy": "{{ .dy // 0 }}", "w": "{{ .app.layout[\"main-area\"].w // 1200 }}", "wh": "{{ .app.window.height // 1000 }}" } }
+      },
+      "after": "setup"
+    },
     // The brand at the top of the sidebar: a bigger icon and "turtwig" in a playful face.
     { "id": "brand", "set": { "style": { "height": 44, "padding": [6, 8, 0, 6], "gap": 10, "align": "center" } } },
     // Click the icon: it hops twice (an eased offset driven by state.brand_hop).
@@ -881,17 +1197,18 @@
           {
             "id": "tile-grid-cells",
             "type": "box",
-            "transition": { "top": 0 },
+            // A short ease so wheel steps (from the sidebar or the gutter) glide instead of jumping.
+            "transition": { "top": 140 },
             "style": {
               "position": "absolute", "left": 0, "right": 0,
-              "top": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([$content - $view, 0] | max) as $max | 0 - ([[(.state.grid_scroll // 0), $max] | min, 0] | max) }}",
+              "top": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([$content - $view, 1] | max) as $max | ([($view * $view / $content), 40] | max) as $th | ([$view - 16 - $th, 1] | max) as $track | ([[(.state.grid_thumb // 0), $track] | min, 0] | max) as $s | if $content <= $view then 0 else 0 - ($s / $track * $max | floor) end }}",
               "gap": 10, "padding": [2, 0, 14, 0],
               "display": "grid",
               "grid_cols": "{{ (.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end }}"
             },
             "children": [
               {
-                "for": "([.chats[] | select(.open) | {id, kind: \"agent\", c: .}] + [(.state.term_tiles // [])[] | {id: (\"term:\" + .id), kind: (if .kind == \"redo\" then \"redo\" else \"term\" end), t: .}] + (if .state.designer_open then [{id: \"term:designer\", kind: \"designer\", t: {id: \"designer\", kind: \"designer\", label: \"Designer\"}}] else [] end)) as $cs | (.state.tile_slots // {}) as $s0 | ($s0 | with_entries(select(.key as $k | $cs | any(.id == $k)))) as $s | (reduce ($cs[] | select($s[.id] == null) | .id) as $id ($s; . as $m | ([range(0; 400)] | map(select(. as $i | ([$m[]] | index($i)) == null)) | .[0]) as $f | .[$id] = $f)) as $m0 | (if .app.drag.kind == \"tile\" and ((.app.drop.key // \"\") | startswith(\"tile:\")) then ((.app.drop.key | ltrimstr(\"tile:\") | tonumber) as $to | .app.drag.value as $d | ($m0[$d]) as $from | ([$m0 | to_entries[] | select(.value == $to) | .key] | .[0]) as $occ | $m0 | .[$d] = $to | (if $occ != null and $occ != $d then .[$occ] = $from else . end)) else $m0 end) as $m | ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | (([$m[]] | max) // -1) as $mx | (((($mx + 1) / $cols) | ceil) + 1) * $cols as $total | [range(0; $total)] | map(. as $i | { i: $i, c: ([$cs[] | select($m[.id] == $i)] | .[0]) }) | . as $cells | ([$cells[] | select(.c == null) | .i] | .[0]) as $firstfree | map(. + { plus: (.i == $firstfree) })",
+                "for": "([.chats[] | select(.open) | {id, kind: \"agent\", c: .}] + [(.state.term_tiles // [])[] | {id: (\"term:\" + .id), kind: (if .kind == \"redo\" or .kind == \"notes\" then .kind else \"term\" end), t: .}] + (if .state.designer_open then [{id: \"term:designer\", kind: \"designer\", t: {id: \"designer\", kind: \"designer\", label: \"Designer\"}}] else [] end)) as $cs | (.state.tile_slots // {}) as $s0 | ($s0 | with_entries(select(.key as $k | $cs | any(.id == $k)))) as $s | (reduce ($cs[] | select($s[.id] == null) | .id) as $id ($s; . as $m | ([range(0; 400)] | map(select(. as $i | ([$m[]] | index($i)) == null)) | .[0]) as $f | .[$id] = $f)) as $m0 | (if .app.drag.kind == \"tile\" and ((.app.drop.key // \"\") | startswith(\"tile:\")) then ((.app.drop.key | ltrimstr(\"tile:\") | tonumber) as $to | .app.drag.value as $d | ($m0[$d]) as $from | ([$m0 | to_entries[] | select(.value == $to) | .key] | .[0]) as $occ | $m0 | .[$d] = $to | (if $occ != null and $occ != $d then .[$occ] = $from else . end)) else $m0 end) as $m | ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | (([$m[]] | max) // -1) as $mx | (((($mx + 1) / $cols) | ceil) + 1) * $cols as $total | [range(0; $total)] | map(. as $i | { i: $i, c: ([$cs[] | select($m[.id] == $i)] | .[0]) }) | . as $cells | ([$cells[] | select(.c == null) | .i] | .[0]) as $firstfree | map(. + { plus: (.i == $firstfree) })",
                 // Keyed by the agent (not the cell), so a tile glides to its new cell instead of popping.
                 // While a tile is dragged over a cell, the grid previews the move live: the tile already
                 // there slides into the dragged tile's old cell, and the dragged tile shows lifted in its
@@ -915,6 +1232,7 @@
                   { "if": ".cell.c.kind == \"term\" and .cell.c.id != .app.drag.value", "type": "TermTile", "props": { "t": "{{ .cell.c.t }}" } },
                   { "if": ".cell.c.kind == \"redo\" and .cell.c.id != .app.drag.value", "type": "RedoTile", "props": { "r": "{{ .cell.c.t }}" } },
                   { "if": ".cell.c.kind == \"designer\" and .cell.c.id != .app.drag.value", "type": "DesignerTile" },
+                  { "if": ".cell.c.kind == \"notes\" and .cell.c.id != .app.drag.value", "type": "NotesTile", "props": { "n": "{{ .cell.c.t }}" } },
                   // The tile being dragged: lifted where it would land (accent ring, deep shadow, slightly larger).
                   {
                     "if": ".cell.c != null and .cell.c.id == .app.drag.value",
@@ -925,7 +1243,8 @@
                       { "if": ".cell.c.kind == \"agent\"", "type": "AgentTile", "props": { "c": "{{ .cell.c.c }}" } },
                       { "if": ".cell.c.kind == \"term\"", "type": "TermTile", "props": { "t": "{{ .cell.c.t }}" } },
                       { "if": ".cell.c.kind == \"redo\"", "type": "RedoTile", "props": { "r": "{{ .cell.c.t }}" } },
-                      { "if": ".cell.c.kind == \"designer\"", "type": "DesignerTile" }
+                      { "if": ".cell.c.kind == \"designer\"", "type": "DesignerTile" },
+                      { "if": ".cell.c.kind == \"notes\"", "type": "NotesTile", "props": { "n": "{{ .cell.c.t }}" } }
                     ]
                   },
                   // The first free cell offers a new agent or a new terminal; other free cells take drops.
@@ -955,22 +1274,13 @@
                           },
                           {
                             "type": "column",
-                            "style": { "width": 132, "height": 92, "gap": 8, "align": "center", "justify": "center", "radius": 10, "border": 1, "border_color": "@line", "background": "#0c0c0d", "cursor": "pointer", "color": "@text_muted", "font_family": "@font_mono", "hover": { "color": "@text", "border_color": "@accent" } },
-                            "tooltip": "Add a terminal, a Redo agent or the designer",
-                            "menu_on": "click",
-                            "menu": [
-                              { "label": "Terminal", "icon": "square-terminal", "do": "tiles.new_terminal" },
-                              {
-                                "label": "Redo agent", "icon": "bot",
-                                "items": [
-                                  { "for": "[(.data.redo_agents.agents // [])[] | select(.shown)]", "as": "a", "label": "{{ .a.name }}", "do": { "do": "redo_chat.open", "slug": "{{ .a.slug }}", "name": "{{ .a.name }}", "agent_id": "{{ .a.id }}" } }
-                                ]
-                              },
-                              { "label": "Designer", "icon": "palette", "disabled": ".state.designer_open == true", "do": "tiles.open_designer" }
-                            ],
+                            "style": { "position": "relative", "width": 132, "height": 92, "gap": 8, "align": "center", "justify": "center", "radius": 10, "border": 1, "border_color": "{{ if .state.new_tile_menu == \"grid\" then \"@accent\" else \"@line\" end }}", "background": "#0c0c0d", "cursor": "pointer", "color": "@text_muted", "hover": { "color": "@text", "border_color": "@accent" } },
+                            "tooltip": "Add a terminal, notes, the designer or a Redo agent",
+                            "on": { "click": { "do": "state.set", "key": "new_tile_menu", "value": "{{ if .state.new_tile_menu == \"grid\" then null else \"grid\" end }}" } },
                             "children": [
                               { "type": "icon", "props": { "name": "layout-grid", "size": 20 } },
-                              { "type": "text", "props": { "text": "New tile" }, "style": { "font_size": 12.5 } }
+                              { "type": "text", "props": { "text": "New tile" }, "style": { "font_size": 12.5 } },
+                              { "type": "NewTileMenu", "props": { "place": "grid", "top": -195, "left": -104 } }
                             ]
                           }
                         ]
@@ -988,23 +1298,26 @@
           // wheel over the gutter. Hidden when everything fits.
           {
             "id": "tile-scrollbar",
+            // Its thumb shows only while scroll lock is on: with it off, the tile page doesn't move at all.
             "if": "((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) > ((.app.window.height // 1000) - 58)",
             "type": "box",
             "style": { "width": 14, "shrink": 0, "height": "full", "position": "relative", "radius": 7, "background": "#ffffff12", "border": 1, "border_color": "#ffffff14", "margin": [2, 0, 14, 0] },
-            "on": { "scroll": { "do": "state.set", "key": "grid_scroll", "value": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([$content - $view, 0] | max) as $max | ([[((.state.grid_scroll // 0) - ((.dy // 0) * 0.5)), $max] | min, 0] | max) }}" } },
             "children": [
               {
                 "id": "tile-scroll-thumb",
+                "if": ".state.scroll_lock == true",
                 "type": "resize_handle",
                 "motion": false,
                 "props": {
-                  "state": "grid_scroll", "axis": "y", "min": 0, "default": 0,
-                  "max": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | [$content - $view, 1] | max }}"
+                  // The thumb's own position (0 … track length) is the state, so it follows the pointer 1:1
+                  // and the page moves proportionally (much faster than the old 1 pt per pixel).
+                  "state": "grid_thumb", "axis": "y", "min": 0, "default": 0,
+                  "max": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([($view * $view / $content), 40] | max) as $th | [$view - 16 - $th, 1] | max }}"
                 },
                 "style": {
                   "position": "absolute", "left": 2, "right": 2, "radius": 5, "background": "#ffffff66", "cursor": "grab", "hover": { "background": "#ffffff99" }, "active": { "background": "@accent" },
                   "height": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([($view * $view / $content), 40] | max | floor) }}",
-                  "top": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([$content - $view, 1] | max) as $max | ([($view * $view / $content), 40] | max) as $th | ([[(.state.grid_scroll // 0), $max] | min, 0] | max) as $s | (($s / $max) * ($view - 16 - $th)) | floor }}"
+                  "top": "{{ ((.app.layout[\"main-area\"].w // 1200) as $w | if $w < 900 then 1 elif $w < 1400 then 2 elif $w < 2000 then 3 else 4 end) as $cols | ((([(.state.tile_slots // {})[]] | max) // -1) + 1) as $n | ((($n / $cols) | ceil) + 1) as $rows | ([(((.app.window.height // 1000) - 110) / 2 | floor), 340] | max) as $ch | ($rows * $ch + ($rows - 1) * 10 + 16) as $content | ((.app.window.height // 1000) - 58) as $view | ([($view * $view / $content), 40] | max) as $th | ([$view - 16 - $th, 1] | max) as $track | [[(.state.grid_thumb // 0), $track] | min, 0] | max | floor }}"
                 }
               }
             ]
@@ -1080,7 +1393,8 @@
                             "type": "box",
                             "style": { "width": 10, "height": 10, "radius": 5, "shrink": 0, "background": "{{ if .it.c.alive == false then \"@line\" elif .it.c.state == \"waiting\" then \"#d9a441\" elif .it.c.state == \"working\" then \"#d9574f\" else \"#4fae7f\" end }}" }
                           },
-                          { "if": ".it.kind == \"term\" and .it.t.kind != \"redo\" and .it.t.kind != \"designer\"", "type": "icon", "props": { "name": "square-terminal", "size": 13, "color": "#8a8a90" } },
+                          { "if": ".it.kind == \"term\" and (.it.t.kind as $k | [\"redo\", \"designer\", \"notes\"] | index($k) | not)", "type": "icon", "props": { "name": "square-terminal", "size": 13, "color": "#8a8a90" } },
+                          { "if": ".it.t.kind == \"notes\"", "type": "icon", "props": { "name": "notebook-pen", "size": 13, "color": "#e2b33c" } },
                           { "if": ".it.t.kind == \"designer\"", "type": "icon", "props": { "name": "palette", "size": 13, "color": "@accent", "spin": "{{ .designer.working }}" } },
                           {
                             "if": ".it.t.kind == \"redo\"",
@@ -1088,20 +1402,21 @@
                             "style": { "width": 10, "height": 10, "radius": 5, "shrink": 0, "background": "{{ (.data.redo_chat[.it.t.id] // {}) as $d | if .it.t.work == null then \"@line\" elif $d.waiting then \"#d9a441\" elif $d.settled then \"#4fae7f\" else \"#d9574f\" end }}" }
                           },
                           { "if": ".it.t.kind == \"redo\"", "type": "icon", "props": { "name": "bot", "size": 13, "color": "#8a8a90" } },
-                          { "type": "text", "props": { "text": "{{ if .it.kind == \"agent\" then .it.c.name else .it.t.label end }}" }, "style": { "font_size": 13, "font_weight": "semibold", "truncate": true, "min_width": 0, "grow": 1, "font_family": "{{ if .it.kind == \"term\" and .it.t.kind != \"redo\" and .it.t.kind != \"designer\" then \"@font_mono\" else \"@font_ui\" end }}" } },
+                          { "type": "text", "props": { "text": "{{ if .it.kind == \"agent\" then .it.c.name elif .it.t.kind == \"notes\" then ((.state[\"note_title:\" + .it.t.id] // \"\") | if . == \"\" then \"Notes\" else . end) else .it.t.label end }}" }, "style": { "font_size": 13, "font_weight": "semibold", "truncate": true, "min_width": 0, "grow": 1, "font_family": "{{ if .it.kind == \"term\" and (.it.t.kind as $k | [\"redo\", \"designer\", \"notes\"] | index($k) | not) then \"@font_mono\" else \"@font_ui\" end }}" } },
                           { "if": ".it.kind == \"agent\"", "type": "text", "props": { "text": "{{ .it.c.age_text }}" }, "style": { "font_size": 11, "color": "@text_faint", "shrink": 0 } },
                           {
                             "type": "IconButton",
                             "props": {
                               "icon": "x", "size": 20, "icon_size": 11,
                               "tooltip": "{{ if .it.kind == \"agent\" then \"Close agent (stops it)\" else \"Close terminal\" end }}",
-                              "do": { "do": "if", "cond": "{{ .it.kind == \"agent\" }}", "then": { "do": "chat.close", "chat": "{{ .it.c.id }}" }, "else": { "do": "if", "cond": "{{ .it.t.kind == \"designer\" }}", "then": "tiles.close_designer", "else": { "do": "if", "cond": "{{ .it.t.kind == \"redo\" }}", "then": { "do": "redo_chat.close", "tile": "{{ .it.t.id }}" }, "else": [{ "do": "tiles.close_terminal", "id": "{{ .it.t.id }}" }, { "do": "state.set", "key": "focus_term", "value": null }] } } }
+                              "do": { "do": "if", "cond": "{{ .it.kind == \"agent\" }}", "then": { "do": "chat.close", "chat": "{{ .it.c.id }}" }, "else": { "do": "if", "cond": "{{ .it.t.kind == \"designer\" }}", "then": "tiles.close_designer", "else": { "do": "if", "cond": "{{ .it.t.kind == \"notes\" }}", "then": { "do": "confirm", "title": "Delete this note?", "text": "Closing a Notes tile deletes what's on it.", "confirm": "Delete", "then": { "do": "notes.close", "tile": "{{ .it.t.id }}" } }, "else": { "do": "if", "cond": "{{ .it.t.kind == \"redo\" }}", "then": { "do": "redo_chat.close", "tile": "{{ .it.t.id }}" }, "else": [{ "do": "tiles.close_terminal", "id": "{{ .it.t.id }}" }, { "do": "state.set", "key": "focus_term", "value": null }] } } } }
                             }
                           }
                         ]
                       },
                       { "if": ".it.kind == \"agent\"", "type": "text", "props": { "text": "{{ if (.it.c.activity // \"\") != \"\" then .it.c.activity else ((.it.c.last_message // \"\") | gsub(\"\\n\"; \" \")) end }}" }, "style": { "font_size": 12, "color": "@text_muted", "truncate": 2 } },
-                      { "if": ".it.kind == \"term\" and .it.t.kind != \"redo\" and .it.t.kind != \"designer\"", "type": "text", "props": { "text": "{{ (.it.t.cwd // \"~\") | sub(\"^/Users/[^/]+\"; \"~\") }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "font_family": "@font_mono" } },
+                      { "if": ".it.t.kind == \"notes\"", "type": "text", "props": { "text": "{{ .it.t.id as $t | .state as $st | ($st[\"notes:\" + $t] // []) as $l | ([$l[] | select(.done | not) | .id as $i | ($st[\"ni:\" + $t + \":\" + $i] // \"\") | select(. != \"\")] | .[:3] | join(\" · \")) as $open | if $open == \"\" then (([$l[] | select(.done)] | length | tostring) + \"/\" + ($l | length | tostring) + \" done\") else $open end }}" }, "style": { "font_size": 12, "color": "@text_muted", "truncate": 2 } },
+                      { "if": ".it.kind == \"term\" and (.it.t.kind as $k | [\"redo\", \"designer\", \"notes\"] | index($k) | not)", "type": "text", "props": { "text": "{{ (.it.t.cwd // \"~\") | sub(\"^/Users/[^/]+\"; \"~\") }}" }, "style": { "font_size": 11.5, "color": "@text_faint", "font_family": "@font_mono" } },
                       { "if": ".it.t.kind == \"designer\"", "type": "text", "props": { "text": "{{ if .designer.working then \"Working on your change…\" else \"Redesign the app live\" end }}" }, "style": { "font_size": 12, "color": "@text_muted", "truncate": true } },
                       { "if": ".it.t.kind == \"redo\"", "type": "text", "props": { "text": "{{ (.data.redo_chat[.it.t.id] // {}) as $d | if .it.t.work == null then \"Redo agent · not started\" else ((($d.items // []) | map(select(.role == \"agent\")) | last | .text) // $d.title // \"Redo agent\") | gsub(\"\\n\"; \" \") end }}" }, "style": { "font_size": 12, "color": "@text_muted", "truncate": 2 } }
                     ]
@@ -1120,20 +1435,14 @@
                       },
                       {
                         "type": "column",
-                        "style": { "grow": 1, "height": 64, "gap": 6, "align": "center", "justify": "center", "radius": 6, "background": "#0c0c0d", "cursor": "pointer", "color": "@text_muted", "font_size": 12.5, "font_family": "@font_mono", "hover": { "color": "@text" } },
-                        "tooltip": "Add a terminal, a Redo agent or the designer",
-                        "menu_on": "click",
-                        "menu": [
-                          { "label": "Terminal", "icon": "square-terminal", "do": "tiles.new_terminal" },
-                          {
-                            "label": "Redo agent", "icon": "bot",
-                            "items": [
-                              { "for": "[(.data.redo_agents.agents // [])[] | select(.shown)]", "as": "a", "label": "{{ .a.name }}", "do": { "do": "redo_chat.open", "slug": "{{ .a.slug }}", "name": "{{ .a.name }}", "agent_id": "{{ .a.id }}" } }
-                            ]
-                          },
-                          { "label": "Designer", "icon": "palette", "disabled": ".state.designer_open == true", "do": "tiles.open_designer" }
-                        ],
-                        "children": [{ "type": "icon", "props": { "name": "layout-grid", "size": 16 } }, { "type": "text", "props": { "text": "New tile" } }]
+                        "style": { "position": "relative", "grow": 1, "height": 64, "gap": 6, "align": "center", "justify": "center", "radius": 6, "background": "#0c0c0d", "cursor": "pointer", "color": "@text_muted", "font_size": 12.5, "hover": { "color": "@text" } },
+                        "tooltip": "Add a terminal, notes, the designer or a Redo agent",
+                        "on": { "click": { "do": "state.set", "key": "new_tile_menu", "value": "{{ if .state.new_tile_menu == \"focus\" then null else \"focus\" end }}" } },
+                        "children": [
+                          { "type": "icon", "props": { "name": "layout-grid", "size": 16 } },
+                          { "type": "text", "props": { "text": "New tile" } },
+                          { "type": "NewTileMenu", "props": { "place": "focus", "top": -492, "left": -8 } }
+                        ]
                       }
                     ]
                   }
@@ -1155,8 +1464,9 @@
         "type": "box",
         "style": { "grow": 1, "min_width": 0, "height": "full" },
         "children": [
-          { "for": ".state.focus_term as $f | [(.state.term_tiles // [])[] | select(.id == $f and .kind != \"redo\")]", "as": "t", "key": ".t.id", "type": "TermTile", "props": { "t": "{{ .t }}" } },
+          { "for": ".state.focus_term as $f | [(.state.term_tiles // [])[] | select(.id == $f and .kind != \"redo\" and .kind != \"notes\")]", "as": "t", "key": ".t.id", "type": "TermTile", "props": { "t": "{{ .t }}" } },
           { "if": ".state.focus_term == \"designer\" and .state.designer_open", "type": "DesignerTile" },
+          { "for": ".state.focus_term as $f | [(.state.term_tiles // [])[] | select(.id == $f and .kind == \"notes\")]", "as": "t", "key": ".t.id", "type": "NotesTile", "props": { "n": "{{ .t }}" } },
           { "for": ".state.focus_term as $f | [(.state.term_tiles // [])[] | select(.id == $f and .kind == \"redo\")]", "as": "t", "key": ".t.id", "type": "RedoTile", "props": { "r": "{{ .t }}" } }
         ]
       },

@@ -26,6 +26,64 @@ thread_local! {
     // Messages sent but not yet in the Work's own list: shown greyed until they appear.
     static PENDING: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
     static SEQ: RefCell<u64> = RefCell::new(0);
+    // When each tile last sent a message: keeps the spinner up until the agent's reply shows, even
+    // while the server hasn't marked the Work running yet (otherwise it blinked off between polls).
+    static SENT_AT: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
+    // The latest full Work response per tile, with its events slimmed to what the view uses; live
+    // stream events are appended to it, so polls and the stream render from one model with one set
+    // of row keys (no re-keying, no jumps).
+    static MODEL: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+    // The live event stream (curl on the Work's SSE endpoint) per tile, and which Work it follows.
+    static STREAMS: RefCell<HashMap<String, (String, ab::Process)>> = RefCell::new(HashMap::new());
+    static RETRY_AT: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
+    // Tiles whose model changed since the last publish, and when each wants a full refetch.
+    static DIRTY: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static REFETCH_AT: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
+    static TICKS: RefCell<u64> = RefCell::new(0);
+}
+
+// Event types the view draws; everything else is dropped from the model (tool outputs are large).
+fn slim(e: &Value) -> Option<Value> {
+    let ty = e["type"].as_str()?;
+    let data = match ty {
+        "message.appended" => json!({ "delta": e["data"]["delta"] }),
+        "message.completed" => json!({ "text": e["data"]["text"] }),
+        "actions.requested" => {
+            let calls: Vec<Value> = e["data"]["calls"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|c| {
+                            let args = &c["args"];
+                            let pick = |k: &str| args[k].as_str().map(|s| clip(s.lines().next().unwrap_or(""), 120));
+                            json!({ "toolName": c["toolName"], "args": {
+                                "command": pick("command"), "query": pick("query"), "path": pick("path"), "url": pick("url")
+                            } })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({ "calls": calls })
+        }
+        _ => return None,
+    };
+    Some(json!({ "type": ty, "cursor": e["cursor"], "createdAt": e["createdAt"], "data": data }))
+}
+
+// Event types that only add to what's drawn; anything else (input accepted, turn or Work status,
+// questions) may change the Work's messages or status, so it triggers a full refetch.
+fn is_drawn_only(ty: &str) -> bool {
+    matches!(
+        ty,
+        "message.appended" | "message.completed" | "actions.requested" | "actions.completed" | "action.result"
+            | "reasoning.appended" | "reasoning.completed" | "artifact.tagged" | "native.binding.attested"
+            | "step.started" | "delivery.updated" | "platform_action.recorded"
+    )
+}
+
+fn model_cursor(m: &Value) -> i64 {
+    let from_events = m["events"].as_array().and_then(|a| a.iter().filter_map(|e| e["cursor"].as_i64()).max()).unwrap_or(0);
+    from_events.max(m["eventCursor"].as_i64().unwrap_or(0))
 }
 
 fn key() -> Option<String> {
@@ -190,7 +248,8 @@ fn build(d: &Value, tile_id: &str) -> Value {
         let t = ts(m["createdAt"].as_str().unwrap_or(""));
         if role == "user" {
             user_texts.push(text.clone());
-            rows.push((t, order, json!({ "role": "user", "who": m["actorName"].as_str().unwrap_or("You"), "text": clip(&text, 6000) })));
+            // Stable keys (the server's ids), so rows never re-key and jump between polls.
+            rows.push((t, order, json!({ "k": format!("u:{}", m["id"].as_str().unwrap_or("")), "role": "user", "who": m["actorName"].as_str().unwrap_or("You"), "text": clip(&text, 6000) })));
         }
         order += 1;
     }
@@ -199,52 +258,66 @@ fn build(d: &Value, tile_id: &str) -> Value {
     let mut live = String::new();
     let mut tools: Vec<String> = vec![];
     let mut tools_t = 0.0;
-    let flush = |tools: &mut Vec<String>, rows: &mut Vec<(f64, usize, Value)>, t: f64, order: &mut usize| {
+    let mut tools_k = 0i64;
+    let mut live_k = 0i64;
+    let mut live_t = 0.0;
+    let flush = |tools: &mut Vec<String>, rows: &mut Vec<(f64, usize, Value)>, t: f64, k: i64, order: &mut usize| {
         if tools.is_empty() {
             return;
         }
         let n = tools.len();
         let text = if n == 1 { tools[0].clone() } else { format!("{n} tool calls · {}", tools.last().cloned().unwrap_or_default()) };
-        rows.push((t, *order, json!({ "role": "tools", "text": text, "all": tools.clone() })));
+        rows.push((t, *order, json!({ "k": format!("t:{k}"), "role": "tools", "text": text, "all": tools.clone() })));
         *order += 1;
         tools.clear();
     };
     for e in events {
         let t = ts(e["createdAt"].as_str().unwrap_or(""));
+        let cursor = e["cursor"].as_i64().unwrap_or(0);
         let data = &e["data"];
         match e["type"].as_str().unwrap_or("") {
             "actions.requested" => {
                 if tools.is_empty() {
                     tools_t = t;
+                    tools_k = cursor;
                 }
                 for c in data["calls"].as_array().unwrap_or(&empty) {
                     tools.push(tool_label(c));
                 }
             }
             "message.appended" => {
+                if live.is_empty() {
+                    live_k = cursor;
+                    live_t = t;
+                }
                 live.push_str(data["delta"].as_str().unwrap_or(""));
             }
             "message.completed" => {
+                // A reply that streamed in keeps the key of its first chunk, so the live row simply
+                // becomes the finished one (no pop).
+                let k = if live_k > 0 { live_k } else { cursor };
+                let start_t = if live_k > 0 { live_t } else { t };
                 live.clear();
+                live_k = 0;
                 let text = data["text"].as_str().unwrap_or("").trim().to_string();
                 if !text.is_empty() {
-                    flush(&mut tools, &mut rows, tools_t, &mut order);
+                    flush(&mut tools, &mut rows, tools_t, tools_k, &mut order);
                     has_completed = true;
-                    rows.push((t, order, json!({ "role": "agent", "text": clip(&text, 8000) })));
+                    rows.push((start_t, order, json!({ "k": format!("a:{k}"), "role": "agent", "text": clip(&text, 8000) })));
                     order += 1;
                 }
             }
             _ => {}
         }
     }
-    flush(&mut tools, &mut rows, tools_t, &mut order);
+    flush(&mut tools, &mut rows, tools_t, tools_k, &mut order);
     // Replies kept only as messages (no events in this window): use the Work's own assistant messages.
     if !has_completed {
         for m in w["messages"].as_array().unwrap_or(&empty) {
             let role = m["role"].as_str().unwrap_or("");
             let text = m["content"].as_str().unwrap_or("").trim().to_string();
             if role != "user" && !text.is_empty() {
-                rows.push((ts(m["createdAt"].as_str().unwrap_or("")), order, json!({ "role": "agent", "text": clip(&text, 8000) })));
+                rows.push((ts(m["createdAt"].as_str().unwrap_or("")), order, json!({ "k": format!("m:{}", m["id"].as_str().unwrap_or("")), "role": "agent", "text": clip(&text, 8000) })));
                 order += 1;
             }
         }
@@ -252,13 +325,14 @@ fn build(d: &Value, tile_id: &str) -> Value {
     rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
     let mut items: Vec<Value> = rows.into_iter().map(|r| r.2).collect();
     if !live.trim().is_empty() {
-        items.push(json!({ "role": "agent", "text": clip(live.trim(), 8000), "live": true }));
+        items.push(json!({ "k": format!("a:{live_k}"), "role": "agent", "text": clip(live.trim(), 8000), "live": true }));
     }
     // Questions the agent is waiting on.
-    for o in w["obligations"].as_array().unwrap_or(&empty) {
+    for (qi, o) in w["obligations"].as_array().unwrap_or(&empty).iter().enumerate() {
         let q = o["question"].as_str().or(o["prompt"].as_str()).or(o["text"].as_str()).or(o["data"]["question"].as_str()).unwrap_or("");
         if !q.is_empty() {
-            items.push(json!({ "role": "question", "text": clip(q, 4000) }));
+            let qk = o["id"].as_str().map(|s| s.to_string()).unwrap_or(qi.to_string());
+            items.push(json!({ "k": format!("q:{qk}"), "role": "question", "text": clip(q, 4000) }));
         }
     }
     // Sent messages not echoed back yet.
@@ -268,18 +342,18 @@ fn build(d: &Value, tile_id: &str) -> Value {
         list.retain(|s| !user_texts.iter().any(|u| u.trim() == s.trim()));
         list.clone()
     });
-    for s in pending {
-        items.push(json!({ "role": "user", "who": "You", "text": s, "pending": true }));
+    for (pi, s) in pending.into_iter().enumerate() {
+        items.push(json!({ "k": format!("p:{pi}:{}", clip(&s, 24)), "role": "user", "who": "You", "text": s, "pending": true }));
     }
     let n = items.len();
-    let items: Vec<Value> = items.into_iter().skip(n.saturating_sub(150)).enumerate().map(|(i, mut it)| {
-        it["k"] = json!(i);
-        it
-    }).collect();
+    let items: Vec<Value> = items.into_iter().skip(n.saturating_sub(150)).collect();
     let activity = w["activity"].as_str().unwrap_or("").to_string();
     let waiting = w["obligations"].as_array().map(|a| !a.is_empty()).unwrap_or(false) || activity.contains("attention");
     let settled = !w["terminal"].is_null() || (activity != "running" && !waiting && activity != "queued");
+    // Working on a reply: drives the "Thinking…" spinner under the conversation.
+    let busy = !settled && !waiting;
     json!({
+        "busy": busy,
         "title": w["title"].as_str().unwrap_or(""),
         "activity": activity,
         "waiting": waiting,
@@ -302,20 +376,163 @@ fn fetch(tile_id: String) {
     request("GET", &format!("/v2/works/{work}"), None, move |r| {
         IN_FLIGHT.with(|f| f.borrow_mut().remove(&id));
         match r {
-            Ok(d) => {
+            Ok(mut d) => {
                 let cursor = d["eventCursor"].as_i64().or(d["work"]["eventCursor"].as_i64()).unwrap_or(0);
                 LAST_CURSOR.with(|l| l.borrow_mut().insert(id.clone(), cursor));
-                let built = build(&d, &id);
-                let sending = all_data()[id.as_str()]["sending"].as_bool().unwrap_or(false);
-                update(&id, move |e| {
-                    *e = built;
-                    e["sending"] = json!(sending);
-                    e["error"] = Value::Null;
+                // Slim the events, then keep any streamed events newer than this response.
+                let mut events: Vec<Value> = d["events"].as_array().map(|a| a.iter().filter_map(slim).collect()).unwrap_or_default();
+                let got = events.iter().filter_map(|e| e["cursor"].as_i64()).max().unwrap_or(0).max(cursor);
+                let newer: Vec<Value> = MODEL.with(|m| {
+                    m.borrow()
+                        .get(&id)
+                        .and_then(|old| old["events"].as_array().cloned())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|e| e["cursor"].as_i64().unwrap_or(0) > got)
+                        .collect()
                 });
+                events.extend(newer);
+                d["events"] = Value::Array(events);
+                d["eventCursor"] = json!(got);
+                MODEL.with(|m| m.borrow_mut().insert(id.clone(), d));
+                rebuild(&id, true);
             }
             Err(err) => update(&id, move |e| e["error"] = json!(err)),
         }
     });
+}
+
+// Redraw a tile from its model; publishes only when something changed.
+fn rebuild(id: &str, clear_error: bool) {
+    let Some(d) = MODEL.with(|m| m.borrow().get(id).cloned()) else { return };
+    let mut built = build(&d, id);
+    let items = built["items"].as_array().cloned().unwrap_or_default();
+    let last_role = items.last().and_then(|i| i["role"].as_str()).unwrap_or("").to_string();
+    let streaming = items.last().map(|i| i["live"].as_bool().unwrap_or(false)).unwrap_or(false);
+    // Sticky "working" right after a send: until a reply follows the latest user message (or 90 s
+    // pass), the spinner stays; and always while a reply is streaming in.
+    let sent = SENT_AT.with(|s| s.borrow().get(id).copied()).unwrap_or(0.0);
+    if streaming || (now() - sent < 90.0 && (last_role == "user" || last_role == "tools") && !built["waiting"].as_bool().unwrap_or(false)) {
+        built["busy"] = json!(true);
+    } else if (last_role == "agent" || last_role == "question") && !streaming {
+        SENT_AT.with(|s| s.borrow_mut().remove(id));
+    }
+    let cur = all_data()[id].clone();
+    built["sending"] = json!(cur["sending"].as_bool().unwrap_or(false));
+    built["error"] = if clear_error { Value::Null } else { cur["error"].clone() };
+    if built != cur {
+        let id = id.to_string();
+        update(&id, move |e| *e = built);
+    }
+}
+
+// Follow a tile's Work live over its SSE endpoint; events land in the model as they happen.
+fn ensure_stream(id: &str, work: &str) {
+    let running = STREAMS.with(|s| s.borrow().get(id).map(|(w, _)| w == work).unwrap_or(false));
+    if running {
+        return;
+    }
+    stop_stream(id);
+    if now() < RETRY_AT.with(|r| r.borrow().get(id).copied().unwrap_or(0.0)) {
+        return;
+    }
+    let Some(k) = key() else { return };
+    let since = MODEL.with(|m| m.borrow().get(id).map(model_cursor)).unwrap_or(0);
+    // The key goes in over stdin (curl -K -) so it never shows in the process list.
+    let cmd = "exec curl -sN --keepalive-time 30 -K - -H 'Accept: text/event-stream' ${SINCE:+-H \"Last-Event-ID: $SINCE\"} \"https://agents.redo.builders/v2/works/$W/events\"";
+    let since_s = if since > 0 { since.to_string() } else { String::new() };
+    let tid = id.to_string();
+    let wk = work.to_string();
+    let stdin = format!("header = \"Authorization: Bearer {k}\"\n");
+    let proc = ab::spawn(json!(cmd), json!({ "shell": true, "stdin": stdin, "env": { "W": wk, "SINCE": since_s } }), move |what: ab::Proc, data: Value| {
+        match what {
+            ab::Proc::Stdout => on_stream_line(&tid, data.as_str().unwrap_or("")),
+            ab::Proc::Exit => {
+                STREAMS.with(|s| s.borrow_mut().remove(&tid));
+                // Reconnect in a couple of seconds (tick does it) and catch up on what was missed.
+                RETRY_AT.with(|r| r.borrow_mut().insert(tid.clone(), now() + 2.0));
+                REFETCH_AT.with(|r| r.borrow_mut().insert(tid.clone(), now() + 0.5));
+            }
+            _ => {}
+        }
+    });
+    STREAMS.with(|s| s.borrow_mut().insert(id.to_string(), (work.to_string(), proc)));
+}
+
+fn stop_stream(id: &str) {
+    if let Some((_, p)) = STREAMS.with(|s| s.borrow_mut().remove(id)) {
+        p.kill();
+    }
+}
+
+fn on_stream_line(id: &str, line: &str) {
+    let Some(json) = line.strip_prefix("data:") else { return };
+    let Ok(e) = json.trim().parse::<Value>() else { return };
+    let ty = e["type"].as_str().unwrap_or("").to_string();
+    let cursor = e["cursor"].as_i64().unwrap_or(0);
+    if let Some(s) = slim(&e) {
+        let added = MODEL.with(|m| {
+            let mut m = m.borrow_mut();
+            let Some(model) = m.get_mut(id) else { return false };
+            if cursor <= model_cursor(model) {
+                return false;
+            }
+            if let Some(a) = model["events"].as_array_mut() {
+                a.push(s);
+            }
+            true
+        });
+        if added {
+            DIRTY.with(|d| d.borrow_mut().insert(id.to_string()));
+        }
+    } else {
+        MODEL.with(|m| {
+            if let Some(model) = m.borrow_mut().get_mut(id) {
+                if cursor > model["eventCursor"].as_i64().unwrap_or(0) {
+                    model["eventCursor"] = json!(cursor);
+                }
+            }
+        });
+    }
+    if !is_drawn_only(&ty) {
+        // Messages or status may have changed: refetch the Work shortly (one fetch per burst).
+        let when = now() + 1.2;
+        REFETCH_AT.with(|r| {
+            let mut r = r.borrow_mut();
+            let e = r.entry(id.to_string()).or_insert(when);
+            if *e > when {
+                *e = when;
+            }
+        });
+    }
+}
+
+// Every 120 ms: publish tiles whose model changed, run due refetches; about once a second keep
+// streams up and reconcile with a full fetch now and then.
+fn fast_tick() {
+    let dirty: Vec<String> = DIRTY.with(|d| d.borrow_mut().drain().collect());
+    for id in dirty {
+        rebuild(&id, false);
+    }
+    let t = now();
+    let due: Vec<String> = REFETCH_AT.with(|r| {
+        let mut r = r.borrow_mut();
+        let due: Vec<String> = r.iter().filter(|(_, w)| **w <= t).map(|(k, _)| k.clone()).collect();
+        for k in &due {
+            r.remove(k);
+        }
+        due
+    });
+    for id in due {
+        fetch(id);
+    }
+    let n = TICKS.with(|c| {
+        *c.borrow_mut() += 1;
+        *c.borrow()
+    });
+    if n % 8 == 0 {
+        tick();
+    }
 }
 
 fn tick() {
@@ -326,14 +543,24 @@ fn tick() {
         if t["work"].as_str().is_none() {
             continue;
         }
-        let d = &data[id.as_str()];
-        let settled = d["settled"].as_bool().unwrap_or(false);
+        let work = t["work"].as_str().unwrap_or("").to_string();
+        // Live updates come over the stream; a full fetch reconciles once a minute (or right away if
+        // there's no model yet).
+        let has_model = MODEL.with(|m| m.borrow().contains_key(&id));
+        if has_model {
+            ensure_stream(&id, &work);
+        }
         let last = LAST_FETCH.with(|l| l.borrow().get(&id).copied().unwrap_or(0.0));
-        // Live while the agent works or someone just sent; every 30 s once it's settled.
-        let every = if !settled || d["sending"].as_bool().unwrap_or(false) { 2.5 } else { 30.0 };
-        if t_now - last >= every {
+        if !has_model || t_now - last >= 60.0 {
             fetch(id);
         }
+    }
+    // Stop streams for closed tiles.
+    let open_ids: Vec<String> = redo_tiles().iter().filter_map(|t| t["id"].as_str().map(|s| s.to_string())).collect();
+    let stale: Vec<String> = STREAMS.with(|s| s.borrow().keys().filter(|k| !open_ids.contains(k)).cloned().collect());
+    for id in stale {
+        stop_stream(&id);
+        MODEL.with(|m| m.borrow_mut().remove(&id));
     }
     // Drop data for closed tiles.
     let ids: Vec<String> = redo_tiles().iter().filter_map(|t| t["id"].as_str().map(|s| s.to_string())).collect();
@@ -388,14 +615,21 @@ fn send(args: &Value) {
         return;
     }
     let Some(t) = tile(&id) else { return };
-    PENDING.with(|p| p.borrow_mut().entry(id.clone()).or_default().push(text.clone()));
+    SENT_AT.with(|s| s.borrow_mut().insert(id.clone(), now()));
+    let pi = PENDING.with(|p| {
+        let mut p = p.borrow_mut();
+        let list = p.entry(id.clone()).or_default();
+        list.push(text.clone());
+        list.len() - 1
+    });
     let shown = text.clone();
     update(&id, move |e| {
         e["sending"] = json!(true);
+        e["busy"] = json!(true);
         e["error"] = Value::Null;
         let mut items = e["items"].as_array().cloned().unwrap_or_default();
-        let k = items.len();
-        items.push(json!({ "k": k, "role": "user", "who": "You", "text": shown, "pending": true }));
+        // Same key build() gives it, so the bubble stays put when the next poll confirms it.
+        items.push(json!({ "k": format!("p:{pi}:{}", clip(&shown, 24)), "role": "user", "who": "You", "text": shown, "pending": true }));
         e["items"] = Value::Array(items);
     });
     let done_id = id.clone();
@@ -403,8 +637,7 @@ fn send(args: &Value) {
         match r {
             Ok(_) => {
                 update(&done_id, |e| e["sending"] = json!(false));
-                // Look again soon, then keep polling while it runs.
-                LAST_FETCH.with(|l| l.borrow_mut().insert(done_id.clone(), 0.0));
+                // The stream shows the reply as it comes; one fetch confirms the sent message.
                 let again = done_id.clone();
                 ab::after(800, move || fetch(again));
             }
@@ -477,6 +710,6 @@ fn init() {
         for t in redo_tiles() {
             fetch(t["id"].as_str().unwrap_or("").to_string());
         }
-        ab::every(1000, || tick());
+        ab::every(120, || fast_tick());
     });
 }
