@@ -63,7 +63,12 @@ fn init() {
         check();
         // A timer, not a scroll handler: reading the app's inspect state on every scroll event made
         // scrolling lag.
-        ab::every(1000, || check());
+        // Only the full-screen chat shows the pinned prompt, so skip the (costly) inspect read otherwise.
+        ab::every(2000, || {
+            if ab::context()["state"]["tile_focus"].as_bool() == Some(true) {
+                check();
+            }
+        });
     });
     ab::on("select", |_, _| check());
     ab::on("chat.message", |_, _| check());
