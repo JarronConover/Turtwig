@@ -45,6 +45,33 @@ impl TextSelectionScopeId {
     }
 }
 
+/// A selection root: a subtree a selection stays inside. A drag that starts on
+/// text in one root takes in only that root's text, however far it goes, so two
+/// tiles side by side never share a selection. Nested roots: the innermost one
+/// the text sits in is its root. Unlike a scope, a root needs no activation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TextSelectionRootId(u64);
+
+impl TextSelectionRootId {
+    /// A root with a caller-chosen identity, stable across frames.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// A root identified by a stable key (an element path, say).
+    pub fn from_key(key: &str) -> Self {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+
+    /// The identity this root was made with.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// Stable participant-defined identity for virtualized participant content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TextSelectionContentKey(u64);
@@ -219,6 +246,7 @@ pub struct TextSelectionRegistration {
     bounds: Bounds<Pixels>,
     scroll_offset: Point<Pixels>,
     scope: TextSelectionScopeId,
+    root: Option<TextSelectionRootId>,
     document_order: u64,
     text_bounds: Vec<Bounds<Pixels>>,
     self_scroll: bool,
@@ -234,6 +262,7 @@ impl TextSelectionRegistration {
             bounds,
             scroll_offset: Point::default(),
             scope: TextSelectionScopeId::default(),
+            root: None,
             document_order: 0,
             text_bounds: Vec::new(),
             self_scroll: false,
@@ -290,6 +319,17 @@ impl TextSelectionRegistration {
     pub fn with_scroll_offset(mut self, scroll_offset: Point<Pixels>) -> Self {
         self.scroll_offset = scroll_offset;
         self
+    }
+
+    /// Sets the selection root the text belongs to.
+    pub fn with_root(mut self, root: TextSelectionRootId) -> Self {
+        self.root = Some(root);
+        self
+    }
+
+    /// Returns the selection root the text belongs to, if any.
+    pub const fn root(&self) -> Option<TextSelectionRootId> {
+        self.root
     }
 
     /// Sets the opaque selection scope.
@@ -842,6 +882,9 @@ impl TextSelectionHandle {
         if let Some(scope) = current_text_selection_scope(window.window_handle().window_id(), cx) {
             registration.scope = scope;
         }
+        if let Some(root) = current_text_selection_root(window.window_handle().window_id(), cx) {
+            registration.root = Some(root);
+        }
         let Some(state) = WindowSelectionState::existing(window, cx) else {
             return;
         };
@@ -1137,6 +1180,8 @@ struct WindowSelectionState {
     /// [`WindowSelectionState::register_quietly`].
     participants: RefCell<HashMap<EntityId, ParticipantRegistration>>,
     active_scope: TextSelectionScopeId,
+    /// The root the current selection started in; text outside it stays out.
+    active_root: Option<TextSelectionRootId>,
     anchor: Option<SelectionEndpoint>,
     cursor: Option<SelectionEndpoint>,
     pending_extension_anchor: Option<SelectionEndpoint>,
@@ -1472,6 +1517,7 @@ impl WindowSelectionState {
         self.stop_anchor_auto_scroll(cx);
         self.anchor = None;
         self.cursor = None;
+        self.active_root = None;
         self.pending_extension_anchor = None;
         self.is_selecting = false;
         self.did_hit_text = false;
@@ -1629,7 +1675,10 @@ impl WindowSelectionState {
         let mut end: Option<(u64, Bounds<Pixels>, bool)> = None;
         for registration in self.participants.borrow().values() {
             let geometry = &registration.registration;
-            if geometry.scope != self.active_scope || registration.participant.upgrade().is_none() {
+            if geometry.scope != self.active_scope
+                || !self.in_root(geometry)
+                || registration.participant.upgrade().is_none()
+            {
                 continue;
             }
             let Some((edge_start, edge_end)) = geometry.selection_edges else {
@@ -1685,6 +1734,7 @@ impl WindowSelectionState {
         let others = participants.iter().filter(|(id, registration)| {
             **id != participant
                 && registration.registration.scope == self.active_scope
+                && self.in_root(&registration.registration)
                 && registration.registration.selection_edges.is_some()
                 && registration.participant.upgrade().is_some()
         });
@@ -2017,7 +2067,16 @@ impl WindowSelectionState {
         if !extend && !already_prepared {
             self.clear(cx);
         }
+        if !extend {
+            // A fresh gesture may start in any root; the one its text sits in then holds it.
+            self.active_root = None;
+        }
         let endpoint = self.endpoint(position, window.as_deref(), cx);
+        if !extend {
+            self.active_root = endpoint
+                .entity_id()
+                .and_then(|id| self.participants.borrow().get(&id).and_then(|r| r.registration.root));
+        }
         let focus_participant = endpoint
             .inside
             .then(|| endpoint.participant.clone())
@@ -2071,6 +2130,7 @@ impl WindowSelectionState {
 
         for registration in self.participants.borrow().values() {
             if registration.registration.scope != self.active_scope
+                || !self.in_root(&registration.registration)
                 || registration.participant.upgrade().is_none()
             {
                 continue;
@@ -2169,6 +2229,7 @@ impl WindowSelectionState {
                 continue;
             };
             let participant_snapshot = (registration.registration.scope == self.active_scope
+                && self.in_root(&registration.registration)
                 && self.participates(*id, registration)
                 && single_participant.is_none_or(|single| single == *id))
             .then_some(snapshot)
@@ -2207,6 +2268,12 @@ impl WindowSelectionState {
         } else {
             TextSelectionCoverage::FromStart
         }
+    }
+
+    /// Whether text takes part in the current selection: any text until a
+    /// gesture starts in a root, then only that root's.
+    fn in_root(&self, registration: &TextSelectionRegistration) -> bool {
+        self.active_root.is_none() || registration.root == self.active_root
     }
 
     fn single_participant(&self) -> Option<EntityId> {
@@ -2422,6 +2489,62 @@ fn pop_text_selection_scope(window_id: gpui::WindowId, cx: &mut App) {
     }
 }
 
+#[derive(Default)]
+struct TextSelectionRootStacks(HashMap<gpui::WindowId, Vec<TextSelectionRootId>>);
+
+impl Global for TextSelectionRootStacks {}
+
+fn push_text_selection_root(window_id: gpui::WindowId, root: TextSelectionRootId, cx: &mut App) {
+    if !cx.has_global::<TextSelectionRootStacks>() {
+        cx.set_global(TextSelectionRootStacks::default());
+    }
+    cx.global_mut::<TextSelectionRootStacks>()
+        .0
+        .entry(window_id)
+        .or_default()
+        .push(root);
+}
+
+fn pop_text_selection_root(window_id: gpui::WindowId, cx: &mut App) {
+    let stacks = &mut cx.global_mut::<TextSelectionRootStacks>().0;
+    let remove_stack = stacks.get_mut(&window_id).is_some_and(|stack| {
+        stack.pop();
+        stack.is_empty()
+    });
+    if remove_stack {
+        stacks.remove(&window_id);
+    }
+}
+
+fn current_text_selection_root(
+    window_id: gpui::WindowId,
+    cx: &App,
+) -> Option<TextSelectionRootId> {
+    cx.has_global::<TextSelectionRootStacks>()
+        .then(|| {
+            cx.global::<TextSelectionRootStacks>()
+                .0
+                .get(&window_id)
+                .and_then(|stack| stack.last().copied())
+        })
+        .flatten()
+}
+
+fn with_text_selection_root<T>(
+    window_id: gpui::WindowId,
+    root: TextSelectionRootId,
+    cx: &mut App,
+    callback: impl FnOnce(&mut App) -> T,
+) -> T {
+    push_text_selection_root(window_id, root, cx);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(cx)));
+    pop_text_selection_root(window_id, cx);
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 fn current_text_selection_scope(
     window_id: gpui::WindowId,
     cx: &App,
@@ -2585,6 +2708,16 @@ impl TextSelection {
         }
     }
 
+    /// The root the window's current selection started in, if it started in one.
+    pub fn active_root(window: &Window, cx: &App) -> Option<TextSelectionRootId> {
+        WindowSelectionState::existing(window, cx).and_then(|state| state.read(cx).active_root)
+    }
+
+    /// Whether the window holds a geometry selection (two endpoints), without touching it.
+    pub fn has_geometry_selection(window: &Window, cx: &App) -> bool {
+        WindowSelectionState::existing(window, cx).is_some_and(|state| state.read(cx).snapshot().is_some())
+    }
+
     /// Activates the opaque selection scope for this window.
     pub fn activate_scope(scope: TextSelectionScopeId, window: &mut Window, cx: &mut App) {
         let Some(state) = WindowSelectionState::existing(window, cx) else {
@@ -2615,14 +2748,47 @@ pub(crate) fn text_selection_scope(
     element: impl IntoElement,
 ) -> impl IntoElement {
     TextSelectionScopeMarker {
-        scope,
+        scope: Some(scope),
+        root: None,
+        element: element.into_element(),
+    }
+}
+
+/// Marks `element`'s subtree as a selection root (see [`TextSelectionRootId`]).
+/// Works on any element, [`gpui::AnyElement`] included, without changing its layout.
+pub fn text_selection_root(
+    root: TextSelectionRootId,
+    element: impl IntoElement,
+) -> impl IntoElement {
+    TextSelectionScopeMarker {
+        scope: None,
+        root: Some(root),
         element: element.into_element(),
     }
 }
 
 struct TextSelectionScopeMarker<E> {
-    scope: TextSelectionScopeId,
+    scope: Option<TextSelectionScopeId>,
+    root: Option<TextSelectionRootId>,
     element: E,
+}
+
+/// Runs `callback` with the marker's scope and root (whichever are set) current.
+fn with_text_selection_markers<T>(
+    window_id: gpui::WindowId,
+    scope: Option<TextSelectionScopeId>,
+    root: Option<TextSelectionRootId>,
+    cx: &mut App,
+    callback: impl FnOnce(&mut App) -> T,
+) -> T {
+    match (scope, root) {
+        (Some(scope), Some(root)) => with_text_selection_scope(window_id, scope, cx, |cx| {
+            with_text_selection_root(window_id, root, cx, callback)
+        }),
+        (Some(scope), None) => with_text_selection_scope(window_id, scope, cx, callback),
+        (None, Some(root)) => with_text_selection_root(window_id, root, cx, callback),
+        (None, None) => callback(cx),
+    }
 }
 
 impl<E: Element> IntoElement for TextSelectionScopeMarker<E> {
@@ -2653,7 +2819,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_text_selection_markers(window_id, self.scope, self.root, cx, |cx| {
             self.element.request_layout(id, inspector_id, window, cx)
         })
     }
@@ -2668,7 +2834,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_text_selection_markers(window_id, self.scope, self.root, cx, |cx| {
             self.element
                 .prepaint(id, inspector_id, bounds, request_layout, window, cx)
         })
@@ -2685,7 +2851,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_text_selection_markers(window_id, self.scope, self.root, cx, |cx| {
             self.element.paint(
                 id,
                 inspector_id,
@@ -3256,23 +3422,35 @@ mod tests {
             document_order: u64,
             cx: &mut gpui::App,
         ) {
+            self.register_in_root(selection_state, y, scope, document_order, None, cx);
+        }
+
+        fn register_in_root(
+            &self,
+            selection_state: &mut WindowSelectionState,
+            y: f32,
+            scope: TextSelectionScopeId,
+            document_order: u64,
+            root: Option<TextSelectionRootId>,
+            cx: &mut gpui::App,
+        ) {
             let bounds = Bounds::new(point(px(0.), px(y)), size(px(100.), px(10.)));
-            selection_state.register_participant(
-                self.selection.clone(),
-                TextSelectionRegistration::new(
-                    Hitbox {
-                        id: HitboxId::placeholder(),
-                        bounds,
-                        content_mask: ContentMask { bounds },
-                        behavior: HitboxBehavior::Normal,
-                    },
+            let mut registration = TextSelectionRegistration::new(
+                Hitbox {
+                    id: HitboxId::placeholder(),
                     bounds,
-                )
-                .with_scope(scope)
-                .with_document_order(document_order)
-                .with_text_bounds(vec![bounds]),
-                cx,
-            );
+                    content_mask: ContentMask { bounds },
+                    behavior: HitboxBehavior::Normal,
+                },
+                bounds,
+            )
+            .with_scope(scope)
+            .with_document_order(document_order)
+            .with_text_bounds(vec![bounds]);
+            if let Some(root) = root {
+                registration = registration.with_root(root);
+            }
+            selection_state.register_participant(self.selection.clone(), registration, cx);
         }
     }
 
@@ -3774,6 +3952,91 @@ mod tests {
 
             selection_state.end(cx);
             assert!(!selection_state.is_selecting());
+        });
+    }
+
+    /// Two tiles, each a root with two lines of text, one above the other.
+    fn two_rooted_tiles(
+        selection_state: &mut WindowSelectionState,
+        cx: &mut gpui::App,
+    ) -> [FakeParticipant; 4] {
+        let (a, b) = (TextSelectionRootId::new(1), TextSelectionRootId::new(2));
+        let tiles = [
+            FakeParticipant::new("a1", cx),
+            FakeParticipant::new("a2", cx),
+            FakeParticipant::new("b1", cx),
+            FakeParticipant::new("b2", cx),
+        ];
+        for (ix, (participant, root)) in tiles.iter().zip([a, a, b, b]).enumerate() {
+            participant.register_in_root(
+                selection_state,
+                ix as f32 * 20.,
+                TextSelectionScopeId::default(),
+                ix as u64,
+                Some(root),
+                cx,
+            );
+        }
+        tiles
+    }
+
+    #[gpui::test]
+    fn a_drag_from_one_root_into_another_takes_only_the_first_roots_text(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut selection_state = WindowSelectionState::default();
+            let _tiles = two_rooted_tiles(&mut selection_state, cx);
+
+            // From tile A's first line down past tile B's last line: all of A, none of B.
+            selection_state.begin(point(px(1.), px(1.)), false, cx);
+            selection_state.update(point(px(50.), px(75.)), cx);
+            assert_eq!(selection_state.active_root, Some(TextSelectionRootId::new(1)));
+            assert_eq!(selection_state.selected_text(cx), "a1\na2");
+            selection_state.end(cx);
+            assert_eq!(selection_state.selected_text(cx), "a1\na2", "copy after the drag");
+
+            // A shift-click into tile B extends the same selection, still clamped to A.
+            selection_state.begin(point(px(50.), px(65.)), true, cx);
+            selection_state.end(cx);
+            assert_eq!(selection_state.selected_text(cx), "a1\na2");
+
+            // A fresh drag that starts in tile B and runs up into A takes only B.
+            selection_state.begin(point(px(99.), px(69.)), false, cx);
+            selection_state.update(point(px(0.), px(0.)), cx);
+            assert_eq!(selection_state.active_root, Some(TextSelectionRootId::new(2)));
+            assert_eq!(selection_state.selected_text(cx), "b1\nb2");
+            selection_state.end(cx);
+
+            selection_state.clear(cx);
+            assert_eq!(selection_state.active_root, None);
+        });
+    }
+
+    #[gpui::test]
+    fn text_outside_any_root_stays_out_of_a_rooted_selection(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut selection_state = WindowSelectionState::default();
+            let rooted = FakeParticipant::new("rooted", cx);
+            let loose = FakeParticipant::new("loose", cx);
+            rooted.register_in_root(
+                &mut selection_state,
+                0.,
+                TextSelectionScopeId::default(),
+                0,
+                Some(TextSelectionRootId::from_key("tile-a")),
+                cx,
+            );
+            loose.register(&mut selection_state, 20., TextSelectionScopeId::default(), 1, cx);
+
+            selection_state.begin(point(px(1.), px(1.)), false, cx);
+            selection_state.update(point(px(99.), px(29.)), cx);
+            assert_eq!(selection_state.selected_text(cx), "rooted");
+            selection_state.end(cx);
+
+            // Started on loose text, a selection has no root and still runs across everything.
+            selection_state.begin(point(px(99.), px(29.)), false, cx);
+            selection_state.update(point(px(1.), px(1.)), cx);
+            assert_eq!(selection_state.active_root, None);
+            assert_eq!(selection_state.selected_text(cx), "rooted\nloose");
         });
     }
 
