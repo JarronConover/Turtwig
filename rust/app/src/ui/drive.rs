@@ -63,6 +63,8 @@ pub(crate) struct Ui {
     /** Each virtual list's (bottom aligned, overdraw, follow), to rebuild it when they change. */
     pub lists: HashMap<String, (bool, u32, bool)>,
     pub fonts: HashSet<String>,
+    /** Every selection root drawn (`selection_root`, transcripts, terminals, markdown) by its id's hash. */
+    pub selection_roots: HashMap<u64, String>,
 }
 
 thread_local! {
@@ -471,9 +473,17 @@ pub(crate) fn inspect(ws: &Workspace, window: &Window, cx: &App) -> Value {
         .iter()
         .map(|(id, tip, spec, ctx)| json!({"id": id, "label": tip, "items": menu_json(ws.menu_entries(spec, ctx))}))
         .collect();
+    // The text selection: whether there is one, and the root node it started in (null: none, or text
+    // outside any root).
+    let root = gpui_kit::base::TextSelection::active_root(window, cx);
+    let selection = ui(|u| json!({
+        "active": gpui_kit::base::TextSelection::has_geometry_selection(window, cx),
+        "root": root.and_then(|r| u.selection_roots.get(&r.raw()).cloned()),
+    }));
     ui(|u| {
         json!({
             "focused": u.focused_last,
+            "selection": selection,
             "hovered": u.hovered.iter().collect::<Vec<_>>(),
             "forced_hover": u.forced_hover,
             "open_menu": u.menu.as_ref().map(|m| m.id.clone()),

@@ -418,7 +418,7 @@ fn schema() -> Value {
                     "as": {"type": "string"}, "key": {"type": "string"}, "props": {"type": "object"},
                     "style": {"$ref": "#/definitions/style"},
                     "on": {"type": "object", "properties": {"key": {"type": ["object", "array"]}}, "additionalProperties": {"$ref": "#/definitions/action"}},
-                    "menu": {"type": "array"}, "menu_on": {"enum": ["right_click", "click"]}, "tooltip": {"type": "string"},
+                    "menu": {"type": "array"}, "menu_on": {"enum": ["right_click", "click"]}, "tooltip": {"type": "string"}, "selection_root": {"type": "boolean"},
                     "focusable": {"type": ["boolean", "string"]}, "layer": {"type": ["string", "number"]},
                     "animate": {"type": "object"}, "transition": {"type": "object"},
                     "children": {"$ref": "#/definitions/node"}
