@@ -39,6 +39,14 @@ guide: your agents, an optional Coder workspace to run chats on (it installs
 Turtwig there for you), and a private repo for backups. "Set up Turtwig…" in the
 command palette (⌘K) brings the guide back; `bin/setup` is what it runs.
 
+A fresh install looks and works like Jarron's: `user-settings/` (settings.jsonc,
+scripts/, ui-state.json) is built into the app and seeded into
+`~/.agent-box/state/settings` on first launch, with home paths as `~` and no
+chats or shells from his machine. Files already there are never overwritten,
+so `git pull` and a rebuild bring a newer baseline without touching yours;
+"Reset to Turtwig baseline" in the palette backs your files up to
+`settings.bak-<stamp>/` and adopts it.
+
 ## Branches
 
 This repo holds only the tooling (`main`). The backups live in a separate

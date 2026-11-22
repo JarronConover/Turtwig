@@ -109,6 +109,15 @@ fn save(m: &BTreeMap<String, i64>) {
     ab::set("tile_slots", obj);
 }
 
+/** The home folder (`$HOME`), or `~` for the app to expand. */
+fn home() -> String {
+    ab::call_sync("env", json!({"name": "HOME"}))
+        .ok()
+        .and_then(|v| v.as_str().or(v.get("value").and_then(|x| x.as_str())).map(|s| s.to_string()))
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "~".to_string())
+}
+
 fn init() {
     ab::action("tiles.move", |args, _| {
         let dragged = args["dragged"].as_str().unwrap_or("").to_string();
@@ -130,7 +139,7 @@ fn init() {
     });
     // A new shell tile in ~/redo: its own terminal key, so it never shares a screen with another tile.
     ab::action("tiles.new_terminal", |args, _| {
-        let cwd = args["cwd"].as_str().unwrap_or("/Users/jarron.conover/redo").to_string();
+        let cwd = args["cwd"].as_str().map(str::to_string).unwrap_or_else(|| format!("{}/redo", home()));
         let now = ab::context()["now"].as_f64().unwrap_or(0.0);
         let id = format!("t{}", (now * 1000.0) as i64 % 100_000_000);
         let mut list = term_tiles();
@@ -204,7 +213,7 @@ fn init() {
             .as_array()
             .and_then(|w| w.iter().find(|w| w["repo"].as_str() == Some("redo") && w["is_primary"].as_bool() == Some(true)))
             .and_then(|w| w["path"].as_str().map(|s| s.to_string()))
-            .unwrap_or("/Users/jarron.conover/redo".into());
+            .unwrap_or_else(|| format!("{}/redo", home()));
         mark_pending("Starting agent…");
         ab::run(json!({ "do": "chat.new", "dir": dir, "model": "claude-opus-5-5" }));
     });

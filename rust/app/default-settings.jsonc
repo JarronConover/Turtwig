@@ -2471,6 +2471,7 @@
     { "label": "Take the tour", "do": [{ "do": "state.set", "key": "setup_tour", "value": 0 }, { "do": "state.set", "key": "setup_step", "value": "tour" }] },
     { "label": "Redesign the app (open the designer)", "do": { "do": "state.set", "key": "designer_open", "value": true } },
     { "label": "Undo the last design change", "do": "settings.undo" },
+    { "label": "Reset to Turtwig baseline", "do": "settings.reset_baseline" },
     { "label": "New chat here", "if": ".selected.worktree", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}" } },
     { "label": "New Codex chat here", "if": ".selected.worktree", "do": { "do": "chat.new", "dir": "{{ .selected.worktree.path }}", "agent": "codex" } },
     { "label": "New orchestrator chat in redo", "do": { "do": "chat.new", "repo": "redo", "kind": "orchestrator" } },
