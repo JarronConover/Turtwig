@@ -89,7 +89,8 @@ fn init() {
         let tile = args["tile"].as_str().unwrap_or("").to_string();
         let item = args["item"].as_str().unwrap_or("");
         let dir = args["dir"].as_i64().unwrap_or(1);
-        let list = items(&tile);
+        // Only open lines are in the list (checked ones sit in Completed).
+        let list: Vec<Value> = items(&tile).into_iter().filter(|i| !i["done"].as_bool().unwrap_or(false)).collect();
         let Some(p) = list.iter().position(|i| i["id"].as_str() == Some(item)) else { return };
         let target = p as i64 + dir;
         if target < 0 {
@@ -159,16 +160,48 @@ fn init() {
             }
         });
     });
+    // Drag to reorder: move a line (with its sub-items) before or after another line; it takes the
+    // target's level, so it lands as that line's sibling.
+    ab::action("notes.reorder", |args, _| {
+        let tile = args["tile"].as_str().unwrap_or("").to_string();
+        let dragged = args["dragged"].as_str().unwrap_or("");
+        let item = dragged.rsplit(':').next().unwrap_or("").to_string();
+        let target = args["target"].as_str().unwrap_or("").to_string();
+        let after = args["zone"].as_str() == Some("after");
+        let list = items(&tile);
+        let Some(p) = list.iter().position(|i| i["id"].as_str() == Some(item.as_str())) else { return };
+        let (s, e) = family(&list, p);
+        if list[s..e].iter().any(|i| i["id"].as_str() == Some(target.as_str())) {
+            return; // can't drop a line inside its own sub-items
+        }
+        let mut moving: Vec<Value> = list[s..e].to_vec();
+        let mut rest: Vec<Value> = list[..s].iter().chain(list[e..].iter()).cloned().collect();
+        let Some(tp) = rest.iter().position(|i| i["id"].as_str() == Some(target.as_str())) else { return };
+        let target_level = rest[tp]["indent"].as_i64().unwrap_or(0);
+        let shift = target_level - moving[0]["indent"].as_i64().unwrap_or(0);
+        for m in &mut moving {
+            let lvl = m["indent"].as_i64().unwrap_or(0);
+            m["indent"] = json!((lvl + shift).clamp(0, 6));
+        }
+        let at = if after { family(&rest, tp).1 } else { tp };
+        for (k, m) in moving.into_iter().enumerate() {
+            rest.insert(at + k, m);
+        }
+        save(&tile, rest);
+    });
     ab::action("notes.toggle", |args, _| {
         let tile = args["tile"].as_str().unwrap_or("").to_string();
         let item = args["item"].as_str().unwrap_or("");
         let mut list = items(&tile);
         let Some(p) = list.iter().position(|i| i["id"].as_str() == Some(item)) else { return };
         let done = !list[p]["done"].as_bool().unwrap_or(false);
-        // Checking a parent checks its sub-items too (and unchecking unchecks them).
+        // Checking a parent checks its sub-items too (and unchecking unchecks them). `done_at` orders
+        // the Completed section, newest first.
+        let at = ab::context()["now"].as_f64().unwrap_or(0.0);
         let (start, end) = family(&list, p);
         for i in &mut list[start..end] {
             i["done"] = json!(done);
+            i["done_at"] = if done { json!(at) } else { Value::Null };
         }
         save(&tile, list);
     });
