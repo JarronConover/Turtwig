@@ -346,7 +346,8 @@ fn build(d: &Value, tile_id: &str) -> Value {
         items.push(json!({ "k": format!("p:{pi}:{}", clip(&s, 24)), "role": "user", "who": "You", "text": s, "pending": true }));
     }
     let n = items.len();
-    let items: Vec<Value> = items.into_iter().skip(n.saturating_sub(150)).collect();
+    // The newest 80 rows: the list draws every row (no virtual list), so it stays light.
+    let items: Vec<Value> = items.into_iter().skip(n.saturating_sub(80)).collect();
     let activity = w["activity"].as_str().unwrap_or("").to_string();
     let waiting = w["obligations"].as_array().map(|a| !a.is_empty()).unwrap_or(false) || activity.contains("attention");
     let settled = !w["terminal"].is_null() || (activity != "running" && !waiting && activity != "queued");
@@ -379,19 +380,19 @@ fn fetch(tile_id: String) {
             Ok(mut d) => {
                 let cursor = d["eventCursor"].as_i64().or(d["work"]["eventCursor"].as_i64()).unwrap_or(0);
                 LAST_CURSOR.with(|l| l.borrow_mut().insert(id.clone(), cursor));
-                // Slim the events, then keep any streamed events newer than this response.
-                let mut events: Vec<Value> = d["events"].as_array().map(|a| a.iter().filter_map(slim).collect()).unwrap_or_default();
-                let got = events.iter().filter_map(|e| e["cursor"].as_i64()).max().unwrap_or(0).max(cursor);
-                let newer: Vec<Value> = MODEL.with(|m| {
-                    m.borrow()
-                        .get(&id)
-                        .and_then(|old| old["events"].as_array().cloned())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|e| e["cursor"].as_i64().unwrap_or(0) > got)
-                        .collect()
-                });
-                events.extend(newer);
+                // Merge, never replace: the server returns a sliding window of events, so replacing
+                // the model with it made older rows vanish and reappear (the flicker). Union by cursor.
+                let fresh: Vec<Value> = d["events"].as_array().map(|a| a.iter().filter_map(slim).collect()).unwrap_or_default();
+                let got = fresh.iter().filter_map(|e| e["cursor"].as_i64()).max().unwrap_or(0).max(cursor);
+                let mut by_cursor: std::collections::BTreeMap<i64, Value> = std::collections::BTreeMap::new();
+                let old: Vec<Value> = MODEL.with(|m| m.borrow().get(&id).and_then(|o| o["events"].as_array().cloned()).unwrap_or_default());
+                for e in old.into_iter().chain(fresh.into_iter()) {
+                    by_cursor.insert(e["cursor"].as_i64().unwrap_or(0), e);
+                }
+                let mut events: Vec<Value> = by_cursor.into_values().collect();
+                if events.len() > 4000 {
+                    events.drain(..events.len() - 4000);
+                }
                 d["events"] = Value::Array(events);
                 d["eventCursor"] = json!(got);
                 MODEL.with(|m| m.borrow_mut().insert(id.clone(), d));
@@ -421,8 +422,19 @@ fn rebuild(id: &str, clear_error: bool) {
     built["sending"] = json!(cur["sending"].as_bool().unwrap_or(false));
     built["error"] = if clear_error { Value::Null } else { cur["error"].clone() };
     if built != cur {
+        // New rows or a growing reply: keep the list at its newest message (what follow used to do).
+        let grew = {
+            let a = built["items"].as_array().map(|a| a.len()).unwrap_or(0);
+            let b = cur["items"].as_array().map(|a| a.len()).unwrap_or(0);
+            let last_len = |v: &Value| v["items"].as_array().and_then(|a| a.last()).and_then(|i| i["text"].as_str()).map(|s| s.len()).unwrap_or(0);
+            a != b || last_len(&built) != last_len(&cur)
+        };
         let id = id.to_string();
+        let handle = format!("redo-{id}");
         update(&id, move |e| *e = built);
+        if grew {
+            ab::after(30, move || ab::run(json!({ "do": "ui.scroll", "handle": handle, "to": "bottom" })));
+        }
     }
 }
 

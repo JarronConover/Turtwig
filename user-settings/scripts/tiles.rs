@@ -73,6 +73,33 @@ fn assign_colors(m: &BTreeMap<String, i64>) {
     }
 }
 
+fn open_count() -> i64 {
+    let ctx = ab::context();
+    let chats = ctx["chats"].as_array().map(|a| a.iter().filter(|c| c["open"].as_bool() == Some(true)).count()).unwrap_or(0);
+    let terms = ctx["state"]["term_tiles"].as_array().map(|a| a.len()).unwrap_or(0);
+    (chats + terms) as i64
+}
+
+// state.tile_pending {label, at, count}: shown as a placeholder tile until a new tile appears (the
+// open count grows) or 60 s pass.
+fn mark_pending(label: &str) {
+    let now = ab::context()["now"].as_f64().unwrap_or(0.0);
+    ab::set("tile_pending", json!({ "label": label, "at": now, "count": open_count() }));
+}
+
+fn check_pending() {
+    let ctx = ab::context();
+    let p = &ctx["state"]["tile_pending"];
+    if p.is_null() {
+        return;
+    }
+    let now = ctx["now"].as_f64().unwrap_or(0.0);
+    let landed = open_count() > p["count"].as_i64().unwrap_or(0);
+    if landed || now - p["at"].as_f64().unwrap_or(0.0) > 60.0 {
+        ab::set("tile_pending", Value::Null);
+    }
+}
+
 fn save(m: &BTreeMap<String, i64>) {
     assign_colors(m);
     let mut obj = json!({});
@@ -136,8 +163,8 @@ fn init() {
     // thumb's position along its track; the page offset follows from it (same math as the grid's jq).
     ab::action("tiles.wheel", |args, _| {
         let ctx = ab::context();
-        // The tile page moves only while scroll lock is on.
-        if ctx["state"]["tile_focus"].as_bool() == Some(true) || ctx["state"]["scroll_lock"].as_bool() != Some(true) {
+        // Title bars, empty cells and the gutter scroll the page; scroll lock on freezes it.
+        if ctx["state"]["tile_focus"].as_bool() == Some(true) || ctx["state"]["scroll_lock"].as_bool() == Some(true) {
             return;
         }
         let dy = args["dy"].as_f64().unwrap_or(0.0);
@@ -163,11 +190,27 @@ fn init() {
         let cur = ctx["state"]["grid_thumb"].as_f64().unwrap_or(0.0).clamp(0.0, track);
         // Wheel deltas arrive large and spiky (momentum bursts up to thousands of points), so each step is
         // capped and scaled down; with the grid's short ease on `top` that reads as a smooth glide.
-        let step = dy.clamp(-260.0, 260.0) * 0.45;
+        // Smaller, evenly capped steps: many small eased moves read smoother than a few big ones.
+        let step = dy.clamp(-220.0, 220.0) * 1.1;
         let next = (cur - step * track / max).clamp(0.0, track);
         if (next - cur).abs() > 0.01 {
             ab::set("grid_thumb", json!(next));
         }
+    });
+    // A new Claude agent in ~/redo on Opus 5.5, with a "Starting agent…" placeholder tile until it lands.
+    ab::action("tiles.new_agent", |_, _| {
+        let ctx = ab::context();
+        let dir = ctx["worktrees"]
+            .as_array()
+            .and_then(|w| w.iter().find(|w| w["repo"].as_str() == Some("redo") && w["is_primary"].as_bool() == Some(true)))
+            .and_then(|w| w["path"].as_str().map(|s| s.to_string()))
+            .unwrap_or("/Users/jarron.conover/redo".into());
+        mark_pending("Starting agent…");
+        ab::run(json!({ "do": "chat.new", "dir": dir, "model": "claude-opus-5-5" }));
+    });
+    // Other scripts (the orchestrator) show the same placeholder.
+    ab::action("tiles.pending", |args, _| {
+        mark_pending(args["label"].as_str().unwrap_or("Starting…"));
     });
     ab::action("tiles.open_designer", |_, _| {
         ab::set("designer_open", json!(true));
@@ -186,6 +229,7 @@ fn init() {
         ab::run(json!("tiles.pin_all"));
         // Pin the designer's cell whenever it opens (⌘⇧D, the palette button or the New tile menu).
         ab::every(700, || {
+            check_pending();
             let ctx = ab::context();
             let open = ctx["state"]["designer_open"].as_bool() == Some(true);
             let placed = ctx["state"]["tile_slots"]["term:designer"].is_i64();
@@ -202,5 +246,8 @@ fn init() {
             }
         });
     });
-    ab::on("chat.added", |_, _| ab::run(json!("tiles.pin_all")));
+    ab::on("chat.added", |_, _| {
+        ab::run(json!("tiles.pin_all"));
+        ab::after(300, check_pending);
+    });
 }
