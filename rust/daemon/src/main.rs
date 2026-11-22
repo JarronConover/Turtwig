@@ -9,6 +9,7 @@ mod diff;
 mod elsewhere;
 mod hosts;
 mod model;
+mod sdk;
 mod server;
 mod term;
 mod titles;

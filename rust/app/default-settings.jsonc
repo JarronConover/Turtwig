@@ -2644,6 +2644,8 @@
     // ---- Waiting chats ----
     // Choices when a waiting chat gives none (a permission prompt); every question shows when there are several.
     "waiting_options": ["Yes", "Yes, don't ask again", "No"], "waiting_all_questions": true,
+    // An SDK chat's permission card: allow once, always allow (when Claude Code offers a rule or mode to keep), deny.
+    "permission_options": ["Allow", "Always allow", "Deny"],
     // A permission prompt shows the command (or file, URL, pattern, plan) it asks about, up to this many lines.
     "waiting_detail_lines": 12,
     // A card of several questions sends its answers one key at a time, this far apart (keys sent at once
@@ -2777,6 +2779,10 @@
     // The message box while files are dragged over it.
     "composer_drop": { "border_color": "@accent", "background": "#488efc26" },
     "code_scroll": { "shift": true, "speed": 1, "shift_holds_transcript": true, "scrollbar": "hover" },
+    // A wide table scrolls sideways on its own, like a code block (false: it clips or scrolls as `markdown.table`
+    // says): shift (Shift + wheel scrolls it), speed, scrollbar (hover | always | scrolling | never; code_scroll's
+    // when unset). Columns keep their natural width up to `markdown.table_cell.max_width`, then their text wraps.
+    "table_scroll": { "shift": true, "speed": 1 },
     "list": { "gap": 22, "padding": [20, 28], "width": "full", "max_width": 780, "self": "center" },
     // New messages: "at_bottom" keeps you at the newest while you're there (scroll up and it stays put),
     // "always" jumps to each one, "never" doesn't move. Scrolled up, a chip offers to jump down (false hides it).
@@ -3254,6 +3260,10 @@
       "claude": {
         // --settings showThinkingSummaries: without it Claude Code logs thinking as empty blocks.
         "name": "Claude", "icon": "asterisk", "color": "@claude", "tab_icon": false,
+        // transport "sdk": chats run Claude Code's stream-json mode under the daemon (as VS Code does): messages,
+        // permissions, questions, model and mode are data, and replies stream in. "tui": the CLI in tmux, driven
+        // by keys. permission_mode: what a new SDK chat starts in (default, acceptEdits, plan, auto).
+        "transport": "sdk", "permission_mode": "default",
         "bin": "claude", "session": "assigned", "transcripts": "claude", "trust": "claude", "remote_control": true, "stop_elsewhere": true, "background_keys": ["C-b"],
         "new": ["{bin}", "--session-id", "{id}", "--remote-control", "{name}", "--settings", "{\"showThinkingSummaries\":true}", ["--model", "{model}"], ["{prompt}"]],
         "resume": ["{bin}", "--resume", "{session}", "--remote-control", "{name}", "--settings", "{\"showThinkingSummaries\":true}", ["--model", "{model}"]],

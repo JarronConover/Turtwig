@@ -62,11 +62,11 @@ pub const NODE_TYPES: &[(&str, &str)] = &[
     ("composer", "The built-in message box for a chat. `props.chat`, `props.placeholder`."),
     ("screen", "A chat's live terminal while its agent shows a screen of its own (`.chat.screen`, a menu like Claude Code's /artifacts): typing goes to the agent. `props.chat`."),
     ("waiting", "The built-in card for a chat waiting on a permission or question, with its answer buttons. `props.chat`."),
-    ("terminal", "The built-in terminal for a worktree. `props.path` (default the selected worktree). Look: settings `terminal`."),
+    ("terminal", "The built-in terminal for a worktree. `props.path` (default the selected worktree) shows its active tab; `props.id` shows one tab's own shell, started on first show if it doesn't exist (`props.cwd`, `props.command`: its folder and program, else the worktree's folder and a login shell), so several nodes can each have a shell; clicking one focuses it. Look: settings `terminal`."),
     ("attachments", "Preview chips for files attached to a chat but not sent yet (spinner while uploading, × to remove). `props.chat` (default the selected chat), `props.size`. Look: settings `chat.attachments`, `chat.attachment`."),
     ("diff", "The built-in diff of a worktree: a file list beside the changes. `props.path` (default the selected worktree), `props.base` (default `state.diff_base`: uncommitted | branch). Click a file to jump, a file header to collapse, a line number to open it in the editor. Look: settings `diff`."),
     ("resize_handle", "A drag handle that sets a numeric state value. `props.state` (key), `props.axis` x|y, `props.min` (80), `props.max` (2000), `props.default` (300, the size while the state is unset), `props.invert` (bool, for handles on the far edge). `on.double_click` works on it (e.g. a state.set back to a size)."),
-    ("(every node)", "Besides `type`, `props`, `style`, `children`: `id` (stable identity; listed in inspect.json `layout`), `for`/`as`/`key`, `if`, `on` (events: click, double_click, mouse_down, mouse_up, right_click, hover_start, hover_end, scroll (`.dx`/`.dy` added to the action), key ({KEY: action} or [{key, do}], while focused), focus, blur, click_outside, drop, drop_item, change, submit), `focusable` (true: takes keyboard focus; Enter/Space click it, Tab moves on; `.focused_node` is the focused node's id), `menu` (entries) with `menu_on` (right_click (default) | click), `tooltip`, `drag`, `drop_key`, `drop_zones`, `layer` (top | above | a number: paint above lower layers), `occlude`, `animate`, `motion`, `transition`, `region` (true: drawn as its own cached view, again only when what its expressions read changes or an animation inside it asks; a big area that changes on its own (a list, the transcript, a panel) as a region keeps the rest of the window still. Its size comes from its style, or its content's along its parent's direction; regions inside a region that redraws redraw with it)."),
+    ("(every node)", "Besides `type`, `props`, `style`, `children`: `id` (stable identity; listed in inspect.json `layout`), `for`/`as`/`key`, `if`, `on` (events: click, double_click, mouse_down, mouse_up, right_click, hover_start, hover_end, scroll (`.dx`/`.dy` added to the action), key ({KEY: action} or [{key, do}], while focused), focus, blur, click_outside, drop, drop_item, change, submit), `focusable` (true: takes keyboard focus; Enter/Space click it, Tab moves on; `.focused_node` is the focused node's id), `menu` (entries) with `menu_on` (right_click (default) | click), `tooltip`, `drag`, `drop_key`, `drop_zones`, `layer` (top | above | a number: paint above lower layers), `occlude`, `selection_root` (true: text selection and ⌘C stay inside this node: a drag from its text never takes in text outside it; `transcript`, `terminal` and selectable `markdown` nodes are roots on their own; the innermost root wins; inspect.json `ui.selection.root` names the one a selection is in), `animate`, `motion`, `transition`, `region` (true: drawn as its own cached view, again only when what its expressions read changes or an animation inside it asks; a big area that changes on its own (a list, the transcript, a panel) as a region keeps the rest of the window still. Its size comes from its style, or its content's along its parent's direction; regions inside a region that redraws redraw with it)."),
     ("<Component>", "Any name under `components`; its `props` are available inside as `.props`. `style` merges into its root's, and `id`, `on`, `menu`, `tooltip`, `drag`, `drop_key`, `drop_zones`, `layer`, `animate`, `motion` and `transition` set on the use replace its root's."),
 ];
 
@@ -206,7 +206,7 @@ impl Workspace {
     /** A component as one use of it sets it up: the use's `style` merged into its root's, and the use's own
     `id`, `on`, `menu` and the rest in place of its root's. Built once per use until the settings change. */
     fn component_use(&mut self, kind: &str, obj: &Map<String, Value>) -> Option<std::rc::Rc<Value>> {
-        const OWN: [&str; 14] = ["id", "animate", "motion", "transition", "tooltip", "on", "menu", "menu_on", "focusable", "drag", "drop_key", "drop_zones", "layer", "region"];
+        const OWN: [&str; 15] = ["id", "animate", "motion", "transition", "tooltip", "on", "menu", "menu_on", "focusable", "drag", "drop_key", "drop_zones", "layer", "region", "selection_root"];
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for k in std::iter::once("style").chain(OWN) {
             k.hash(&mut h);
@@ -275,7 +275,8 @@ impl Workspace {
             None => path.to_string(),
         };
         if obj.get("region").and_then(Value::as_bool) == Some(true) {
-            return vec![self.place_region(obj, ctx, path, &id, &st, cx)];
+            let el = self.place_region(obj, ctx, path, &id, &st, cx);
+            return vec![if obj.get("selection_root").and_then(Value::as_bool) == Some(true) { selection_root(&id, el) } else { el }];
         }
         // `hover_ms` (and ui.hover) apply hover styles from tracked state, so they can ease.
         let hover_ms = st.get("hover_ms").and_then(Value::as_u64);
@@ -386,11 +387,12 @@ impl Workspace {
                     md.get_or_insert_with(Map::new).extend(over.clone());
                 }
                 let selectable = props.get("selectable").and_then(Value::as_bool).unwrap_or(self.settings.chat.get("selectable").and_then(Value::as_bool) != Some(false));
-                vec![self.markdown_with(&mid, &text, md.as_ref(), selectable, &theme).into_any_element()]
+                let view = self.markdown_with(&mid, &text, md.as_ref(), selectable, &theme).into_any_element();
+                vec![if selectable { selection_root(&id, view) } else { view }]
             }
             "transcript" => {
                 let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
-                vec![self.transcript_view(chat, &props, window, cx)]
+                vec![selection_root(&id, self.transcript_view(chat, &props, window, cx))]
             }
             "composer" => {
                 let chat = props.get("chat").and_then(Value::as_str).map(str::to_string).or_else(|| self.current_chat().map(|c| c.id.clone()));
@@ -425,11 +427,16 @@ impl Workspace {
                     self.pending_actions.extend(queued);
                     cx.notify();
                 }
-                let term = path.and_then(|p| self.active_terminal(&p, cx));
+                // `id`: one tab's own shell (made on first show, `cwd` / `command` as given), not the active one.
+                let prop = |k: &str| props.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+                let term = path.and_then(|p| match prop("id") {
+                    Some(id) => self.terminal_tab(&p, &id, prop("cwd"), prop("command"), cx),
+                    None => self.active_terminal(&p, cx),
+                });
                 if let Some(t) = &term {
                     t.update(cx, |t, cx| t.set_overrides(&props, &theme, cx));
                 }
-                term.map(|t| div().size_full().child(t).into_any_element()).into_iter().collect()
+                term.map(|t| selection_root(&id, div().size_full().child(t).into_any_element())).into_iter().collect()
             }
             "diff" => vec![self.diff_view(&props, window, cx)],
             "attachments" => {
@@ -815,6 +822,7 @@ impl Workspace {
             }
             el.into_any_element()
         };
+        let el = if obj.get("selection_root").and_then(Value::as_bool) == Some(true) { selection_root(&id, el) } else { el };
         // A node lifted "above" (a popover's button while it's open) stays where it is: gliding it would read
         // its deferred position as a move.
         // Only what can move on its own glides (a node with an id, an item of a `for`); the rest moves with it,
@@ -969,7 +977,7 @@ impl Workspace {
             style.extend(own.clone());
         }
         let mut node = Map::new();
-        for k in ["id", "tooltip", "layer", "motion", "animate", "transition", "focusable"] {
+        for k in ["id", "tooltip", "layer", "motion", "animate", "transition", "focusable", "selection_root"] {
             if let Some(v) = obj.get(k) {
                 node.insert(k.into(), v.clone());
             }
@@ -1449,4 +1457,14 @@ mod helper_tests {
         let opts = select_options(Some(&json!(["a", {"value": 2, "label": "Two"}])));
         assert_eq!(opts, vec![(json!("a"), "a".to_string()), (json!(2), "Two".to_string())]);
     }
+}
+
+/** `el` as a selection root named by node `id`: a text selection that starts inside it stays inside it
+(gpui-base's `text_selection_root`); inspect.json names the root a selection is in by this id. */
+pub(crate) fn selection_root(id: &str, el: AnyElement) -> AnyElement {
+    let root = gpui_kit::base::TextSelectionRootId::from_key(id);
+    super::drive::ui(|u| {
+        u.selection_roots.entry(root.raw()).or_insert_with(|| id.to_string());
+    });
+    gpui_kit::base::text_selection_root(root, el).into_any_element()
 }

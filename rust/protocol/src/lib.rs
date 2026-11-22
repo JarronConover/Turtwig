@@ -56,6 +56,13 @@ pub enum Call {
     ChatSend { chat_id: String, text: String },
     /** tmux key names (`Up`, `Down`, `Enter`, `Escape`, `C-c`) for prompts and questions. */
     ChatKeys { chat_id: String, keys: Vec<String> },
+    /** An SDK chat (transport "sdk"): a control request to its `claude` process (`{subtype: "interrupt" |
+    "set_model" | "set_permission_mode" | "set_max_thinking_tokens" | …, …}`); the reply is the process's response. */
+    ChatControl { chat_id: String, request: Value },
+    /** An SDK chat's answer to what it waits on (`waiting_on.request_id`, or its current request): a permission
+    `{behavior: "allow", updatedInput?, updatedPermissions?}` or `{behavior: "deny", message}`; a question's
+    `answers` go in `updatedInput`. */
+    ChatAnswer { chat_id: String, request_id: Option<String>, response: Value },
     SectionCreate { name: String },
     SectionRename { id: String, name: String },
     SectionDelete { id: String },
@@ -258,6 +265,9 @@ pub enum Event {
     /** A Claude Code hook fired; stored in the daemon's event log as `seq`. */
     Hook(HookEvent),
     Transcript { chat_id: String, from: usize, entries: Vec<Value> },
+    /** An SDK chat's reply as it's written: the assistant message so far, shaped like a transcript entry, with
+    `live: true`; null once the turn ends. The transcript file gets the finished message a moment later. */
+    ChatLive { chat_id: String, message: Option<Value> },
     /** Terminal output, base64. */
     TermOutput { term_id: u64, data: String },
     TermExit { term_id: u64 },
@@ -438,6 +448,20 @@ pub struct Chat {
     /** Its agent shows a screen of its own (a menu like Claude Code's /artifacts) in place of its input box. */
     #[serde(default)]
     pub screen: bool,
+    /** How its agent runs: "tui" (the interactive CLI in tmux, driven by keys) or "sdk" (Claude Code's
+    stream-json mode, driven by messages and control requests). */
+    #[serde(default = "default_transport")]
+    pub transport: String,
+    /** An SDK chat's permission mode (default | acceptEdits | plan | auto | bypassPermissions). */
+    #[serde(default)]
+    pub mode: Option<String>,
+    /** An SDK chat's effort level (low | medium | high | xhigh), when set. */
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+fn default_transport() -> String {
+    "tui".into()
 }
 
 /** A working agent's status line, like Claude Code's "✻ Concocting… (4m 17s · ↓ 6.5k tokens)". */

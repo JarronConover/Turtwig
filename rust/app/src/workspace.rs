@@ -332,7 +332,7 @@ pub struct Workspace {
     /** Words "Ignore spelling" took out of the marks until Turtwig quits. */
     spell_ignored: HashSet<String>,
     pub(crate) terminals: HashMap<String, Entity<TerminalView>>,
-    term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
+    pub(crate) term_by_id: HashMap<(String, u64), Entity<TerminalView>>,
     pub(crate) expanded_tools: HashSet<String>,
     pub(crate) thumbs: crate::ui::thumbs::Thumbs,
     /** The image shown full size over the window (`image.view`): what it is (a path or chat:index) and its source. */
@@ -1017,6 +1017,7 @@ impl Workspace {
                 self.ctx_rev += 1;
                 if let Some(n) = m["name"].as_str() {
                     self.script_data.insert(n.to_string(), m["value"].clone());
+                    self.bridge_sdk_script_data();
                 }
             }
             "timer" => {
@@ -1863,6 +1864,7 @@ impl Workspace {
                     self.toast(format!("{host}: {e}"), window, cx);
                 }
                 self.merge_models();
+                self.bridge_sdk_script_data();
                 self.drop_screens(window, cx);
                 if let Some(old) = old {
                     // A chat that left this host (moved to another machine) is read from where it went now.
@@ -1929,6 +1931,12 @@ impl Workspace {
                 for message in new {
                     self.pending_events.push(("chat.message".into(), [("chat".to_string(), chat.clone()), ("message".to_string(), message)].into_iter().collect()));
                 }
+            }
+            Incoming::Event(Event::ChatLive { chat_id, message }) => {
+                let t = self.transcripts.entry(chat_id.clone()).or_insert_with(|| crate::transcript::Transcript::for_chat(&chat_id));
+                t.set_live(message.as_ref());
+                self.ctx_rev += 1;
+                cx.notify();
             }
             Incoming::Event(Event::TermOutput { term_id, data }) => {
                 if let Some(t) = self.term_by_id.get(&(host.to_string(), term_id)).cloned() {
@@ -2284,6 +2292,8 @@ impl Workspace {
             | Call::ChatArchive { chat_id }
             | Call::ChatRename { chat_id, .. }
             | Call::ChatSend { chat_id, .. }
+            | Call::ChatControl { chat_id, .. }
+            | Call::ChatAnswer { chat_id, .. }
             | Call::ChatKeys { chat_id, .. } => self.host_of_chat(chat_id),
             Call::ChatNew { dir: Some(d), .. } => self.host_of_path(d),
             Call::SectionRename { id, .. } | Call::SectionDelete { id } | Call::SectionMove { id, .. } => {
@@ -2357,24 +2367,40 @@ impl Workspace {
         if id == "1" { path.to_string() } else { format!("{path}#{id}") }
     }
 
-    /** The view for a worktree's active terminal tab, made on first show. */
+    /** The view for a worktree's active terminal tab, made on first show (the first shell only once the
+    worktree opened it). */
     pub(crate) fn active_terminal(&mut self, path: &str, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
         let id = self.term_active(path);
-        let key = Self::term_key(path, &id);
+        if id == "1" {
+            return self.terminals.get(path).cloned();
+        }
+        self.worktree(path)?;
+        self.terminal_tab(path, &id, None, None, cx)
+    }
+
+    /** The view for one terminal tab (a `terminal` node's `id`), made on first show: the tab's own command,
+    folder and machine (`terminal.new`), else `cwd` and `command` given here, else a login shell in the
+    worktree's folder (a path that is no worktree: in it, on the default host). Each id is its own shell. */
+    pub(crate) fn terminal_tab(&mut self, path: &str, id: &str, cwd: Option<String>, command: Option<String>, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
+        let key = Self::term_key(path, id);
         if let Some(t) = self.terminals.get(&key) {
             return Some(t.clone());
         }
-        let w = self.worktree(path)?.clone();
-        if !self.connected || id == "1" {
+        if !self.connected {
             return None;
         }
-        let tab = self.term_tabs(path).into_iter().find(|t| t["id"].as_str() == Some(id.as_str()))?;
-        let command = tab.get("command").and_then(Value::as_str).map(str::to_string);
-        // A tab may name its own folder and machine (`terminal.new {cwd, host}`).
-        let host = tab.get("host").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| w.host.clone());
-        let cwd = tab.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| w.path.clone());
+        let (w_host, w_path) = match self.worktree(path) {
+            Some(w) => (w.host.clone(), w.path.clone()),
+            None => (self.default_host(), path.to_string()),
+        };
+        let tab = self.term_tabs(path).into_iter().find(|t| t["id"].as_str() == Some(id));
+        let given = |k: &str| tab.as_ref().and_then(|t| t.get(k)).and_then(Value::as_str).map(str::to_string);
+        let host = given("host").unwrap_or(w_host);
+        let cwd = given("cwd").or(cwd).unwrap_or(w_path);
+        let command = given("command").or(command);
         let (remote, ts) = (self.remote_for_host(&host), self.settings.terminal.clone());
-        let view = cx.new(|cx| TerminalView::shell(remote, host, None, Some(cwd), Some(id.clone()), command, &ts, cx));
+        let name = (id != "1").then(|| id.to_string());
+        let view = cx.new(|cx| TerminalView::shell(remote, host, None, Some(cwd), name, command, &ts, cx));
         self.terminals.insert(key, view.clone());
         Some(view)
     }
@@ -5148,14 +5174,13 @@ impl Workspace {
         }
         let mut row = style::apply(h_flex().gap(px(6.)).flex_wrap(), &st("waiting_row"), theme);
         for (i, label) in options.iter().enumerate().chain(std::iter::once((usize::MAX, &cancel))) {
-            let id = chat.id.clone();
-            let keys = if i == usize::MAX { self.agent_keys(&chat.agent, "cancel_keys") } else { vec![self.answer_key(&chat.agent, i + 1)] };
             let option = if i == usize::MAX { json!("cancel") } else { json!(i) };
-            self.clickables.push((format!("opt:{}:{i}", chat.id), label.clone(), json!({"do": "chat.answer", "chat": chat.id, "option": option})));
+            let action = json!({"do": "chat.answer", "chat": chat.id, "option": option});
+            self.clickables.push((format!("opt:{}:{i}", chat.id), label.clone(), action.clone()));
             row = row.child(
                 style::apply(div().id(SharedString::from(format!("opt:{}:{i}", chat.id))).cursor_pointer(), &st("waiting_option"), theme)
                     .child(label.clone())
-                    .on_click(cx.listener(move |ws, _, _, cx| ws.call(Call::ChatKeys { chat_id: id.clone(), keys: keys.clone() }, cx))),
+                    .on_click(cx.listener(move |ws, _, window, cx| ws.run_action(&action, window, cx))),
             );
         }
         style::apply(v_flex().gap(px(10.)), &st("waiting"), theme)
@@ -5164,6 +5189,71 @@ impl Workspace {
             .children(questions.into_iter().map(|q| div().child(q)))
             .child(row)
             .into_any_element()
+    }
+
+    /** Scripts that read a chat's pane publish `.data.chat_mode`, `.data.chat_screen` and `.data.chat_menu`;
+    an SDK chat has no pane, so its own mode and state stand in (a waiting chat is at a "prompt"). */
+    pub(crate) fn bridge_sdk_script_data(&mut self) {
+        let sdk: Vec<(String, String, Option<String>)> = self.model.chats.iter().filter(|c| c.transport == "sdk").map(|c| (c.id.clone(), c.state.clone(), c.mode.clone())).collect();
+        if sdk.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for (key, value_of) in [
+            ("chat_mode", Box::new(|_: &str, mode: &Option<String>| json!(mode_name(mode.as_deref().unwrap_or("default")))) as Box<dyn Fn(&str, &Option<String>) -> Value>),
+            ("chat_screen", Box::new(|state: &str, _: &Option<String>| json!(if state == "waiting" { "prompt" } else { state }))),
+            ("chat_menu", Box::new(|_: &str, _: &Option<String>| Value::Null)),
+        ] {
+            let slot = self.script_data.entry(key.to_string()).or_insert_with(|| json!({}));
+            if !slot.is_object() {
+                *slot = json!({});
+            }
+            for (id, state, mode) in &sdk {
+                let want = value_of(state, mode);
+                if slot.get(id) != Some(&want) {
+                    slot[id] = want;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.ctx_rev += 1;
+        }
+    }
+
+    /** Answers what an SDK chat waits on: option `pick` of its question (-1: cancel), or of a permission
+    (`sdk_permission_options`: allow, always allow, deny). */
+    pub(crate) fn sdk_answer(&mut self, id: &str, w: &Value, pick: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let questions = waiting_questions(w);
+        let response = if let Some((q, labels)) = questions.first() {
+            match usize::try_from(pick).ok().and_then(|i| labels.get(i)) {
+                Some(label) => {
+                    let mut input = w["tool_input"].clone();
+                    input["answers"] = json!({ q: label });
+                    json!({ "behavior": "allow", "updatedInput": input })
+                }
+                None => json!({ "behavior": "deny", "message": self.tr("sdk_declined_question", "The user declined to answer", &[]) }),
+            }
+        } else {
+            let (options, _) = waiting_options(w, &self.settings);
+            let always = options.len() == 3;
+            match pick {
+                0 => json!({ "behavior": "allow", "updatedInput": w["tool_input"] }),
+                1 if always => json!({ "behavior": "allow", "updatedInput": w["tool_input"], "updatedPermissions": w["suggestions"] }),
+                _ => json!({ "behavior": "deny", "message": self.tr("sdk_denied", "The user declined this tool use", &[]) }),
+            }
+        };
+        let call = Call::ChatAnswer { chat_id: id.to_string(), request_id: w["request_id"].as_str().map(str::to_string), response };
+        let remote = self.route(&call);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(e) = remote.call(call).await {
+                let _ = this.update_in(cx, |ws, window, cx| {
+                    let msg = ws.tr("answer_failed", "Couldn't answer: {why}", &[("why", &e.to_string())]);
+                    ws.toast(msg, window, cx);
+                });
+            }
+        })
+        .detach();
     }
 
     /** Puts `text` back in a chat's composer, ahead of anything typed there, to change and send again. */
@@ -5954,6 +6044,9 @@ pub(crate) fn waiting_questions(w: &Value) -> Vec<(String, Vec<String>)> {
 every question when there are several (`chat.waiting_all_questions`). */
 pub(crate) fn waiting_options(w: &Value, settings: &Settings) -> (Vec<String>, Vec<String>) {
     let qs = w["tool_input"]["questions"].as_array().cloned().unwrap_or_default();
+    if w["sdk"].as_bool() == Some(true) && qs.is_empty() {
+        return (sdk_permission_options(w, settings), vec![]);
+    }
     let options = qs
         .first()
         .and_then(|q| q["options"].as_array())
@@ -5968,6 +6061,39 @@ pub(crate) fn waiting_options(w: &Value, settings: &Settings) -> (Vec<String>, V
     let all = settings.get("chat.waiting_all_questions").and_then(Value::as_bool).unwrap_or(true);
     let questions = if all && qs.len() > 1 { qs.iter().filter_map(|q| q["question"].as_str().map(str::to_string)).collect() } else { vec![] };
     (options, questions)
+}
+
+/** An SDK chat's permission choices (`chat.permission_options`: allow, always allow, deny); "always allow"
+only when Claude Code suggests a rule or mode to remember. */
+pub(crate) fn sdk_permission_options(w: &Value, settings: &Settings) -> Vec<String> {
+    let mut options: Vec<String> = settings
+        .get("chat.permission_options")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_else(|| vec!["Allow".into(), "Always allow".into(), "Deny".into()]);
+    if options.len() == 3 && w["suggestions"].as_array().is_none_or(|a| a.is_empty()) {
+        options.remove(1);
+    }
+    options
+}
+
+/** Claude Code's permission mode for a mode menu's short name (manual, edits, plan, auto), and back. */
+pub(crate) fn permission_mode(name: &str) -> String {
+    match name {
+        "manual" => "default".into(),
+        "edits" => "acceptEdits".into(),
+        "bypass" => "bypassPermissions".into(),
+        other => other.into(),
+    }
+}
+
+pub(crate) fn mode_name(mode: &str) -> String {
+    match mode {
+        "default" => "manual".into(),
+        "acceptEdits" => "edits".into(),
+        "bypassPermissions" => "bypass".into(),
+        other => other.into(),
+    }
 }
 
 /** A picture from a file (absolute, ~/, or relative to the settings folder) or a URL, fit "cover" |

@@ -63,6 +63,8 @@ pub(crate) struct Ui {
     /** Each virtual list's (bottom aligned, overdraw, follow), to rebuild it when they change. */
     pub lists: HashMap<String, (bool, u32, bool)>,
     pub fonts: HashSet<String>,
+    /** Every selection root drawn (`selection_root`, transcripts, terminals, markdown) by its id's hash. */
+    pub selection_roots: HashMap<u64, String>,
 }
 
 thread_local! {
@@ -338,7 +340,9 @@ pub(crate) fn dispatch(ws: &mut Workspace, name: &str, a: &Map<String, Value>, w
             let ms = a.get("ms").and_then(Value::as_u64).unwrap_or(1000);
             let steps = (ms * 120 / 1000).max(1);
             let wheel = a.get("wheel").and_then(Value::as_f64).map(|d| d as f32);
-            let modifiers = gpui::Modifiers::default();
+            let wheel_x = a.get("wheel_x").and_then(Value::as_f64).unwrap_or(0.) as f32;
+            let wheel = wheel.or_else(|| (wheel_x != 0.).then_some(0.));
+            let modifiers = gpui::Modifiers { shift: a.get("shift").and_then(Value::as_bool).unwrap_or(false), ..Default::default() };
             cx.spawn_in(window, async move |_, cx| {
                 for i in 0..=steps {
                     if i > 0 {
@@ -349,7 +353,7 @@ pub(crate) fn dispatch(ws: &mut Workspace, name: &str, a: &Map<String, Value>, w
                     let input = match wheel {
                         Some(dy) => gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
                             position,
-                            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-dy))),
+                            delta: gpui::ScrollDelta::Pixels(point(px(-wheel_x), px(-dy))),
                             modifiers,
                             touch_phase: gpui::TouchPhase::Moved,
                         }),
@@ -469,9 +473,17 @@ pub(crate) fn inspect(ws: &Workspace, window: &Window, cx: &App) -> Value {
         .iter()
         .map(|(id, tip, spec, ctx)| json!({"id": id, "label": tip, "items": menu_json(ws.menu_entries(spec, ctx))}))
         .collect();
+    // The text selection: whether there is one, and the root node it started in (null: none, or text
+    // outside any root).
+    let root = gpui_kit::base::TextSelection::active_root(window, cx);
+    let selection = ui(|u| json!({
+        "active": gpui_kit::base::TextSelection::has_geometry_selection(window, cx),
+        "root": root.and_then(|r| u.selection_roots.get(&r.raw()).cloned()),
+    }));
     ui(|u| {
         json!({
             "focused": u.focused_last,
+            "selection": selection,
             "hovered": u.hovered.iter().collect::<Vec<_>>(),
             "forced_hover": u.forced_hover,
             "open_menu": u.menu.as_ref().map(|m| m.id.clone()),

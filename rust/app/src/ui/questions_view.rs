@@ -74,6 +74,14 @@ impl Workspace {
         cx.notify();
         let Some(all) = entry.1.iter().copied().collect::<Option<Vec<usize>>>() else { return Ok(()) };
         self.picks.remove(id);
+        if chat.transport == "sdk" {
+            // Every answer goes back in the tool's input, by question text.
+            let mut input = w["tool_input"].clone();
+            input["answers"] = Value::Object(qs.iter().zip(&all).map(|((q, labels), i)| (q.clone(), json!(labels[*i]))).collect());
+            let response = json!({ "behavior": "allow", "updatedInput": input });
+            self.call(Call::ChatAnswer { chat_id: id.to_string(), request_id: w["request_id"].as_str().map(str::to_string), response }, cx);
+            return Ok(());
+        }
         let agents = self.settings.get("daemon.agents").cloned().unwrap_or(Value::Null);
         let keys = all.iter().map(|p| self.answer_key(&chat.agent, p + 1)).chain(crate::behavior::submit_keys(&agents, &chat.agent)).collect();
         self.press_in_turn(id, keys, cx);

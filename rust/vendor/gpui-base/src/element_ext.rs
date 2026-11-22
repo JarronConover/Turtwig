@@ -1,6 +1,6 @@
 use gpui::{App, Bounds, IntoElement, ParentElement, Pixels, Styled as _, Window, canvas};
 
-use crate::TextSelectionScopeId;
+use crate::{TextSelectionRootId, TextSelectionScopeId};
 
 /// Extends a GPUI parent element with post-layout prepaint observation.
 pub trait ElementExt: ParentElement + Sized {
@@ -10,6 +10,15 @@ pub trait ElementExt: ParentElement + Sized {
         Self: IntoElement,
     {
         crate::text_selection::text_selection_scope(scope, self)
+    }
+
+    /// Marks this element subtree as a selection root: a selection that starts
+    /// on text inside it never takes in text outside it.
+    fn text_selection_root(self, root: TextSelectionRootId) -> impl IntoElement
+    where
+        Self: IntoElement,
+    {
+        crate::text_selection::text_selection_root(root, self)
     }
 
     /// Invokes `callback` during prepaint with this element's resolved bounds.

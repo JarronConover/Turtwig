@@ -190,6 +190,8 @@ pub struct TerminalView {
     wheel_rest: f32,
     blink_task: Option<Task<()>>,
     blink_epoch: std::time::Instant,
+    /** Whether it had the typing when last drawn (inspect.json's `focused`). */
+    focused_last: Cell<bool>,
     /** The `terminal` settings, and a node's own font/padding props drawn over them (`set_overrides`). */
     base: TerminalSettings,
     overrides: Map<String, Value>,
@@ -237,6 +239,7 @@ impl TerminalView {
             wheel_rest: 0.,
             blink_task: None,
             blink_epoch: std::time::Instant::now(),
+            focused_last: Cell::new(false),
             base: ts.clone(),
             overrides: Map::new(),
         }
@@ -397,6 +400,7 @@ impl TerminalView {
             "host": self.host, "session": self.opened.clone().or(self.session.clone()), "term_id": self.term_id,
             "cwd": self.cwd, "command": self.command, "cols": self.size.0, "rows": self.size.1,
             "cursor": {"line": cursor.line.0, "column": cursor.column.0},
+            "focused": self.focused_last.get(),
             "scrolled_back": self.term.grid().display_offset(),
             "mouse_reporting": self.term.mode().intersects(TermMode::MOUSE_MODE),
             "selection": self.selection_text(),
@@ -854,6 +858,7 @@ impl Render for TerminalView {
             .unwrap_or(font_size * 0.6);
         let fg = self.fg;
         let focused = self.focus.is_focused(window);
+        self.focused_last.set(focused);
         let blink_on = self.blink(focused, cx);
         let entity = cx.entity();
         div()
@@ -1222,8 +1227,23 @@ pub(crate) fn dispatch(ws: &mut crate::workspace::Workspace, name: &str, a: &Map
     true
 }
 
-/** What inspect.json shows about this module's views: every open terminal, by view key (`PATH` or `PATH#ID`). */
+/** What inspect.json shows about this module's views: every open terminal, by view key (`PATH` for a
+worktree's first shell, `PATH#ID` for a tab or tile, `screen:CHAT` for an agent's screen), each with its
+`path` and `id`. */
 pub(crate) fn inspect(ws: &crate::workspace::Workspace, cx: &App) -> Value {
     let n = ws.settings.num("inspect.terminal_lines", 40.).max(0.) as usize;
-    Value::Object(ws.terminals.iter().map(|(k, t)| (k.clone(), t.read(cx).describe(n))).collect())
+    let entry = |k: &str, t: &Entity<TerminalView>| {
+        let mut v = t.read(cx).describe(n);
+        let (path, id) = match (k.strip_prefix("screen:"), k.split_once('#')) {
+            (Some(chat), _) => (chat.to_string(), Value::Null),
+            (None, Some((p, id))) => (p.to_string(), Value::String(id.to_string())),
+            (None, None) => (k.to_string(), Value::String("1".into())),
+        };
+        if let Value::Object(o) = &mut v {
+            o.insert("path".into(), Value::String(path));
+            o.insert("id".into(), id);
+        }
+        v
+    };
+    Value::Object(ws.terminals.iter().map(|(k, t)| (k.clone(), entry(k, t))).collect())
 }

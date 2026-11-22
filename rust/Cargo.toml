@@ -15,7 +15,9 @@ anyhow = "1"
 lto = "thin"
 codegen-units = 4
 
-# gpui-base with two textarea changes (vendor/gpui-base/PATCHES.md).
+# gpui-base with textarea and table changes (vendor/gpui-base/PATCHES.md); gpui-component with one
+# pass-through to it (vendor/gpui-component/PATCHES.md).
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
+gpui-component = { path = "vendor/gpui-component" }
 gpui-pre = { path = "vendor/gpui-pre" }
