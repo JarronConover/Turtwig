@@ -246,7 +246,7 @@ fn tile_snapshot() -> String {
             "- Agent \"{}\" ({}; {}{}) last said: {}",
             c["name"].as_str().unwrap_or("agent"),
             state,
-            c["dir"].as_str().unwrap_or("").replace("/Users/jarron.conover/", "~/"),
+            c["dir"].as_str().unwrap_or("").replace(&format!("{}/", home()), "~/"),
             c["branch"].as_str().map(|b| format!(" @ {b}")).unwrap_or_default(),
             clip(last_text(&c).trim().replace('\n', " ").as_str(), 500)
         ));
@@ -338,7 +338,7 @@ fn week_snapshot() -> String {
         lines.push(format!(
             "- Agent chat \"{}\" ({}{}; {}): {}",
             c["name"].as_str().unwrap_or("agent"),
-            c["dir"].as_str().unwrap_or("").replace("/Users/jarron.conover/", "~/"),
+            c["dir"].as_str().unwrap_or("").replace(&format!("{}/", home()), "~/"),
             c["branch"].as_str().map(|b| format!(" @ {b}")).unwrap_or_default(),
             c["age_text"].as_str().unwrap_or(""),
             clip(last_text(c).trim().replace('\n', " ").as_str(), 300)
@@ -426,6 +426,15 @@ Open tiles right now:\n{tiles}",
     ab::run(json!({ "do": "chat.send", "chat": oid, "text": text }));
 }
 
+/** The home folder (`$HOME`), or `~` for the app to expand. */
+fn home() -> String {
+    ab::call_sync("env", json!({"name": "HOME"}))
+        .ok()
+        .and_then(|v| v.as_str().or(v.get("value").and_then(|x| x.as_str())).map(|s| s.to_string()))
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "~".to_string())
+}
+
 fn init() {
     ab::action("orchestrator.morning", |_, _| morning());
     ab::action("orchestrator.week", |_, _| week_review());
@@ -459,7 +468,7 @@ fn init() {
             .as_array()
             .and_then(|w| w.iter().find(|w| w["repo"].as_str() == Some("redo") && w["is_primary"].as_bool() == Some(true)))
             .and_then(|w| w["path"].as_str().map(|s| s.to_string()))
-            .unwrap_or("/Users/jarron.conover/redo".into());
+            .unwrap_or_else(|| format!("{}/redo", home()));
         ab::run(json!({ "do": "chat.new", "dir": dir, "name": "Jarron Jr", "model": "claude-opus-5-5", "prompt": PROMPT, "select": false }));
     });
     ab::action("orchestrator.pause", |_, _| {

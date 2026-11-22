@@ -10,7 +10,7 @@ fn home() -> String {
             return h;
         }
     }
-    "/Users/jarron.conover".to_string()
+    "~".to_string()
 }
 
 fn expand(p: &str) -> String {

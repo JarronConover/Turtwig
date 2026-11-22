@@ -46,6 +46,10 @@ full at the end of this file. Change anything by overriding it in your settings 
 - The built-in defaults are read live from `default-settings.jsonc` in the source checkout when it
   exists, so editing them hot-reloads too; only changes to the app's Rust code need a restart.
 - UI state (selection, toggles, sizes) persists in `ui-state.json` next to the settings file.
+- A fresh install starts from the built-in baseline: the `user-settings/` folder of the build (settings.jsonc,
+  scripts/, ui-state.json) is seeded into this folder when a file is missing, never over one that exists.
+  `git pull` and a rebuild carry a newer baseline, but your files stay; "Reset to Turtwig baseline" (palette,
+  `settings.reset_baseline`) moves them to `settings.bak-<stamp>/` and seeds the new one.
 
 ## Top-level keys
 

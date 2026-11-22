@@ -94,6 +94,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("designer.history", "reread the designer's past conversations into `.designer.sessions` (newest first: id, title (the latest message), first, messages, age_text, current)"),
     ("designer.open", "{id}: show and continue an earlier designer conversation (one from `.designer.sessions`)"),
     ("settings.undo", "put the settings file back as it was before the last designer request (repeatable)"),
+    ("settings.reset_baseline", "move settings.jsonc, scripts/ and ui-state.json to settings.bak-<stamp>/ beside them, seed the built-in baseline (the user-settings/ of the build) again, and relaunch the app"),
     ("settings.open / settings.reload / settings.docs", "edit, reload, or read the settings reference (`views.settings` in settings draws the panel instead: `.app.settings_sheet`)"),
     ("settings.set", "{key, value} or {values: {key: value, ..}}: write values into your settings file and reload; a key is a dotted path (`daemon.state_repo_url`) or a list of keys, and the rest of the file (comments included) is left as it is"),
     ("settings.save / settings.close", "{text} / -: for a settings panel drawn by `views.settings`: write the settings file (and reload), close it"),
@@ -1193,6 +1194,16 @@ impl Workspace {
                     self.toast(t, window, cx);
                 }
             }
+            "settings.reset_baseline" => match crate::baseline::reset(&crate::settings::dir()) {
+                Ok(bak) => {
+                    self.baseline_reset = true;
+                    self.log_action(&json!({"do": "settings.reset_baseline", "backup": bak}));
+                    let restart = self.settings.get("app.restart_command").and_then(Value::as_str).unwrap_or(crate::workspace::RESTART_COMMAND).to_string();
+                    let _ = std::process::Command::new("/bin/sh").arg("-c").arg(restart).spawn();
+                    cx.quit();
+                }
+                Err(e) => self.toast(format!("Couldn't reset: {e}"), window, cx),
+            },
             "settings.open" => self.open_settings(window, cx),
             "settings.close" => {
                 self.settings_sheet = false;

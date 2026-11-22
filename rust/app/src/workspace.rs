@@ -292,6 +292,8 @@ pub struct Workspace {
     pub(crate) state: Map<String, Value>,
     /** What the user changed (persisted); `state` is the settings' starting values with this on top. */
     user_state: Map<String, Value>,
+    /** Set by "Reset to Turtwig baseline": the seeded ui-state.json must outlive this run's state. */
+    pub(crate) baseline_reset: bool,
     pub(crate) exprs: Exprs,
     pub(crate) transitions: HashMap<String, Transition>,
     pub(crate) entered: HashMap<String, (std::time::Instant, u64, Value)>,
@@ -480,7 +482,7 @@ impl Workspace {
         // of it draws it again, notified or not.
         let me = cx.entity_id();
         cx.redraw_on_update(me);
-        let fresh = !settings::path().exists();
+        let fresh = !settings::path().exists() || crate::baseline::fresh_install();
         let (settings, settings_error) = match settings::load() {
             Ok(s) => (s, None),
             Err(e) => (Settings::default(), Some(format!("{e:#}"))),
@@ -632,6 +634,7 @@ impl Workspace {
             tab_history: HashMap::new(),
             state,
             user_state,
+            baseline_reset: false,
             exprs: Exprs::default(),
             transitions: HashMap::new(),
             entered: HashMap::new(),
@@ -1810,6 +1813,9 @@ impl Workspace {
     }
 
     fn save_state(&self) {
+        if self.baseline_reset {
+            return;
+        }
         let _ = std::fs::write(settings::dir().join("ui-state.json"), serde_json::to_string_pretty(&self.user_state).unwrap_or_default());
     }
 
@@ -6162,7 +6168,7 @@ fi
 echo "updated$what""#;
 
 /** After an update rebuilt the app: start the new build (`app.restart_command`). */
-const RESTART_COMMAND: &str = "sleep 1; open \"$HOME/Applications/Turtwig.app\"";
+pub(crate) const RESTART_COMMAND: &str = "sleep 1; open \"$HOME/Applications/Turtwig.app\"";
 
 /** Refreshes Claude Code's plan-usage cache from its OAuth endpoint (the token stays in the keychain). */
 const PLAN_COMMAND: &str = r#"token=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["claudeAiOauth"]["accessToken"])' 2>/dev/null); [ -n "$token" ] && out=$(/usr/bin/curl -sS -m 10 https://api.anthropic.com/api/oauth/usage -H "Authorization: Bearer $token" -H "anthropic-beta: oauth-2025-04-20") && printf '%s' "$out" | grep -q '"limits"' && printf '%s' "$out" > "$HOME/.claude/oauth-usage-cache.json""#;

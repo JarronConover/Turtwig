@@ -1,6 +1,7 @@
 // The UI context is one large json! literal.
 #![recursion_limit = "256"]
 
+mod baseline;
 mod behavior;
 mod completions;
 mod designer;
@@ -141,6 +142,8 @@ fn main() {
     app.run(|cx: &mut App| {
         gpui_kit::init(cx);
         terminal::init(cx);
+        // A fresh install starts from the built-in baseline (settings, scripts, UI state); nothing present is touched.
+        baseline::seed_at_launch();
         // The component kit's light or dark look (the app's own colors are `theme`).
         let settings = settings::load().unwrap_or_default();
         let os = cx.window_appearance();
